@@ -1,0 +1,15 @@
+# Build output
+/sciget
+/dist/
+*.exe
+
+# Test artefacts
+*.test
+*.out
+/testdata/golden/tmp/
+
+# Editor and OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
