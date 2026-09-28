@@ -13,3 +13,8 @@
 *.swp
 .idea/
 .vscode/
+
+# Local agent instructions and settings
+/AGENTS.md
+/.agents/
+/.codex/
