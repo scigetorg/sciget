@@ -7,28 +7,29 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/spf13/cobra"
 )
 
 // version is replaced at build time with -ldflags "-X main.version=v1.2.3".
 var version = "dev"
 
-const usage = `sciget installs and runs containerised scientific software.
-
-Usage:
-  sciget <command> [arguments]
-
-Commands:
-  help        Show this help
-  version     Print the version
-`
-
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run is main without the process exit, so tests can call it.
+// run executes sciget with args and returns the exit code.
 func run(args []string, stdout, stderr io.Writer) int {
-	return exitCode(dispatch(args, stdout), stderr)
+	if args == nil {
+		args = []string{} // cobra reads os.Args when given nil
+	}
+	root := newRootCommand()
+	root.SetArgs(args)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	addCompletionCommand(root)
+	addHelpCommand(root)
+	return exitCode(root.Execute(), stderr)
 }
 
 // exitCode prints err to stderr and returns 0 on success, 2 for a usage
@@ -48,22 +49,84 @@ func exitCode(err error, stderr io.Writer) int {
 	return 1
 }
 
-// dispatch picks the command named by args[0] and runs it.
-func dispatch(args []string, stdout io.Writer) error {
-	if len(args) == 0 {
-		return usageError{"no command given"}
-	}
+// newRootCommand builds the command tree. Every command is added here.
+func newRootCommand() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "sciget",
+		Short: "Install and run containerised scientific software",
 
-	switch args[0] {
-	case "help", "-h", "--help":
-		_, err := io.WriteString(stdout, usage)
-		return err
-	case "version", "-version", "--version":
-		_, err := fmt.Fprintf(stdout, "sciget %s\n", version)
-		return err
-	default:
-		return usageError{fmt.Sprintf("unknown command %q", args[0])}
+		Version: version,
+
+		// Errors and usage are printed by exitCode, not cobra.
+		SilenceErrors: true,
+		SilenceUsage:  true,
+
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return usageError{"no command given"}
+		},
 	}
+	root.SetVersionTemplate("sciget {{.Version}}\n")
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return usageError{err.Error()}
+	})
+
+	root.AddCommand(newVersionCommand())
+	return root
+}
+
+// addCompletionCommand adds cobra's completion command, with noArgs on it and
+// its shell subcommands. It must run after SetOut, which the command captures.
+func addCompletionCommand(root *cobra.Command) {
+	root.InitDefaultCompletionCmd()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "completion" {
+			cmd.Args = noArgs
+			for _, shell := range cmd.Commands() {
+				shell.Args = noArgs
+			}
+		}
+	}
+}
+
+// addHelpCommand adds cobra's help command. For an unknown topic it prints
+// "Unknown help topic" and the usage to stderr.
+func addHelpCommand(root *cobra.Command) {
+	root.InitDefaultHelpCmd()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "help" {
+			cobraRun := cmd.Run
+			cmd.Run = func(cmd *cobra.Command, args []string) {
+				if topic, _, _ := root.Find(args); len(args) > 0 && topic == root {
+					root.InitDefaultHelpFlag() // the usage lists these flags
+					root.InitDefaultVersionFlag()
+					fmt.Fprintf(cmd.ErrOrStderr(), "Unknown help topic %#q\n%s", args, root.UsageString())
+					return
+				}
+				cobraRun(cmd, args)
+			}
+		}
+	}
+}
+
+func newVersionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the version",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "sciget %s\n", version)
+			return err
+		},
+	}
+}
+
+// noArgs rejects positional arguments with a usageError.
+func noArgs(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return usageError{fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())}
+	}
+	return nil
 }
 
 // usageError marks an invocation mistake, which exits with status 2.
