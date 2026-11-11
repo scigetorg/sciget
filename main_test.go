@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -11,10 +13,14 @@ import (
 func TestRun(t *testing.T) {
 	const helpText = "Usage:\n  sciget [flags]\n  sciget [command]\n"
 	const usageHint = "\nRun 'sciget help' for usage.\n"
+	const catalogue = `{"fsl": {"categories": ["image registration"], "apps": {
+		"fsl 6.0.3": {"version": "20200905", "exec": ""},
+		"fsleyesGUI-fsl 6.0.3": {"version": "20200905", "exec": "fsleyes"}}}}`
 
 	tests := []struct {
 		name          string
 		args          []string
+		catalogue     string // written to the cache; no file when empty
 		wantCode      int
 		wantStdout    string // exact, unless wantStdoutHas is set
 		wantStdoutHas string // checks only that stdout contains this
@@ -49,10 +55,30 @@ func TestRun(t *testing.T) {
 			wantStdoutHas: "bash completion V2 for sciget"},
 		{name: "completion takes no arguments", args: []string{"completion", "bash", "x"}, wantCode: 2,
 			wantStderr: "sciget: unknown command \"x\" for \"sciget completion bash\"" + usageHint},
+		{name: "find without a catalogue", args: []string{"find"}, wantCode: 1,
+			wantStderrHas: "sciget: no catalogue at "},
+		{name: "find", args: []string{"find", "fsl"}, catalogue: catalogue,
+			wantStdout: "fsl/6.0.3\timage registration\tyes\n"},
+		{name: "find completes tool names", args: []string{"__complete", "find", "fs"}, catalogue: catalogue,
+			wantStdout: "fsl/\n:6\n", wantStderrHas: "Completion ended with directive"},
+		{name: "find completion without a catalogue", args: []string{"__complete", "find", "fs"},
+			wantStdout: ":1\n", wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			cache := t.TempDir()
+			t.Setenv("XDG_CACHE_HOME", cache)
+			if tt.catalogue != "" {
+				path := filepath.Join(cache, "sciget", "apps.json")
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(tt.catalogue), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
 			var stdout, stderr bytes.Buffer
 			code := run(tt.args, &stdout, &stderr)
 			if code != tt.wantCode {
