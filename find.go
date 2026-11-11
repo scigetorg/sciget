@@ -3,12 +3,9 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 func newFindCommand() *cobra.Command {
@@ -62,36 +59,15 @@ func matchContainers(containers []container, words []string, all bool) []contain
 // writeContainers prints one line per container. For a terminal it adds a
 // header and aligns the columns; otherwise it writes tab-separated values.
 func writeContainers(w io.Writer, containers []container, terminal bool) error {
-	var b strings.Builder
-	if terminal {
-		b.WriteString("NAME\tCATEGORIES\tGUI\n")
-	}
+	var rows strings.Builder
 	for _, c := range containers {
 		gui := ""
 		if c.graphical {
 			gui = "yes"
 		}
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", c.name(), strings.Join(c.categories, ", "), gui)
+		fmt.Fprintf(&rows, "%s\t%s\t%s\n", c.name(), strings.Join(c.categories, ", "), gui)
 	}
-
-	if !terminal {
-		_, err := io.WriteString(w, b.String())
-		return err
-	}
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := io.WriteString(tw, b.String()); err != nil {
-		return err
-	}
-	return tw.Flush()
-}
-
-// isTerminal reports whether w is a terminal.
-func isTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	return term.IsTerminal(int(f.Fd()))
+	return writeTable(w, terminal, "NAME\tCATEGORIES\tGUI\n", rows.String())
 }
 
 // completeNames suggests container names in two stages: without a "/", tool

@@ -73,6 +73,7 @@ func newRootCommand() *cobra.Command {
 
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newFindCommand())
+	root.AddCommand(newConfigCommand())
 	return root
 }
 
@@ -128,6 +129,17 @@ func noArgs(cmd *cobra.Command, args []string) error {
 		return usageError{fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())}
 	}
 	return nil
+}
+
+// exactArgs requires exactly n positional arguments, returning a usageError
+// otherwise.
+func exactArgs(n int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) != n {
+			return usageError{fmt.Sprintf("accepts %d arg(s), received %d", n, len(args))}
+		}
+		return nil
+	}
 }
 
 // usageError marks an invocation mistake, which exits with status 2.

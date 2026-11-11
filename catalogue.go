@@ -44,13 +44,18 @@ type catalogueApp struct {
 	ShowInApplist *bool  `json:"show_in_applist"`
 }
 
-// cataloguePath returns where the downloaded catalogue is kept.
+// cataloguePath returns where the downloaded catalogue is kept: apps.json in
+// the config's cache_dir.
 func cataloguePath() (string, error) {
-	dir, err := os.UserCacheDir()
+	c, err := readConfig()
 	if err != nil {
-		return "", fmt.Errorf("finding the cache directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(dir, "sciget", "apps.json"), nil
+	dir, _, err := c.get("cache_dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "apps.json"), nil
 }
 
 // readCatalogue loads the catalogue from cataloguePath.

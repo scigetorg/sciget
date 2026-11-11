@@ -22,6 +22,9 @@ func TestRun(t *testing.T) {
 		name          string
 		args          []string
 		catalogue     string // written to the cache; no file when empty
+		config        string // written to SCIGET_CONFIG; no file when empty
+		readOnly      bool   // write config with mode 0o400
+		wantConfig    string // the config file afterwards, when set
 		wantCode      int
 		wantStdout    string // exact, unless wantStdoutHas is set
 		wantStdoutHas string // checks only that stdout contains this
@@ -68,12 +71,69 @@ func TestRun(t *testing.T) {
 			wantStdout: "fsl/\n:6\n", wantStderrHas: "Completion ended with directive"},
 		{name: "find completion without a catalogue", args: []string{"__complete", "find", "fs"},
 			wantStdout: ":1\n", wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
+		{name: "find reads cache_dir from the config", args: []string{"find"},
+			config: `{"cache_dir": "/nowhere"}`, wantCode: 1,
+			wantStderr: "sciget: no catalogue at /nowhere/apps.json\n"},
+		{name: "find with a broken config", args: []string{"find"}, catalogue: catalogue,
+			config: `{"cache-dir": "/c"}`, wantCode: 1, wantStderrHas: "sciget: reading config "},
+		{name: "find completion with a broken config", args: []string{"__complete", "find", "fs"},
+			catalogue: catalogue, config: "{", wantStdout: ":1\n",
+			wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
+		{name: "config lists", args: []string{"config"}, config: `{"cache_dir": "/c"}`,
+			wantStdout: "cache_dir\t/c\tconfig\ncatalogue_url\t" + defaultCatalogueURL + "\tdefault\n"},
+		{name: "config list", args: []string{"config", "list"}, config: `{"cache_dir": "/c"}`,
+			wantStdout: "cache_dir\t/c\tconfig\ncatalogue_url\t" + defaultCatalogueURL + "\tdefault\n"},
+		{name: "config with an unknown subcommand", args: []string{"config", "bogus"}, wantCode: 2,
+			wantStderr: "sciget: unknown command \"bogus\" for \"sciget config\"" + usageHint},
+		{name: "config get a default", args: []string{"config", "get", "catalogue_url"},
+			wantStdout: defaultCatalogueURL + "\n"},
+		{name: "config get an override", args: []string{"config", "get", "cache_dir"},
+			config: `{"cache_dir": "/c"}`, wantStdout: "/c\n"},
+		{name: "config get an unknown key", args: []string{"config", "get", "cache-dir"}, wantCode: 2,
+			wantStderr: "sciget: unknown key \"cache-dir\"; valid keys: cache_dir, catalogue_url" + usageHint},
+		{name: "config get without a key", args: []string{"config", "get"}, wantCode: 2,
+			wantStderr: "sciget: accepts 1 arg(s), received 0" + usageHint},
+		{name: "config set", args: []string{"config", "set", "cache_dir", "/c"},
+			wantConfig: "{\n  \"cache_dir\": \"/c\"\n}\n"},
+		{name: "config set keeps other keys", args: []string{"config", "set", "catalogue_url", "https://m.example/a.json"},
+			config:     `{"cache_dir": "/c"}`,
+			wantConfig: "{\n  \"cache_dir\": \"/c\",\n  \"catalogue_url\": \"https://m.example/a.json\"\n}\n"},
+		{name: "config set on a read-only file", args: []string{"config", "set", "cache_dir", "/d"},
+			config: `{"cache_dir": "/c"}`, readOnly: true, wantCode: 1,
+			wantStderrHas: "sciget: writing config: ", wantConfig: `{"cache_dir": "/c"}`},
+		{name: "config set an invalid value", args: []string{"config", "set", "catalogue_url", "example.org"},
+			wantCode: 2, wantStderr: "sciget: invalid catalogue_url: must start with https:// or http://" + usageHint},
+		{name: "config set leaves a file that is not a config", args: []string{"config", "set", "cache_dir", "/c"},
+			config: "export X=1\n", wantCode: 1, wantStderrHas: "sciget: reading config ",
+			wantConfig: "export X=1\n"},
+		{name: "config set leaves a config with an unknown key", args: []string{"config", "set", "cache_dir", "/c"},
+			config: `{"CACHE_DIR": "/x"}`, wantCode: 1,
+			wantStderrHas: `unknown key "CACHE_DIR"`, wantConfig: `{"CACHE_DIR": "/x"}`},
+		{name: "config unset", args: []string{"config", "unset", "cache_dir"},
+			config:     `{"cache_dir": "/c", "catalogue_url": "https://m.example/a.json"}`,
+			wantConfig: "{\n  \"catalogue_url\": \"https://m.example/a.json\"\n}\n"},
+		{name: "config completes keys", args: []string{"__complete", "config", "get", "c"},
+			wantStdout: "cache_dir\ncatalogue_url\n:4\n", wantStderrHas: "Completion ended with directive"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cache := t.TempDir()
 			t.Setenv("XDG_CACHE_HOME", cache)
+			configFile := filepath.Join(t.TempDir(), "config.json")
+			t.Setenv("SCIGET_CONFIG", configFile)
+			if tt.readOnly && os.Geteuid() == 0 {
+				t.Skip("root can write a read-only file")
+			}
+			if tt.config != "" {
+				mode := os.FileMode(0o600)
+				if tt.readOnly {
+					mode = 0o400
+				}
+				if err := os.WriteFile(configFile, []byte(tt.config), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tt.catalogue != "" {
 				path := filepath.Join(cache, "sciget", "apps.json")
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -104,6 +164,15 @@ func TestRun(t *testing.T) {
 				}
 			} else if got != tt.wantStderr {
 				t.Errorf("stderr = %q, want %q", got, tt.wantStderr)
+			}
+			if tt.wantConfig != "" {
+				data, err := os.ReadFile(configFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(data) != tt.wantConfig {
+					t.Errorf("config file = %q, want %q", data, tt.wantConfig)
+				}
 			}
 		})
 	}
