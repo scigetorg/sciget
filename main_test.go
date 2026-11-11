@@ -15,7 +15,8 @@ func TestRun(t *testing.T) {
 	const usageHint = "\nRun 'sciget help' for usage.\n"
 	const catalogue = `{"fsl": {"categories": ["image registration"], "apps": {
 		"fsl 6.0.3": {"version": "20200905", "exec": ""},
-		"fsleyesGUI-fsl 6.0.3": {"version": "20200905", "exec": "fsleyes"}}}}`
+		"fsleyesGUI-fsl 6.0.3": {"version": "20200905", "exec": "fsleyes"},
+		"fsl 6.0.3 arm64": {"version": "20260101", "image": "fsl_6.0.3_arm64", "show_in_applist": false}}}}`
 
 	tests := []struct {
 		name          string
@@ -59,6 +60,10 @@ func TestRun(t *testing.T) {
 			wantStderrHas: "sciget: no catalogue at "},
 		{name: "find", args: []string{"find", "fsl"}, catalogue: catalogue,
 			wantStdout: "fsl/6.0.3\timage registration\tyes\n"},
+		{name: "find --all", args: []string{"find", "--all", "fsl"}, catalogue: catalogue,
+			wantStdout: "fsl/6.0.3\timage registration\tyes\nfsl/6.0.3_arm64\timage registration\t\n"},
+		{name: "find completes versions", args: []string{"__complete", "find", "fsl/"}, catalogue: catalogue,
+			wantStdout: "fsl/6.0.3\tbuilt 20200905\n:4\n", wantStderrHas: "Completion ended with directive"},
 		{name: "find completes tool names", args: []string{"__complete", "find", "fs"}, catalogue: catalogue,
 			wantStdout: "fsl/\n:6\n", wantStderrHas: "Completion ended with directive"},
 		{name: "find completion without a catalogue", args: []string{"__complete", "find", "fs"},
