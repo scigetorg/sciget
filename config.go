@@ -116,7 +116,7 @@ func (c config) set(name, value string) error {
 	}
 	if key.path && value != "" {
 		if value, err = filepath.Abs(value); err != nil {
-			return err
+			return fmt.Errorf("making %s absolute: %w", name, err)
 		}
 	}
 	if err := key.check(value); err != nil {
