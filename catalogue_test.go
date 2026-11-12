@@ -17,9 +17,9 @@ func TestLoadCatalogue(t *testing.T) {
 		wantErr string
 	}{
 		{name: "missing file", wantErr: "no catalogue at "},
-		{name: "invalid JSON", json: "{", wantErr: "reading catalogue "},
-		{name: "null", json: "null", wantErr: " has no containers"},
-		{name: "no entries", json: `{"fsl": {"apps": {}}}`, wantErr: " has no containers"},
+		{name: "invalid JSON", json: "{", wantErr: "unexpected end of JSON input"},
+		{name: "null", json: "null", wantErr: "no containers"},
+		{name: "no entries", json: `{"fsl": {"apps": {}}}`, wantErr: "no containers"},
 		{name: "graphical entry shares the container",
 			json: `{"fsl": {"categories": ["a", "b"], "apps": {
 				"fsl 6.0.3": {"version": "20200905", "exec": ""},
@@ -60,6 +60,13 @@ func TestLoadCatalogue(t *testing.T) {
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				prefix := "reading catalogue " + path + ": "
+				if tt.json == "" {
+					prefix = "no catalogue at " + path + "; run 'sciget sync'"
+				}
+				if !strings.HasPrefix(err.Error(), prefix) {
+					t.Errorf("error = %q, want it to start with %q", err, prefix)
 				}
 				return
 			}

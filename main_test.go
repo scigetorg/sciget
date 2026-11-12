@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +26,7 @@ func TestRun(t *testing.T) {
 		args          []string
 		catalogue     string // written to the cache; no file when empty
 		config        string // written to SCIGET_CONFIG; no file when empty
+		serve         string // served by a test server that the config names as catalogue_url
 		readOnly      bool   // write config with mode 0o400
 		wantConfig    string // the config file afterwards, when set
 		wantCode      int
@@ -60,7 +64,7 @@ func TestRun(t *testing.T) {
 		{name: "completion takes no arguments", args: []string{"completion", "bash", "x"}, wantCode: 2,
 			wantStderr: "sciget: unknown command \"x\" for \"sciget completion bash\"" + usageHint},
 		{name: "find without a catalogue", args: []string{"find"}, wantCode: 1,
-			wantStderrHas: "sciget: no catalogue at "},
+			wantStderrHas: "/sciget/apps.json; run 'sciget sync'\n"},
 		{name: "find", args: []string{"find", "fsl"}, catalogue: catalogue,
 			wantStdout: "fsl/6.0.3\timage registration\tyes\n"},
 		{name: "find --all", args: []string{"find", "--all", "fsl"}, catalogue: catalogue,
@@ -73,12 +77,19 @@ func TestRun(t *testing.T) {
 			wantStdout: ":1\n", wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
 		{name: "find reads cache_dir from the config", args: []string{"find"},
 			config: `{"cache_dir": "/nowhere"}`, wantCode: 1,
-			wantStderr: "sciget: no catalogue at /nowhere/apps.json\n"},
+			wantStderr: "sciget: no catalogue at /nowhere/apps.json; run 'sciget sync'\n"},
 		{name: "find with a broken config", args: []string{"find"}, catalogue: catalogue,
 			config: `{"cache-dir": "/c"}`, wantCode: 1, wantStderrHas: "sciget: reading config "},
 		{name: "find completion with a broken config", args: []string{"__complete", "find", "fs"},
 			catalogue: catalogue, config: "{", wantStdout: ":1\n",
 			wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
+		{name: "sync", args: []string{"sync"}, serve: catalogue, wantStdout: "Updated catalogue.\n"},
+		{name: "sync when up to date", args: []string{"sync"}, serve: catalogue, catalogue: catalogue,
+			wantStdout: "Already up-to-date.\n"},
+		{name: "sync takes no arguments", args: []string{"sync", "x"}, wantCode: 2,
+			wantStderr: "sciget: unknown command \"x\" for \"sciget sync\"" + usageHint},
+		{name: "sync with a broken config", args: []string{"sync"}, config: `{"bogus": "x"}`, wantCode: 1,
+			wantStderrHas: `unknown key "bogus"`},
 		{name: "config lists", args: []string{"config"}, config: `{"cache_dir": "/c"}`,
 			wantStdout: "cache_dir\t/c\tconfig\ncatalogue_url\t" + defaultCatalogueURL + "\tdefault\n"},
 		{name: "config list", args: []string{"config", "list"}, config: `{"cache_dir": "/c"}`,
@@ -122,6 +133,13 @@ func TestRun(t *testing.T) {
 			t.Setenv("XDG_CACHE_HOME", cache)
 			configFile := filepath.Join(t.TempDir(), "config.json")
 			t.Setenv("SCIGET_CONFIG", configFile)
+			if tt.serve != "" {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					io.WriteString(w, tt.serve)
+				}))
+				defer srv.Close()
+				tt.config = fmt.Sprintf(`{"catalogue_url": %q}`, srv.URL)
+			}
 			if tt.readOnly && os.Geteuid() == 0 {
 				t.Skip("root can write a read-only file")
 			}

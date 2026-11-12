@@ -72,14 +72,24 @@ func readCatalogue() ([]container, error) {
 func loadCatalogue(path string) ([]container, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("no catalogue at %s", path)
+		return nil, fmt.Errorf("no catalogue at %s; run 'sciget sync'", path)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogue: %w", err)
 	}
+	containers, err := parseCatalogue(data)
+	if err != nil {
+		return nil, fmt.Errorf("reading catalogue %s: %w", path, err)
+	}
+	return containers, nil
+}
+
+// parseCatalogue returns the containers in data, the JSON of apps.json,
+// sorted by tool and then by release.
+func parseCatalogue(data []byte) ([]container, error) {
 	var tools map[string]catalogueTool
 	if err := json.Unmarshal(data, &tools); err != nil {
-		return nil, fmt.Errorf("reading catalogue %s: %w", path, err)
+		return nil, err
 	}
 
 	byName := map[string]*container{}
@@ -116,7 +126,7 @@ func loadCatalogue(path string) ([]container, error) {
 		}
 	}
 	if len(byName) == 0 {
-		return nil, fmt.Errorf("catalogue %s has no containers", path)
+		return nil, errors.New("no containers")
 	}
 
 	containers := make([]container, 0, len(byName))

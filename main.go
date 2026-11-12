@@ -74,6 +74,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newFindCommand())
 	root.AddCommand(newConfigCommand())
+	root.AddCommand(newSyncCommand())
 	return root
 }
 
