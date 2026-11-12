@@ -9,12 +9,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// testContainers is a small catalogue, sorted as loadCatalogue sorts.
+// testContainers is a small catalogue, sorted as readContainers sorts.
 var testContainers = []container{
-	{tool: "afni", version: "21.2.00", buildDate: "20210714", categories: []string{"functional imaging"}},
-	{tool: "freesurfer", version: "7.4.1", buildDate: "20230101"},
+	{tool: "afni", version: "21.2.00", buildDate: "20210714", categories: []string{"functional imaging"},
+		catalogue: "neuro"},
+	{tool: "freesurfer", version: "7.4.1", buildDate: "20230101", catalogue: "neuro"},
 	{tool: "fsl", version: "6.0.3", buildDate: "20200905", graphical: true,
-		categories: []string{"image registration", "functional imaging"}},
+		categories: []string{"image registration", "functional imaging"}, catalogue: "neuro"},
+	{tool: "fsl", version: "6.0.3", buildDate: "20240101", catalogue: "mylab", shadowed: true},
 	{tool: "fsl", version: "6.0.4", buildDate: "20210105", graphical: true},
 	{tool: "fsl", version: "6.0.4_arm64", buildDate: "20260101", hidden: true},
 }
@@ -26,8 +28,8 @@ func TestMatchContainers(t *testing.T) {
 		all   bool
 		want  []string
 	}{
-		{name: "no words", want: []string{"afni/21.2.00", "freesurfer/7.4.1", "fsl/6.0.3", "fsl/6.0.4"}},
-		{name: "one word", words: []string{"fsl"}, want: []string{"fsl/6.0.3", "fsl/6.0.4"}},
+		{name: "no words", want: []string{"afni/21.2.00", "freesurfer/7.4.1", "fsl/6.0.3", "fsl/6.0.3", "fsl/6.0.4"}},
+		{name: "one word", words: []string{"fsl"}, want: []string{"fsl/6.0.3", "fsl/6.0.3", "fsl/6.0.4"}},
 		{name: "every word must match, ignoring case", words: []string{"FSL", "6.0.4"},
 			want: []string{"fsl/6.0.4"}},
 		{name: "hidden with --all", words: []string{"fsl/6.0.4"}, all: true,
@@ -49,21 +51,23 @@ func TestMatchContainers(t *testing.T) {
 }
 
 func TestWriteContainers(t *testing.T) {
-	rows := testContainers[:3]
+	rows := testContainers[:4]
 	tests := []struct {
 		name     string
 		terminal bool
 		want     string
 	}{
 		{name: "tab-separated when piped",
-			want: "afni/21.2.00\tfunctional imaging\t\n" +
-				"freesurfer/7.4.1\t\t\n" +
-				"fsl/6.0.3\timage registration, functional imaging\tyes\n"},
+			want: "afni/21.2.00\tneuro\tfunctional imaging\t\t\n" +
+				"freesurfer/7.4.1\tneuro\t\t\t\n" +
+				"fsl/6.0.3\tneuro\timage registration, functional imaging\tyes\t\n" +
+				"fsl/6.0.3\tmylab\t\t\t(shadowed)\n"},
 		{name: "aligned with a header on a terminal", terminal: true,
-			want: fmt.Sprintf("%-18s%-40s%s\n", "NAME", "CATEGORIES", "GUI") +
-				fmt.Sprintf("%-18s%-40s%s\n", "afni/21.2.00", "functional imaging", "") +
-				fmt.Sprintf("%-18s%-40s%s\n", "freesurfer/7.4.1", "", "") +
-				fmt.Sprintf("%-18s%-40s%s\n", "fsl/6.0.3", "image registration, functional imaging", "yes")},
+			want: fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "NAME", "CATALOGUE", "CATEGORIES", "GUI", "NOTE") +
+				fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "afni/21.2.00", "neuro", "functional imaging", "", "") +
+				fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "freesurfer/7.4.1", "neuro", "", "", "") +
+				fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "fsl/6.0.3", "neuro", "image registration, functional imaging", "yes", "") +
+				fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "fsl/6.0.3", "mylab", "", "", "(shadowed)")},
 	}
 
 	for _, tt := range tests {
@@ -82,8 +86,14 @@ func TestWriteContainers(t *testing.T) {
 func TestCompleteNames(t *testing.T) {
 	const toolDirective = cobra.ShellCompDirectiveNoSpace | cobra.ShellCompDirectiveNoFileComp
 
+	// A hidden container in the first catalogue shadows a visible copy.
+	hiddenWinner := []container{
+		{tool: "x", version: "1", buildDate: "1", catalogue: "a", hidden: true},
+		{tool: "x", version: "1", buildDate: "2", catalogue: "b", shadowed: true},
+	}
 	tests := []struct {
 		name          string
+		containers    []container // testContainers when nil
 		toComplete    string
 		all           bool
 		want          []string
@@ -102,11 +112,21 @@ func TestCompleteNames(t *testing.T) {
 		{name: "versions by prefix", toComplete: "fsl/6.0.4", want: []string{"fsl/6.0.4\tbuilt 20210105"},
 			wantDirective: cobra.ShellCompDirectiveNoFileComp},
 		{name: "no match", toComplete: "spm", wantDirective: toolDirective},
+		{name: "hidden winner hides its shadowed copy", containers: hiddenWinner, toComplete: "x/",
+			wantDirective: cobra.ShellCompDirectiveNoFileComp},
+		{name: "hidden winner with --all", containers: hiddenWinner, toComplete: "x/", all: true,
+			want: []string{"x/1\tbuilt 1"}, wantDirective: cobra.ShellCompDirectiveNoFileComp},
+		{name: "hidden winner's tool", containers: hiddenWinner, toComplete: "x", all: true,
+			want: []string{"x/"}, wantDirective: toolDirective},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, directive := completeNames(testContainers, tt.toComplete, tt.all)
+			containers := tt.containers
+			if containers == nil {
+				containers = testContainers
+			}
+			got, directive := completeNames(containers, tt.toComplete, tt.all)
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("suggestions = %q, want %q", got, tt.want)
 			}

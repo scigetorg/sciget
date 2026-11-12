@@ -7,16 +7,11 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 )
-
-// defaultCatalogueURL is where the catalogue is downloaded from unless the
-// config sets catalogue_url.
-const defaultCatalogueURL = "https://apps-json.neurodesk.workers.dev/neuroimaging/apps.json"
 
 // configKey is one setting the config file may hold.
 type configKey struct {
@@ -29,8 +24,6 @@ type configKey struct {
 // configKeys lists every setting, in the order config list shows them.
 var configKeys = []configKey{
 	{name: "cache_dir", defaultValue: defaultCacheDir, check: checkAbsolute, path: true},
-	{name: "catalogue_url", defaultValue: func() (string, error) { return defaultCatalogueURL, nil },
-		check: checkURL},
 }
 
 // config is a loaded config file: its path and the keys it sets. Keys it
@@ -205,17 +198,6 @@ func defaultCacheDir() (string, error) {
 func checkAbsolute(value string) error {
 	if !filepath.IsAbs(value) {
 		return errors.New("must be an absolute path")
-	}
-	return nil
-}
-
-func checkURL(value string) error {
-	u, err := url.Parse(value)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
-		return errors.New("must start with https:// or http://")
-	}
-	if u.Hostname() == "" {
-		return errors.New("must name a host")
 	}
 	return nil
 }

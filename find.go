@@ -12,9 +12,9 @@ func newFindCommand() *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
 		Use:   "find [words...]",
-		Short: "List the containers in the catalogue",
+		Short: "List the containers in the catalogues in use",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			containers, err := readCatalogue()
+			containers, err := readContainers()
 			if err != nil {
 				return err
 			}
@@ -22,7 +22,7 @@ func newFindCommand() *cobra.Command {
 			return writeContainers(out, matchContainers(containers, args, all), isTerminal(out))
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			containers, err := readCatalogue()
+			containers, err := readContainers()
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveError
 			}
@@ -56,8 +56,9 @@ func matchContainers(containers []container, words []string, all bool) []contain
 	return found
 }
 
-// writeContainers prints one line per container. For a terminal it adds a
-// header and aligns the columns; otherwise it writes tab-separated values.
+// writeContainers prints one line per container, noting those that are
+// shadowed. For a terminal it adds a header and aligns the columns; otherwise
+// it writes tab-separated values.
 func writeContainers(w io.Writer, containers []container, terminal bool) error {
 	var rows strings.Builder
 	for _, c := range containers {
@@ -65,19 +66,25 @@ func writeContainers(w io.Writer, containers []container, terminal bool) error {
 		if c.graphical {
 			gui = "yes"
 		}
-		fmt.Fprintf(&rows, "%s\t%s\t%s\n", c.name(), strings.Join(c.categories, ", "), gui)
+		note := ""
+		if c.shadowed {
+			note = "(shadowed)"
+		}
+		fmt.Fprintf(&rows, "%s\t%s\t%s\t%s\t%s\n",
+			c.name(), c.catalogue, strings.Join(c.categories, ", "), gui, note)
 	}
-	return writeTable(w, terminal, "NAME\tCATEGORIES\tGUI\n", rows.String())
+	return writeTable(w, terminal, "NAME\tCATALOGUE\tCATEGORIES\tGUI\tNOTE\n", rows.String())
 }
 
 // completeNames suggests container names in two stages: without a "/", tool
 // names ending in "/"; with one, that tool's names, each described by its
-// build date. Hidden containers are suggested only if all is set.
+// build date. Shadowed containers are never suggested, and hidden ones only
+// if all is set.
 func completeNames(containers []container, toComplete string, all bool) ([]string, cobra.ShellCompDirective) {
 	tool, _, hasSlash := strings.Cut(toComplete, "/")
 	var suggestions []string
 	for _, c := range containers {
-		if c.hidden && !all {
+		if c.shadowed || c.hidden && !all {
 			continue
 		}
 		switch {

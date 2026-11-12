@@ -14,12 +14,23 @@ go build
 go test ./...
 ```
 
+## First run
+
+sciget starts with no catalogues. Add one, then download it:
+
+```sh
+sciget catalogue add neuroimaging https://apps-json.neurodesk.workers.dev/neuroimaging/apps.json
+sciget refresh
+sciget find fsl
+```
+
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `sciget refresh` | Download the latest catalogue |
-| `sciget find [words...]` | List the containers in the catalogue (`--all` includes hidden ones) |
+| `sciget catalogue [add\|remove\|use\|unuse\|list]` | Manage catalogues; of those in use, the first listing a name wins |
+| `sciget refresh` | Download the latest catalogues in use |
+| `sciget find [words...]` | List the containers in the catalogues in use (`--all` includes hidden ones) |
 | `sciget config [get\|set\|unset\|list]` | Show and change settings |
 | `sciget completion <shell>` | Print a shell completion script |
 | `sciget version` | Print the version |

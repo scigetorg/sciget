@@ -20,6 +20,7 @@ func TestRefreshCatalogue(t *testing.T) {
 		existing    string // apps.json before the refresh; no file when empty
 		incomplete  string // apps.json.incomplete before the refresh; no file when empty
 		blocked     bool   // apps.json.incomplete is a directory, so the write fails
+		urlBlocked  bool   // url is a directory, so writing it fails
 		status      int    // the server's status; 200 when zero
 		body        string
 		gzip        bool // the server compresses the body
@@ -31,7 +32,7 @@ func TestRefreshCatalogue(t *testing.T) {
 		wantErr     string
 	}{
 		{name: "first refresh", body: catalogue, wantChanged: true, want: catalogue},
-		{name: "same catalogue", existing: catalogue, body: catalogue, want: catalogue},
+		{name: "same catalogue, so only url is written", existing: catalogue, body: catalogue, want: catalogue},
 		{name: "different catalogue", existing: catalogue, body: other, wantChanged: true, want: other},
 		{name: "damaged local copy is replaced", existing: "{}", body: catalogue, wantChanged: true,
 			want: catalogue},
@@ -49,6 +50,8 @@ func TestRefreshCatalogue(t *testing.T) {
 		{name: "no containers", existing: catalogue, body: "{}", want: catalogue,
 			wantErr: "downloaded catalogue is invalid: no containers"},
 		{name: "write fails", existing: catalogue, body: other, blocked: true, want: catalogue,
+			wantErr: "writing catalogue: "},
+		{name: "url write fails", existing: catalogue, body: other, urlBlocked: true, want: catalogue,
 			wantErr: "writing catalogue: "},
 		{name: "larger than the cap", existing: catalogue, large: true, want: catalogue,
 			wantErr: "is larger than 64 MB"},
@@ -106,6 +109,12 @@ func TestRefreshCatalogue(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			urlPath := filepath.Join(dir, "url")
+			if tt.urlBlocked {
+				if err := os.Mkdir(urlPath, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			catalogueURL := srv.URL + "/apps.json"
 			changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir)
@@ -121,6 +130,17 @@ func TestRefreshCatalogue(t *testing.T) {
 			}
 			if changed != tt.wantChanged {
 				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
+			}
+			// url is written once the download validates, before apps.json.
+			urlData, urlErr := os.ReadFile(urlPath)
+			switch {
+			case tt.urlBlocked:
+			case tt.wantErr == "" || tt.blocked:
+				if string(urlData) != catalogueURL+"\n" {
+					t.Errorf("url = %q, %v, want %q", urlData, urlErr, catalogueURL+"\n")
+				}
+			case !errors.Is(urlErr, os.ErrNotExist):
+				t.Errorf("url written after a failed download: %q, %v", urlData, urlErr)
 			}
 
 			data, err := os.ReadFile(path)

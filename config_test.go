@@ -21,27 +21,22 @@ func TestLoadConfig(t *testing.T) {
 	}{
 		{name: "missing file", want: map[string]string{}},
 		{name: "empty object", json: "{}", want: map[string]string{}},
-		{name: "overrides", json: `{"cache_dir": "/c", "catalogue_url": "http://m.example/a.json"}`,
-			want: map[string]string{"cache_dir": "/c", "catalogue_url": "http://m.example/a.json"}},
+		{name: "overrides", json: `{"cache_dir": "/c"}`, want: map[string]string{"cache_dir": "/c"}},
 		{name: "path is a directory", dir: true, wantErr: "reading config: "},
 		{name: "invalid JSON", json: "{", wantErr: "unexpected end of JSON input"},
 		{name: "anything after the object", json: "{}{}", wantErr: "invalid character '{' after top-level value"},
 		{name: "top-level null", json: "null", wantErr: "not a JSON object"},
 		{name: "array", json: "[]", wantErr: "cannot unmarshal array"},
 		{name: "unknown key", json: `{"instal_dir": "/i"}`,
-			wantErr: `unknown key "instal_dir"; valid keys: cache_dir, catalogue_url`},
+			wantErr: `unknown key "instal_dir"; valid keys: cache_dir`},
+		{name: "removed key", json: `{"catalogue_url": "https://m.example/a.json"}`,
+			wantErr: `unknown key "catalogue_url"`},
 		{name: "keys match exactly", json: `{"CACHE_DIR": "/c"}`, wantErr: `unknown key "CACHE_DIR"`},
 		{name: "kebab-case", json: `{"cache-dir": "/c"}`, wantErr: `unknown key "cache-dir"`},
 		{name: "empty value", json: `{"cache_dir": ""}`, wantErr: "invalid cache_dir: must be an absolute path"},
 		{name: "null value", json: `{"cache_dir": null}`, wantErr: "invalid cache_dir: must be an absolute path"},
 		{name: "number value", json: `{"cache_dir": 5}`, wantErr: "cannot unmarshal number"},
 		{name: "relative path", json: `{"cache_dir": "cache"}`, wantErr: "invalid cache_dir: must be an absolute path"},
-		{name: "URL without a scheme", json: `{"catalogue_url": "m.example/a.json"}`,
-			wantErr: "invalid catalogue_url: must start with https:// or http://"},
-		{name: "URL without a host", json: `{"catalogue_url": "https:///a.json"}`,
-			wantErr: "invalid catalogue_url: must name a host"},
-		{name: "URL with a port but no host", json: `{"catalogue_url": "http://:80/a.json"}`,
-			wantErr: "invalid catalogue_url: must name a host"},
 	}
 
 	for _, tt := range tests {
@@ -118,21 +113,23 @@ func TestConfigGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := config{overrides: map[string]string{"catalogue_url": "https://m.example/a.json"}}
 	tests := []struct {
 		name       string
+		overrides  map[string]string
 		key        string
 		wantValue  string
 		wantSource string
 		wantErr    string
 	}{
 		{name: "default", key: "cache_dir", wantValue: filepath.Join(cache, "sciget"), wantSource: "default"},
-		{name: "override", key: "catalogue_url", wantValue: "https://m.example/a.json", wantSource: "config"},
+		{name: "override", overrides: map[string]string{"cache_dir": "/c"}, key: "cache_dir",
+			wantValue: "/c", wantSource: "config"},
 		{name: "unknown key", key: "cache-dir", wantErr: `unknown key "cache-dir"`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := config{overrides: tt.overrides}
 			value, source, err := c.get(tt.key)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
@@ -161,14 +158,11 @@ func TestConfigSet(t *testing.T) {
 		wantUsageErr string
 	}{
 		{name: "new file", key: "cache_dir", value: "/c", want: "{\n  \"cache_dir\": \"/c\"\n}\n"},
-		{name: "keeps other keys", overrides: map[string]string{"cache_dir": "/c"},
-			key: "catalogue_url", value: "https://m.example/a.json",
-			want: "{\n  \"cache_dir\": \"/c\",\n  \"catalogue_url\": \"https://m.example/a.json\"\n}\n"},
+		{name: "replaces the value", overrides: map[string]string{"cache_dir": "/c"},
+			key: "cache_dir", value: "/d", want: "{\n  \"cache_dir\": \"/d\"\n}\n"},
 		{name: "relative path made absolute", key: "cache_dir", value: "cache",
 			want: fmt.Sprintf("{\n  \"cache_dir\": %q\n}\n", filepath.Join(cwd, "cache"))},
 		{name: "empty value", key: "cache_dir", wantUsageErr: "invalid cache_dir: must be an absolute path"},
-		{name: "invalid URL", key: "catalogue_url", value: "ftp://m.example/a.json",
-			wantUsageErr: "invalid catalogue_url: must start with https:// or http://"},
 		{name: "unknown key", key: "CACHE_DIR", value: "/c", wantUsageErr: `unknown key "CACHE_DIR"`},
 	}
 
@@ -211,8 +205,6 @@ func TestConfigUnset(t *testing.T) {
 		want         string
 		wantUsageErr string
 	}{
-		{name: "keeps other keys", overrides: map[string]string{"cache_dir": "/c", "catalogue_url": "https://m.example/a.json"},
-			key: "cache_dir", want: "{\n  \"catalogue_url\": \"https://m.example/a.json\"\n}\n"},
 		{name: "last key", overrides: map[string]string{"cache_dir": "/c"}, key: "cache_dir", want: "{}\n"},
 		{name: "not set, so nothing is written", key: "cache_dir", want: content},
 		{name: "unknown key", key: "cache-dir", want: content, wantUsageErr: `unknown key "cache-dir"`},
@@ -325,24 +317,24 @@ func TestWriteConfigList(t *testing.T) {
 		t.Fatal(err)
 	}
 	cacheDir := filepath.Join(cache, "sciget")
-	const url = "https://m.example/a.json"
-	width := max(len(cacheDir), len(url)) + 2
-	c := config{overrides: map[string]string{"catalogue_url": url}}
+	width := len(cacheDir) + 2
 	tests := []struct {
-		name     string
-		terminal bool
-		want     string
+		name      string
+		overrides map[string]string
+		terminal  bool
+		want      string
 	}{
-		{name: "tab-separated when piped",
-			want: "cache_dir\t" + cacheDir + "\tdefault\ncatalogue_url\t" + url + "\tconfig\n"},
+		{name: "tab-separated when piped", want: "cache_dir\t" + cacheDir + "\tdefault\n"},
+		{name: "from the config", overrides: map[string]string{"cache_dir": "/c"},
+			want: "cache_dir\t/c\tconfig\n"},
 		{name: "aligned with a header on a terminal", terminal: true,
-			want: fmt.Sprintf("%-15s%-*s%s\n", "KEY", width, "VALUE", "SOURCE") +
-				fmt.Sprintf("%-15s%-*s%s\n", "cache_dir", width, cacheDir, "default") +
-				fmt.Sprintf("%-15s%-*s%s\n", "catalogue_url", width, url, "config")},
+			want: fmt.Sprintf("%-11s%-*s%s\n", "KEY", width, "VALUE", "SOURCE") +
+				fmt.Sprintf("%-11s%-*s%s\n", "cache_dir", width, cacheDir, "default")},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := config{overrides: tt.overrides}
 			var out bytes.Buffer
 			if err := writeConfigList(&out, c, tt.terminal); err != nil {
 				t.Fatal(err)

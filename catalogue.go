@@ -20,8 +20,10 @@ type container struct {
 	image      string // "fsl_6.0.3"
 	buildDate  string // "20200905"
 	categories []string
-	graphical  bool // some entry has a graphical command
-	hidden     bool // every entry is hidden
+	graphical  bool   // some entry has a graphical command
+	hidden     bool   // every entry is hidden
+	catalogue  string // the name of the catalogue it comes from
+	shadowed   bool   // an earlier catalogue in use has the same name
 }
 
 // name returns the name users type: "fsl/6.0.3".
@@ -46,27 +48,31 @@ type catalogueApp struct {
 	ShowInApplist *bool  `json:"show_in_applist"`
 }
 
-// cataloguePath returns where the downloaded catalogue is kept: apps.json in
-// the config's cache_dir.
-func cataloguePath() (string, error) {
-	c, err := readConfig()
-	if err != nil {
-		return "", err
-	}
-	dir, _, err := c.get("cache_dir")
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "apps.json"), nil
-}
-
-// readCatalogue loads the catalogue from cataloguePath.
-func readCatalogue() ([]container, error) {
-	path, err := cataloguePath()
+// readContainers returns the containers of every catalogue in use, sorted by
+// tool, then version, then catalogue order. A container whose name an
+// earlier catalogue also has is marked shadowed.
+func readContainers() ([]container, error) {
+	cacheDir, used, err := usedCatalogues()
 	if err != nil {
 		return nil, err
 	}
-	return loadCatalogue(path)
+	var all []container
+	seen := map[string]bool{}
+	for _, cat := range used {
+		containers, err := loadCatalogue(filepath.Join(cat.dir(cacheDir), "apps.json"))
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range containers {
+			c.catalogue = cat.Name
+			c.shadowed = seen[c.name()]
+			seen[c.name()] = true
+			all = append(all, c)
+		}
+	}
+	// A stable sort keeps copies of a name in catalogue order.
+	slices.SortStableFunc(all, compareContainers)
+	return all, nil
 }
 
 // loadCatalogue reads apps.json at path and returns its containers, sorted by
@@ -144,13 +150,16 @@ func parseCatalogue(data []byte) ([]container, error) {
 	for _, c := range byName {
 		containers = append(containers, *c)
 	}
-	slices.SortFunc(containers, func(a, b container) int {
-		if n := strings.Compare(a.tool, b.tool); n != 0 {
-			return n
-		}
-		return compareVersions(a.version, b.version)
-	})
+	slices.SortFunc(containers, compareContainers)
 	return containers, nil
+}
+
+// compareContainers orders containers by tool, then by version.
+func compareContainers(a, b container) int {
+	if n := strings.Compare(a.tool, b.tool); n != 0 {
+		return n
+	}
+	return compareVersions(a.version, b.version)
 }
 
 // compareVersions compares two versions, treating runs of digits as numbers so
