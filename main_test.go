@@ -248,6 +248,10 @@ func TestExitCode(t *testing.T) {
 			wantStderr: "sciget: x: y\nRun 'sciget help' for usage.\n"},
 		{name: "ordinary error", err: errors.New("download failed"), wantCode: 1,
 			wantStderr: "sciget: download failed\n"},
+		{name: "joined errors, one per line", err: errors.Join(errors.New("a failed"), errors.New("b failed")),
+			wantCode: 1, wantStderr: "sciget: a failed\nsciget: b failed\n"},
+		{name: "two-line usage error", err: usageError{"a\nb"}, wantCode: 2,
+			wantStderr: "sciget: a\nsciget: b\nRun 'sciget help' for usage.\n"},
 	}
 
 	for _, tt := range tests {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -39,13 +40,15 @@ func exitCode(err error, stderr io.Writer) int {
 		return 0
 	}
 
+	// A joined error has one failure per line; each gets the prefix.
+	message := strings.ReplaceAll(err.Error(), "\n", "\nsciget: ")
 	var usageErr usageError
 	if errors.As(err, &usageErr) {
-		fmt.Fprintf(stderr, "sciget: %s\nRun 'sciget help' for usage.\n", err)
+		fmt.Fprintf(stderr, "sciget: %s\nRun 'sciget help' for usage.\n", message)
 		return 2
 	}
 
-	fmt.Fprintf(stderr, "sciget: %s\n", err)
+	fmt.Fprintf(stderr, "sciget: %s\n", message)
 	return 1
 }
 
