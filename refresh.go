@@ -63,8 +63,12 @@ func refreshCatalogue(client *http.Client, catalogueURL, dir string) (bool, erro
 	return true, nil
 }
 
+// maxCatalogueSize bounds a downloaded catalogue, so a catalogue_url that
+// names some other, larger file fails before it fills memory.
+const maxCatalogueSize = 64 << 20
+
 // downloadCatalogue returns the body of a GET of catalogueURL, which must
-// answer 200.
+// answer 200 with at most maxCatalogueSize bytes.
 func downloadCatalogue(client *http.Client, catalogueURL string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, catalogueURL, nil)
 	if err != nil {
@@ -79,15 +83,19 @@ func downloadCatalogue(client *http.Client, catalogueURL string) ([]byte, error)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("downloading catalogue: %s returned %s", catalogueURL, resp.Status)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogueSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("downloading catalogue: %w", err)
+	}
+	if len(data) > maxCatalogueSize {
+		return nil, fmt.Errorf("downloading catalogue: %s is larger than %d MB",
+			catalogueURL, maxCatalogueSize>>20)
 	}
 	return data, nil
 }
 
 // writeCatalogue writes data to path.incomplete and renames it to path, so
-// the file at path is always a whole catalogue.
+// readers see the old file or the new one, never a partial write in progress.
 func writeCatalogue(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

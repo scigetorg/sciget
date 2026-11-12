@@ -24,6 +24,7 @@ func TestRefreshCatalogue(t *testing.T) {
 		body        string
 		gzip        bool // the server compresses the body
 		short       bool // the server promises more bytes than it sends
+		large       bool // the server sends one byte more than maxCatalogueSize
 		closed      bool // the server is gone before the request
 		wantChanged bool
 		want        string // apps.json afterwards
@@ -49,6 +50,8 @@ func TestRefreshCatalogue(t *testing.T) {
 			wantErr: "downloaded catalogue is invalid: no containers"},
 		{name: "write fails", existing: catalogue, body: other, blocked: true, want: catalogue,
 			wantErr: "writing catalogue: "},
+		{name: "larger than the cap", existing: catalogue, large: true, want: catalogue,
+			wantErr: "is larger than 64 MB"},
 		{name: "body cut short", existing: catalogue, body: catalogue, short: true, want: catalogue,
 			wantErr: "downloading catalogue: unexpected EOF"},
 		{name: "server gone", existing: catalogue, closed: true, want: catalogue,
@@ -68,6 +71,8 @@ func TestRefreshCatalogue(t *testing.T) {
 					zw := gzip.NewWriter(w)
 					zw.Write([]byte(tt.body))
 					zw.Close()
+				case tt.large:
+					w.Write(make([]byte, maxCatalogueSize+1))
 				case tt.short:
 					w.Header().Set("Content-Length", "1000")
 					w.Write([]byte(tt.body))
