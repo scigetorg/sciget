@@ -26,7 +26,7 @@ func newFindCommand() *cobra.Command {
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveError
 			}
-			return completeNames(containers, toComplete)
+			return completeNames(containers, toComplete, all)
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "include hidden containers")
@@ -72,12 +72,12 @@ func writeContainers(w io.Writer, containers []container, terminal bool) error {
 
 // completeNames suggests container names in two stages: without a "/", tool
 // names ending in "/"; with one, that tool's names, each described by its
-// build date. Hidden containers are not suggested.
-func completeNames(containers []container, toComplete string) ([]string, cobra.ShellCompDirective) {
+// build date. Hidden containers are suggested only if all is set.
+func completeNames(containers []container, toComplete string, all bool) ([]string, cobra.ShellCompDirective) {
 	tool, _, hasSlash := strings.Cut(toComplete, "/")
 	var suggestions []string
 	for _, c := range containers {
-		if c.hidden {
+		if c.hidden && !all {
 			continue
 		}
 		switch {

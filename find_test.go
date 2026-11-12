@@ -85,6 +85,7 @@ func TestCompleteNames(t *testing.T) {
 	tests := []struct {
 		name          string
 		toComplete    string
+		all           bool
 		want          []string
 		wantDirective cobra.ShellCompDirective
 	}{
@@ -94,6 +95,10 @@ func TestCompleteNames(t *testing.T) {
 		{name: "versions of a tool, hidden left out", toComplete: "fsl/",
 			want:          []string{"fsl/6.0.3\tbuilt 20200905", "fsl/6.0.4\tbuilt 20210105"},
 			wantDirective: cobra.ShellCompDirectiveNoFileComp},
+		{name: "hidden with --all", toComplete: "fsl/", all: true,
+			want: []string{"fsl/6.0.3\tbuilt 20200905", "fsl/6.0.4\tbuilt 20210105",
+				"fsl/6.0.4_arm64\tbuilt 20260101"},
+			wantDirective: cobra.ShellCompDirectiveNoFileComp},
 		{name: "versions by prefix", toComplete: "fsl/6.0.4", want: []string{"fsl/6.0.4\tbuilt 20210105"},
 			wantDirective: cobra.ShellCompDirectiveNoFileComp},
 		{name: "no match", toComplete: "spm", wantDirective: toolDirective},
@@ -101,7 +106,7 @@ func TestCompleteNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, directive := completeNames(testContainers, tt.toComplete)
+			got, directive := completeNames(testContainers, tt.toComplete, tt.all)
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("suggestions = %q, want %q", got, tt.want)
 			}
