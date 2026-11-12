@@ -46,6 +46,14 @@ func TestLoadCatalogue(t *testing.T) {
 			wantErr: "catalogue lists fsl/6.0.3 with build dates "},
 		{name: "key without a release", json: `{"fsl": {"apps": {"fsl": {"version": "1"}}}}`,
 			wantErr: `catalogue entry "fsl" has no release`},
+		{name: "key ending in a space", json: `{"fsl": {"apps": {"fsl ": {"version": "1"}}}}`,
+			wantErr: `catalogue entry "fsl " has no release`},
+		{name: "image without a release", json: `{"fsl": {"apps": {"fsl x": {"version": "1", "image": "fsl_"}}}}`,
+			wantErr: `catalogue entry "fsl x" has no release`},
+		{name: "image for another tool", json: `{"fsl": {"apps": {"fsl 1.0": {"version": "1", "image": "notfsl_1.0"}}}}`,
+			wantErr: `catalogue entry "fsl 1.0" has image "notfsl_1.0", which does not start with "fsl_"`},
+		{name: "no build date", json: `{"fsl": {"apps": {"fsl 6.0.3": {"exec": ""}}}}`,
+			wantErr: `catalogue entry "fsl 6.0.3" has no build date`},
 	}
 
 	for _, tt := range tests {

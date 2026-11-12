@@ -105,7 +105,16 @@ func parseCatalogue(data []byte) ([]container, error) {
 				}
 				image = tool + "_" + key[i+1:]
 			}
-			release := strings.TrimPrefix(image, tool+"_")
+			release, ok := strings.CutPrefix(image, tool+"_")
+			switch {
+			case !ok:
+				return nil, fmt.Errorf("catalogue entry %q has image %q, which does not start with %q",
+					key, image, tool+"_")
+			case release == "":
+				return nil, fmt.Errorf("catalogue entry %q has no release", key)
+			case app.BuildDate == "":
+				return nil, fmt.Errorf("catalogue entry %q has no build date", key)
+			}
 
 			c := byName[tool+"/"+release]
 			if c == nil {
