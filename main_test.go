@@ -101,9 +101,11 @@ func TestRun(t *testing.T) {
 			wantStdout: defaultCatalogueURL + "\n"},
 		{name: "config get an override", args: []string{"config", "get", "cache_dir"},
 			config: `{"cache_dir": "/c"}`, wantStdout: "/c\n"},
+		// Each platform words this differently, but every message ends in
+		// "defined", so a usage hint after it would fail the row.
 		{name: "config get with a broken environment", args: []string{"config", "get", "cache_dir"},
-			env: map[string]string{"XDG_CACHE_HOME": "rel"}, wantCode: 1,
-			wantStderr: "sciget: finding the cache directory: path in $XDG_CACHE_HOME is relative\n"},
+			env: map[string]string{"XDG_CACHE_HOME": "", "HOME": "", "LocalAppData": ""}, wantCode: 1,
+			wantStderrHas: "defined\n"},
 		{name: "config get an unknown key", args: []string{"config", "get", "cache-dir"}, wantCode: 2,
 			wantStderr: "sciget: unknown key \"cache-dir\"; valid keys: cache_dir, catalogue_url" + usageHint},
 		{name: "config get without a key", args: []string{"config", "get"}, wantCode: 2,
@@ -133,8 +135,11 @@ func TestRun(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache := t.TempDir()
-			t.Setenv("XDG_CACHE_HOME", cache)
+			setCacheHome(t, t.TempDir())
+			cache, err := os.UserCacheDir()
+			if err != nil {
+				t.Fatal(err)
+			}
 			configFile := filepath.Join(t.TempDir(), "config.json")
 			t.Setenv("SCIGET_CONFIG", configFile)
 			for k, v := range tt.env {
@@ -200,6 +205,15 @@ func TestRun(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// setCacheHome points the user cache directory at dir on every platform
+// os.UserCacheDir supports, so no test reads or writes a real cache.
+func setCacheHome(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range []string{"XDG_CACHE_HOME", "HOME", "LocalAppData"} {
+		t.Setenv(name, dir)
 	}
 }
 

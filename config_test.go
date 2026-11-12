@@ -71,7 +71,11 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestConfigGet(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", "/xdg-cache")
+	setCacheHome(t, "/home")
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	c := config{overrides: map[string]string{"catalogue_url": "https://m.example/a.json"}}
 	tests := []struct {
 		name       string
@@ -80,7 +84,7 @@ func TestConfigGet(t *testing.T) {
 		wantSource string
 		wantErr    string
 	}{
-		{name: "default", key: "cache_dir", wantValue: "/xdg-cache/sciget", wantSource: "default"},
+		{name: "default", key: "cache_dir", wantValue: filepath.Join(cache, "sciget"), wantSource: "default"},
 		{name: "override", key: "catalogue_url", wantValue: "https://m.example/a.json", wantSource: "config"},
 		{name: "unknown key", key: "cache-dir", wantErr: `unknown key "cache-dir"`},
 	}
@@ -273,19 +277,26 @@ func TestWriteConfig(t *testing.T) {
 }
 
 func TestWriteConfigList(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", "/xdg-cache")
-	c := config{overrides: map[string]string{"catalogue_url": "https://m.example/a.json"}}
+	setCacheHome(t, "/home")
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(cache, "sciget")
+	const url = "https://m.example/a.json"
+	width := max(len(cacheDir), len(url)) + 2
+	c := config{overrides: map[string]string{"catalogue_url": url}}
 	tests := []struct {
 		name     string
 		terminal bool
 		want     string
 	}{
 		{name: "tab-separated when piped",
-			want: "cache_dir\t/xdg-cache/sciget\tdefault\ncatalogue_url\thttps://m.example/a.json\tconfig\n"},
+			want: "cache_dir\t" + cacheDir + "\tdefault\ncatalogue_url\t" + url + "\tconfig\n"},
 		{name: "aligned with a header on a terminal", terminal: true,
-			want: fmt.Sprintf("%-15s%-26s%s\n", "KEY", "VALUE", "SOURCE") +
-				fmt.Sprintf("%-15s%-26s%s\n", "cache_dir", "/xdg-cache/sciget", "default") +
-				fmt.Sprintf("%-15s%-26s%s\n", "catalogue_url", "https://m.example/a.json", "config")},
+			want: fmt.Sprintf("%-15s%-*s%s\n", "KEY", width, "VALUE", "SOURCE") +
+				fmt.Sprintf("%-15s%-*s%s\n", "cache_dir", width, cacheDir, "default") +
+				fmt.Sprintf("%-15s%-*s%s\n", "catalogue_url", width, url, "config")},
 	}
 
 	for _, tt := range tests {
