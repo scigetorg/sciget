@@ -11,9 +11,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newSyncCommand() *cobra.Command {
+func newRefreshCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "sync",
+		Use:   "refresh",
 		Short: "Download the latest catalogue",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -29,7 +29,7 @@ func newSyncCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			changed, err := syncCatalogue(&http.Client{}, catalogueURL, dir)
+			changed, err := refreshCatalogue(&http.Client{}, catalogueURL, dir)
 			if err != nil {
 				return err
 			}
@@ -43,9 +43,9 @@ func newSyncCommand() *cobra.Command {
 	}
 }
 
-// syncCatalogue downloads the catalogue at catalogueURL and, if it differs
+// refreshCatalogue downloads the catalogue at catalogueURL and, if it differs
 // from apps.json in dir, replaces that file. It reports whether it did.
-func syncCatalogue(client *http.Client, catalogueURL, dir string) (bool, error) {
+func refreshCatalogue(client *http.Client, catalogueURL, dir string) (bool, error) {
 	data, err := downloadCatalogue(client, catalogueURL)
 	if err != nil {
 		return false, err

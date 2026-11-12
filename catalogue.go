@@ -72,7 +72,7 @@ func readCatalogue() ([]container, error) {
 func loadCatalogue(path string) ([]container, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("no catalogue at %s; run 'sciget sync'", path)
+		return nil, fmt.Errorf("no catalogue at %s; run 'sciget refresh'", path)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogue: %w", err)

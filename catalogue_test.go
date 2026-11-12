@@ -71,7 +71,7 @@ func TestLoadCatalogue(t *testing.T) {
 				}
 				prefix := "reading catalogue " + path + ": "
 				if tt.json == "" {
-					prefix = "no catalogue at " + path + "; run 'sciget sync'"
+					prefix = "no catalogue at " + path + "; run 'sciget refresh'"
 				}
 				if !strings.HasPrefix(err.Error(), prefix) {
 					t.Errorf("error = %q, want it to start with %q", err, prefix)

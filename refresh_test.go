@@ -12,13 +12,13 @@ import (
 	"time"
 )
 
-func TestSyncCatalogue(t *testing.T) {
+func TestRefreshCatalogue(t *testing.T) {
 	const catalogue = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905"}}}}`
 	const other = `{"fsl": {"apps": {"fsl 6.0.4": {"version": "20210101"}}}}`
 	tests := []struct {
 		name        string
-		existing    string // apps.json before the sync; no file when empty
-		incomplete  string // apps.json.incomplete before the sync; no file when empty
+		existing    string // apps.json before the refresh; no file when empty
+		incomplete  string // apps.json.incomplete before the refresh; no file when empty
 		status      int    // the server's status; 200 when zero
 		body        string
 		gzip        bool // the server compresses the body
@@ -28,7 +28,7 @@ func TestSyncCatalogue(t *testing.T) {
 		want        string // apps.json afterwards
 		wantErr     string
 	}{
-		{name: "first sync", body: catalogue, wantChanged: true, want: catalogue},
+		{name: "first refresh", body: catalogue, wantChanged: true, want: catalogue},
 		{name: "same catalogue", existing: catalogue, body: catalogue, want: catalogue},
 		{name: "different catalogue", existing: catalogue, body: other, wantChanged: true, want: other},
 		{name: "damaged local copy is replaced", existing: "{}", body: catalogue, wantChanged: true,
@@ -95,7 +95,7 @@ func TestSyncCatalogue(t *testing.T) {
 			}
 
 			catalogueURL := srv.URL + "/apps.json"
-			changed, err := syncCatalogue(srv.Client(), catalogueURL, dir)
+			changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
@@ -127,16 +127,16 @@ func TestSyncCatalogue(t *testing.T) {
 					t.Errorf("apps.json.incomplete left behind: %v", err)
 				}
 
-				// A second sync must see what the first wrote as the same catalogue.
+				// A second refresh must see what the first wrote as the same catalogue.
 				if err := os.Chtimes(path, old, old); err != nil {
 					t.Fatal(err)
 				}
-				changed, err := syncCatalogue(srv.Client(), catalogueURL, dir)
+				changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir)
 				if err != nil || changed {
-					t.Errorf("second sync: changed = %v, error = %v, want no change", changed, err)
+					t.Errorf("second refresh: changed = %v, error = %v, want no change", changed, err)
 				}
 				if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(old) {
-					t.Errorf("second sync rewrote apps.json: %v", err)
+					t.Errorf("second refresh rewrote apps.json: %v", err)
 				}
 			}
 			wantRequests := 1
@@ -144,7 +144,7 @@ func TestSyncCatalogue(t *testing.T) {
 			case tt.closed:
 				wantRequests = 0
 			case tt.wantChanged:
-				wantRequests = 2 // the second sync above
+				wantRequests = 2 // the second refresh above
 			}
 			if len(requests) != wantRequests {
 				t.Errorf("server saw %d requests, want %d", len(requests), wantRequests)

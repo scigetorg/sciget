@@ -18,7 +18,7 @@ go test ./...
 
 | Command | What it does |
 |---|---|
-| `sciget sync` | Download the latest catalogue |
+| `sciget refresh` | Download the latest catalogue |
 | `sciget find [words...]` | List the containers in the catalogue (`--all` includes hidden ones) |
 | `sciget config [get\|set\|unset\|list]` | Show and change settings |
 | `sciget completion <shell>` | Print a shell completion script |
