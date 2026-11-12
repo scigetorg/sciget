@@ -13,10 +13,12 @@ func TestLoadCatalogue(t *testing.T) {
 	tests := []struct {
 		name    string
 		json    string // written to apps.json; no file when empty
+		dir     bool   // apps.json is a directory
 		want    []string
 		wantErr string
 	}{
 		{name: "missing file", wantErr: "no catalogue at "},
+		{name: "path is a directory", dir: true, wantErr: "reading catalogue: "},
 		{name: "invalid JSON", json: "{", wantErr: "unexpected end of JSON input"},
 		{name: "null", json: "null", wantErr: "no containers"},
 		{name: "no entries", json: `{"fsl": {"apps": {}}}`, wantErr: "no containers"},
@@ -64,13 +66,22 @@ func TestLoadCatalogue(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tt.dir {
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			containers, err := loadCatalogue(path)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
 				}
 				prefix := "reading catalogue " + path + ": "
-				if tt.json == "" {
+				switch {
+				case tt.dir:
+					// os errors are *fs.PathError, which already include the path.
+					prefix = "reading catalogue: "
+				case tt.json == "":
 					prefix = "no catalogue at " + path + "; run 'sciget refresh'"
 				}
 				if !strings.HasPrefix(err.Error(), prefix) {

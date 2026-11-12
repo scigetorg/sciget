@@ -15,6 +15,7 @@ func TestLoadConfig(t *testing.T) {
 	tests := []struct {
 		name    string
 		json    string // written to config.json; no file when empty
+		dir     bool   // config.json is a directory
 		want    map[string]string
 		wantErr string
 	}{
@@ -22,6 +23,7 @@ func TestLoadConfig(t *testing.T) {
 		{name: "empty object", json: "{}", want: map[string]string{}},
 		{name: "overrides", json: `{"cache_dir": "/c", "catalogue_url": "http://m.example/a.json"}`,
 			want: map[string]string{"cache_dir": "/c", "catalogue_url": "http://m.example/a.json"}},
+		{name: "path is a directory", dir: true, wantErr: "reading config: "},
 		{name: "invalid JSON", json: "{", wantErr: "unexpected end of JSON input"},
 		{name: "anything after the object", json: "{}{}", wantErr: "invalid character '{' after top-level value"},
 		{name: "top-level null", json: "null", wantErr: "not a JSON object"},
@@ -50,13 +52,23 @@ func TestLoadConfig(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tt.dir {
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			c, err := loadConfig(path)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
 				}
-				if !strings.HasPrefix(err.Error(), "reading config "+path+": ") {
-					t.Errorf("error = %q, want it to name the file", err)
+				// os errors are *fs.PathError, which already include the path.
+				prefix := "reading config " + path + ": "
+				if tt.dir {
+					prefix = "reading config: "
+				}
+				if !strings.HasPrefix(err.Error(), prefix) || !strings.Contains(err.Error(), path) {
+					t.Errorf("error = %q, want it to start with %q and name the file", err, prefix)
 				}
 				return
 			}
@@ -65,6 +77,36 @@ func TestLoadConfig(t *testing.T) {
 			}
 			if !maps.Equal(c.overrides, tt.want) {
 				t.Errorf("overrides = %v, want %v", c.overrides, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfigPath(t *testing.T) {
+	setConfigHome(t, t.TempDir())
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		env  string // SCIGET_CONFIG
+		want string
+	}{
+		{name: "default", want: filepath.Join(dir, "sciget", "config.json")},
+		{name: "SCIGET_CONFIG", env: "/etc/sciget.json", want: "/etc/sciget.json"},
+		{name: "relative SCIGET_CONFIG used as given", env: "sciget.json", want: "sciget.json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SCIGET_CONFIG", tt.env)
+			got, err := configPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("configPath = %q, want %q", got, tt.want)
 			}
 		})
 	}

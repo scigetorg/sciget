@@ -19,6 +19,7 @@ func TestRefreshCatalogue(t *testing.T) {
 		name        string
 		existing    string // apps.json before the refresh; no file when empty
 		incomplete  string // apps.json.incomplete before the refresh; no file when empty
+		blocked     bool   // apps.json.incomplete is a directory, so the write fails
 		status      int    // the server's status; 200 when zero
 		body        string
 		gzip        bool // the server compresses the body
@@ -46,6 +47,8 @@ func TestRefreshCatalogue(t *testing.T) {
 			wantErr: "downloaded catalogue is invalid: unexpected end of JSON input"},
 		{name: "no containers", existing: catalogue, body: "{}", want: catalogue,
 			wantErr: "downloaded catalogue is invalid: no containers"},
+		{name: "write fails", existing: catalogue, body: other, blocked: true, want: catalogue,
+			wantErr: "writing catalogue: "},
 		{name: "body cut short", existing: catalogue, body: catalogue, short: true, want: catalogue,
 			wantErr: "downloading catalogue: unexpected EOF"},
 		{name: "server gone", existing: catalogue, closed: true, want: catalogue,
@@ -90,6 +93,11 @@ func TestRefreshCatalogue(t *testing.T) {
 			}
 			if tt.incomplete != "" {
 				if err := os.WriteFile(path+".incomplete", []byte(tt.incomplete), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.blocked {
+				if err := os.Mkdir(path+".incomplete", 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}

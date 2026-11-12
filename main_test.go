@@ -126,6 +126,13 @@ func TestRun(t *testing.T) {
 		{name: "config set leaves a config with an unknown key", args: []string{"config", "set", "cache_dir", "/c"},
 			config: `{"CACHE_DIR": "/x"}`, wantCode: 1,
 			wantStderrHas: `unknown key "CACHE_DIR"`, wantConfig: `{"CACHE_DIR": "/x"}`},
+		{name: "config unset of a key that is not set writes nothing", args: []string{"config", "unset", "cache_dir"},
+			config:     `{"catalogue_url": "https://m.example/a.json"}`,
+			wantConfig: `{"catalogue_url": "https://m.example/a.json"}`},
+		{name: "config set an empty value", args: []string{"config", "set", "cache_dir", ""}, wantCode: 2,
+			wantStderr: "sciget: invalid cache_dir: must be an absolute path" + usageHint},
+		{name: "config list takes no arguments", args: []string{"config", "list", "x"}, wantCode: 2,
+			wantStderr: "sciget: unknown command \"x\" for \"sciget config list\"" + usageHint},
 		{name: "config unset", args: []string{"config", "unset", "cache_dir"},
 			config:     `{"cache_dir": "/c", "catalogue_url": "https://m.example/a.json"}`,
 			wantConfig: "{\n  \"catalogue_url\": \"https://m.example/a.json\"\n}\n"},
@@ -205,6 +212,15 @@ func TestRun(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// setConfigHome points the user config directory at dir on every platform
+// os.UserConfigDir supports.
+func setConfigHome(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range []string{"XDG_CONFIG_HOME", "HOME", "AppData"} {
+		t.Setenv(name, dir)
 	}
 }
 
