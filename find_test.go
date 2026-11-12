@@ -11,12 +11,12 @@ import (
 
 // testContainers is a small catalogue, sorted as loadCatalogue sorts.
 var testContainers = []container{
-	{tool: "afni", release: "21.2.00", buildDate: "20210714", categories: []string{"functional imaging"}},
-	{tool: "freesurfer", release: "7.4.1", buildDate: "20230101"},
-	{tool: "fsl", release: "6.0.3", buildDate: "20200905", graphical: true,
+	{tool: "afni", version: "21.2.00", buildDate: "20210714", categories: []string{"functional imaging"}},
+	{tool: "freesurfer", version: "7.4.1", buildDate: "20230101"},
+	{tool: "fsl", version: "6.0.3", buildDate: "20200905", graphical: true,
 		categories: []string{"image registration", "functional imaging"}},
-	{tool: "fsl", release: "6.0.4", buildDate: "20210105", graphical: true},
-	{tool: "fsl", release: "6.0.4_arm64", buildDate: "20260101", hidden: true},
+	{tool: "fsl", version: "6.0.4", buildDate: "20210105", graphical: true},
+	{tool: "fsl", version: "6.0.4_arm64", buildDate: "20260101", hidden: true},
 }
 
 func TestMatchContainers(t *testing.T) {

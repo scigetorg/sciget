@@ -16,7 +16,7 @@ import (
 // ones).
 type container struct {
 	tool       string // "fsl"
-	release    string // "6.0.3"
+	version    string // "6.0.3", the software's own version
 	image      string // "fsl_6.0.3"
 	buildDate  string // "20200905"
 	categories []string
@@ -25,18 +25,20 @@ type container struct {
 }
 
 // name returns the name users type: "fsl/6.0.3".
-func (c container) name() string { return c.tool + "/" + c.release }
+func (c container) name() string { return c.tool + "/" + c.version }
 
 // fileName returns the container's file name without extension:
 // "fsl_6.0.3_20200905".
 func (c container) fileName() string { return c.image + "_" + c.buildDate }
 
-// catalogueTool and catalogueApp mirror the JSON of apps.json.
+// catalogueTool is one tool in apps.json, holding its entries by key.
 type catalogueTool struct {
 	Categories []string                `json:"categories"`
 	Apps       map[string]catalogueApp `json:"apps"`
 }
 
+// catalogueApp is one entry of apps.json. Its "version" field holds the
+// container's build date, not the software version.
 type catalogueApp struct {
 	BuildDate     string `json:"version"`
 	Exec          string `json:"exec"`
@@ -68,7 +70,7 @@ func readCatalogue() ([]container, error) {
 }
 
 // loadCatalogue reads apps.json at path and returns its containers, sorted by
-// tool and then by release.
+// tool and then by version.
 func loadCatalogue(path string) ([]container, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -85,7 +87,7 @@ func loadCatalogue(path string) ([]container, error) {
 }
 
 // parseCatalogue returns the containers in data, the JSON of apps.json,
-// sorted by tool and then by release.
+// sorted by tool and then by version.
 func parseCatalogue(data []byte) ([]container, error) {
 	var tools map[string]catalogueTool
 	if err := json.Unmarshal(data, &tools); err != nil {
@@ -95,30 +97,30 @@ func parseCatalogue(data []byte) ([]container, error) {
 	byName := map[string]*container{}
 	for tool, t := range tools {
 		for key, app := range t.Apps {
-			// Keys are "<label> <release>", except that entries with an
+			// Keys are "<label> <version>", except that entries with an
 			// image may end in another word ("amico 2.1.0 arm64").
 			image := app.Image
 			if image == "" {
 				i := strings.LastIndex(key, " ")
 				if i < 0 {
-					return nil, fmt.Errorf("catalogue entry %q has no release", key)
+					return nil, fmt.Errorf("catalogue entry %q has no version", key)
 				}
 				image = tool + "_" + key[i+1:]
 			}
-			release, ok := strings.CutPrefix(image, tool+"_")
+			toolVersion, ok := strings.CutPrefix(image, tool+"_")
 			switch {
 			case !ok:
 				return nil, fmt.Errorf("catalogue entry %q has image %q, which does not start with %q",
 					key, image, tool+"_")
-			case release == "":
-				return nil, fmt.Errorf("catalogue entry %q has no release", key)
+			case toolVersion == "":
+				return nil, fmt.Errorf("catalogue entry %q has no version", key)
 			case app.BuildDate == "":
 				return nil, fmt.Errorf("catalogue entry %q has no build date", key)
 			}
 
-			c := byName[tool+"/"+release]
+			c := byName[tool+"/"+toolVersion]
 			if c == nil {
-				c = &container{tool: tool, release: release, image: image,
+				c = &container{tool: tool, version: toolVersion, image: image,
 					buildDate: app.BuildDate, categories: t.Categories, hidden: true}
 				byName[c.name()] = c
 			}
@@ -146,12 +148,12 @@ func parseCatalogue(data []byte) ([]container, error) {
 		if n := strings.Compare(a.tool, b.tool); n != 0 {
 			return n
 		}
-		return compareVersions(a.release, b.release)
+		return compareVersions(a.version, b.version)
 	})
 	return containers, nil
 }
 
-// compareVersions compares two releases, treating runs of digits as numbers so
+// compareVersions compares two versions, treating runs of digits as numbers so
 // that "6.0.9" sorts before "6.0.10". It returns -1, 0 or +1.
 func compareVersions(a, b string) int {
 	for a != "" && b != "" {
