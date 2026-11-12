@@ -139,28 +139,34 @@ func (c config) unset(name string) error {
 	return writeConfig(c.path, c.overrides)
 }
 
-// writeConfig writes overrides to the file at path in place, so a read-only
-// file stays read-only and a symlink is followed.
+// writeConfig writes overrides to the config file at path, in place.
 func writeConfig(path string, overrides map[string]string) error {
-	data, err := json.MarshalIndent(overrides, "", "  ")
-	if err != nil {
+	if err := writeJSONFile(path, overrides); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
+	return nil
+}
+
+// writeJSONFile writes v as indented JSON to the file at path in place, so a
+// read-only file stays read-only and a symlink is followed. A new file is
+// private to the user.
+func writeJSONFile(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("writing config: %w", err)
+		return err
 	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return fmt.Errorf("writing config: %w", err)
+		return err
 	}
 	_, err = f.Write(append(data, '\n'))
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
-	if err != nil {
-		return fmt.Errorf("writing config: %w", err)
-	}
-	return nil
+	return err
 }
 
 // writeConfigList prints every key with its value and source, as a table.
