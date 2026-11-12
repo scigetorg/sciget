@@ -24,11 +24,12 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name          string
 		args          []string
-		catalogue     string // written to the cache; no file when empty
-		config        string // written to SCIGET_CONFIG; no file when empty
-		serve         string // served by a test server that the config names as catalogue_url
-		readOnly      bool   // write config with mode 0o400
-		wantConfig    string // the config file afterwards, when set
+		catalogue     string            // written to the cache; no file when empty
+		config        string            // written to SCIGET_CONFIG; no file when empty
+		serve         string            // served by a test server that the config names as catalogue_url
+		readOnly      bool              // write config with mode 0o400
+		env           map[string]string // set after the defaults
+		wantConfig    string            // the config file afterwards, when set
 		wantCode      int
 		wantStdout    string // exact, unless wantStdoutHas is set
 		wantStdoutHas string // checks only that stdout contains this
@@ -100,6 +101,9 @@ func TestRun(t *testing.T) {
 			wantStdout: defaultCatalogueURL + "\n"},
 		{name: "config get an override", args: []string{"config", "get", "cache_dir"},
 			config: `{"cache_dir": "/c"}`, wantStdout: "/c\n"},
+		{name: "config get with a broken environment", args: []string{"config", "get", "cache_dir"},
+			env: map[string]string{"XDG_CACHE_HOME": "rel"}, wantCode: 1,
+			wantStderr: "sciget: finding the cache directory: path in $XDG_CACHE_HOME is relative\n"},
 		{name: "config get an unknown key", args: []string{"config", "get", "cache-dir"}, wantCode: 2,
 			wantStderr: "sciget: unknown key \"cache-dir\"; valid keys: cache_dir, catalogue_url" + usageHint},
 		{name: "config get without a key", args: []string{"config", "get"}, wantCode: 2,
@@ -133,6 +137,9 @@ func TestRun(t *testing.T) {
 			t.Setenv("XDG_CACHE_HOME", cache)
 			configFile := filepath.Join(t.TempDir(), "config.json")
 			t.Setenv("SCIGET_CONFIG", configFile)
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
 			if tt.serve != "" {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					io.WriteString(w, tt.serve)

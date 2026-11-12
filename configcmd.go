@@ -27,9 +27,12 @@ func newConfigCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if _, err := findConfigKey(args[0]); err != nil {
+					return usageError{err.Error()}
+				}
 				value, _, err := c.get(args[0])
 				if err != nil {
-					return usageError{err.Error()}
+					return err
 				}
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), value)
 				return err
