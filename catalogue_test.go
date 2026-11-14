@@ -16,6 +16,7 @@ func TestLoadCatalogue(t *testing.T) {
 		dir            bool   // create apps.json as a directory to force a read fail
 		want           []string
 		licences, dois []string
+		apptainerArgs  []string
 		wantErr        string
 	}{
 		{name: "missing file", wantErr: "no catalogue at "},
@@ -34,6 +35,16 @@ func TestLoadCatalogue(t *testing.T) {
 				"GUI-fsl 1":{"version":"1","license":["MIT","BSD"],"doi":"a"},
 				"other-fsl 1":{"version":"1","doi":"b"}}}}`,
 			want: []string{"fsl/1 fsl_1_1 []"}, licences: []string{"Apache-2.0", "BSD", "MIT"}, dois: []string{"a", "b"}},
+		{name: "apptainer args", json: `{"fsl":{"apps":{
+				"fsl 1":{"version":"1","apptainer_args":["--bind","/dev/fuse"]},
+				"GUI-fsl 1":{"version":"1","apptainer_args":["--bind","/dev/fuse"]}}}}`,
+			want: []string{"fsl/1 fsl_1_1 []"}, apptainerArgs: []string{"--bind", "/dev/fuse"}},
+		{name: "apptainer args that disagree", json: `{"fsl":{"apps":{
+				"fsl 1":{"version":"1","apptainer_args":["--bind","/dev/fuse"]},
+				"GUI-fsl 1":{"version":"1"}}}}`,
+			wantErr: "with apptainer_args"},
+		{name: "empty apptainer args element", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":[""]}}}}`,
+			wantErr: "has an empty or NUL apptainer_args element"},
 		{name: "label with a space",
 			json: `{"napari": {"apps": {"napari GUI-napari 0.9.2": {"version": "20250101", "exec": "napari"}}}}`,
 			want: []string{"napari/0.9.2 napari_0.9.2_20250101 [] graphical"}},
@@ -103,6 +114,9 @@ func TestLoadCatalogue(t *testing.T) {
 			for _, c := range containers {
 				if !slices.Equal(c.licences, tt.licences) || !slices.Equal(c.dois, tt.dois) {
 					t.Errorf("metadata = %v, %v, want %v, %v", c.licences, c.dois, tt.licences, tt.dois)
+				}
+				if !slices.Equal(c.apptainerArgs, tt.apptainerArgs) {
+					t.Errorf("apptainer args = %q, want %q", c.apptainerArgs, tt.apptainerArgs)
 				}
 				s := fmt.Sprintf("%s %s %v", c.name(), c.fileName(), c.categories)
 				if c.graphical {

@@ -15,17 +15,18 @@ import (
 // back several catalogue entries (a command-line entry and its graphical
 // ones).
 type container struct {
-	tool       string // "fsl"
-	version    string // "6.0.3", the software's own version
-	image      string // "fsl_6.0.3"
-	buildDate  string // "20200905"
-	licences   []string
-	dois       []string
-	categories []string
-	graphical  bool   // some entry has a graphical command
-	hidden     bool   // every entry is hidden
-	catalogue  string // the name of the catalogue it comes from
-	shadowed   bool   // an earlier catalogue in use has the same name
+	tool          string // "fsl"
+	version       string // "6.0.3", the software's own version
+	image         string // "fsl_6.0.3"
+	buildDate     string // "20200905"
+	licences      []string
+	dois          []string
+	apptainerArgs []string // added to every run; all entries agree
+	categories    []string
+	graphical     bool   // some entry has a graphical command
+	hidden        bool   // every entry is hidden
+	catalogue     string // the name of the catalogue it comes from
+	shadowed      bool   // an earlier catalogue in use has the same name
 }
 
 // name returns the name users type: "fsl/6.0.3".
@@ -44,6 +45,7 @@ type catalogueTool struct {
 // catalogueApp is one entry of apps.json. Its "version" field holds the
 // container's build date, not the software version.
 type catalogueApp struct {
+	ApptainerArgs []string `json:"apptainer_args"`
 	Licences      []string `json:"license"`
 	DOI           string   `json:"doi"`
 	BuildDate     string   `json:"version"`
@@ -128,15 +130,26 @@ func parseCatalogue(data []byte) ([]container, error) {
 				return nil, fmt.Errorf("catalogue entry %q has no build date", key)
 			}
 
+			for _, arg := range app.ApptainerArgs {
+				if arg == "" || strings.ContainsRune(arg, 0) {
+					return nil, fmt.Errorf("catalogue entry %q has an empty or NUL apptainer_args element", key)
+				}
+			}
+
 			c := byName[tool+"/"+toolVersion]
 			if c == nil {
 				c = &container{tool: tool, version: toolVersion, image: image,
-					buildDate: app.BuildDate, categories: t.Categories, hidden: true}
+					buildDate: app.BuildDate, categories: t.Categories, hidden: true,
+					apptainerArgs: app.ApptainerArgs}
 				byName[c.name()] = c
 			}
 			if app.BuildDate != c.buildDate {
 				return nil, fmt.Errorf("catalogue lists %s with build dates %s and %s",
 					c.name(), c.buildDate, app.BuildDate)
+			}
+			if !slices.Equal(app.ApptainerArgs, c.apptainerArgs) {
+				return nil, fmt.Errorf("catalogue lists %s with apptainer_args %q and %q",
+					c.name(), c.apptainerArgs, app.ApptainerArgs)
 			}
 			c.licences = append(c.licences, app.Licences...)
 			if app.DOI != "" {
