@@ -19,6 +19,8 @@ type container struct {
 	version    string // "6.0.3", the software's own version
 	image      string // "fsl_6.0.3"
 	buildDate  string // "20200905"
+	licences   []string
+	dois       []string
 	categories []string
 	graphical  bool   // some entry has a graphical command
 	hidden     bool   // every entry is hidden
@@ -42,10 +44,12 @@ type catalogueTool struct {
 // catalogueApp is one entry of apps.json. Its "version" field holds the
 // container's build date, not the software version.
 type catalogueApp struct {
-	BuildDate     string `json:"version"`
-	Exec          string `json:"exec"`
-	Image         string `json:"image"`
-	ShowInApplist *bool  `json:"show_in_applist"`
+	Licences      []string `json:"license"`
+	DOI           string   `json:"doi"`
+	BuildDate     string   `json:"version"`
+	Exec          string   `json:"exec"`
+	Image         string   `json:"image"`
+	ShowInApplist *bool    `json:"show_in_applist"`
 }
 
 // readContainers returns the containers of every catalogue in use, sorted by
@@ -134,6 +138,10 @@ func parseCatalogue(data []byte) ([]container, error) {
 				return nil, fmt.Errorf("catalogue lists %s with build dates %s and %s",
 					c.name(), c.buildDate, app.BuildDate)
 			}
+			c.licences = append(c.licences, app.Licences...)
+			if app.DOI != "" {
+				c.dois = append(c.dois, app.DOI)
+			}
 			if app.Exec != "" {
 				c.graphical = true
 			}
@@ -148,6 +156,8 @@ func parseCatalogue(data []byte) ([]container, error) {
 
 	containers := make([]container, 0, len(byName))
 	for _, c := range byName {
+		c.licences = slices.Compact(slices.Sorted(slices.Values(c.licences)))
+		c.dois = slices.Compact(slices.Sorted(slices.Values(c.dois)))
 		containers = append(containers, *c)
 	}
 	slices.SortFunc(containers, compareContainers)
@@ -208,3 +218,14 @@ func compareChunks(x, y string) int {
 }
 
 func isDigit(b byte) bool { return '0' <= b && b <= '9' }
+
+// lookupContainer returns the winning container with this exact name.
+func lookupContainer(containers []container, name string) (container, error) {
+	for _, c := range containers {
+		if c.name() == name && !c.shadowed {
+			return c, nil
+		}
+	}
+	tool, _, _ := strings.Cut(name, "/")
+	return container{}, fmt.Errorf("no container named %q; run 'sciget find %s' to list versions, or 'sciget refresh' to update the catalogues", name, tool)
+}

@@ -11,11 +11,12 @@ import (
 
 func TestLoadCatalogue(t *testing.T) {
 	tests := []struct {
-		name    string
-		json    string // written to apps.json; no file when empty
-		dir     bool   // apps.json is a directory
-		want    []string
-		wantErr string
+		name           string
+		json           string // written to apps.json; no file when empty
+		dir            bool   // create apps.json as a directory to force a read fail
+		want           []string
+		licences, dois []string
+		wantErr        string
 	}{
 		{name: "missing file", wantErr: "no catalogue at "},
 		{name: "path is a directory", dir: true, wantErr: "reading catalogue: "},
@@ -27,6 +28,12 @@ func TestLoadCatalogue(t *testing.T) {
 				"fsl 6.0.3": {"version": "20200905", "exec": ""},
 				"fsleyesGUI-fsl 6.0.3": {"version": "20200905", "exec": "fsleyes"}}}}`,
 			want: []string{"fsl/6.0.3 fsl_6.0.3_20200905 [a b] graphical"}},
+		{name: "metadata is distinct and sorted",
+			json: `{"fsl":{"apps":{
+				"fsl 1":{"version":"1","license":["MIT","Apache-2.0"],"doi":"b"},
+				"GUI-fsl 1":{"version":"1","license":["MIT","BSD"],"doi":"a"},
+				"other-fsl 1":{"version":"1","doi":"b"}}}}`,
+			want: []string{"fsl/1 fsl_1_1 []"}, licences: []string{"Apache-2.0", "BSD", "MIT"}, dois: []string{"a", "b"}},
 		{name: "label with a space",
 			json: `{"napari": {"apps": {"napari GUI-napari 0.9.2": {"version": "20250101", "exec": "napari"}}}}`,
 			want: []string{"napari/0.9.2 napari_0.9.2_20250101 [] graphical"}},
@@ -94,6 +101,9 @@ func TestLoadCatalogue(t *testing.T) {
 			}
 			var got []string
 			for _, c := range containers {
+				if !slices.Equal(c.licences, tt.licences) || !slices.Equal(c.dois, tt.dois) {
+					t.Errorf("metadata = %v, %v, want %v, %v", c.licences, c.dois, tt.licences, tt.dois)
+				}
 				s := fmt.Sprintf("%s %s %v", c.name(), c.fileName(), c.categories)
 				if c.graphical {
 					s += " graphical"
@@ -129,6 +139,35 @@ func TestCompareVersions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := compareVersions(tt.a, tt.b); got != tt.want {
 				t.Errorf("compareVersions(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLookupContainer(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		query         string
+		wantCatalogue string
+		wantErr       string
+	}{
+		{name: "first wins", query: "fsl/6.0.3", wantCatalogue: "neuro"},
+		{name: "unknown version", query: "fsl/9", wantErr: "no container named \"fsl/9\"; run 'sciget find fsl'"},
+		{name: "unknown tool", query: "spm", wantErr: "no container named \"spm\"; run 'sciget find spm'"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := lookupContainer(testContainers, tt.query)
+			if tt.wantErr != "" {
+				if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.catalogue != tt.wantCatalogue {
+				t.Errorf("catalogue = %q, want %q", got.catalogue, tt.wantCatalogue)
 			}
 		})
 	}
