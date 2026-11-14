@@ -18,8 +18,13 @@ func newFindCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			matches := matchContainers(containers, args, all)
+			if len(matches) == 0 {
+				_, err := fmt.Fprintf(cmd.ErrOrStderr(), "No containers match %q.\n", strings.Join(args, " "))
+				return err
+			}
 			out := cmd.OutOrStdout()
-			return writeContainers(out, matchContainers(containers, args, all), isTerminal(out))
+			return writeContainers(out, matches, isTerminal(out))
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			containers, err := readContainers()
