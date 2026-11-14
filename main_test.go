@@ -20,7 +20,9 @@ type testCatalogue struct {
 	name   string
 	url    string // exampleURL(name), or the test server's, when empty
 	apps   string // apps.json in its cache dir; none when empty
-	unused bool   // registered with "use": false
+	dir    string
+	layout string
+	unused bool // registered with "use": false
 }
 
 // exampleURL is the URL a testCatalogue gets when none is given and nothing
@@ -40,29 +42,37 @@ func TestRun(t *testing.T) {
 	const noCatalogues = "sciget: no catalogues; run 'sciget catalogue add <name> <url>'\n"
 	const noneInUse = "sciget: no catalogues in use; run 'sciget catalogue use <name>'\n"
 	neuroimaging := []testCatalogue{{name: "neuroimaging", apps: fslCatalogue}}
+	const fslStored = "fsl_6.0.3_20200905/fsl_6.0.3_20200905.simg"
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
-		name          string
-		args          []string
-		before        [][]string        // commands run first, each of which must succeed
-		config        string            // written to SCIGET_CONFIG; no file when empty
-		catalogues    []testCatalogue   // written to catalogues.json, in order
-		list          string            // written to catalogues.json instead, when set
-		readOnlyList  bool              // write catalogues.json with mode 0o400
-		lockedCaches  bool              // cache_dir/catalogues allows no deletions
-		serve         map[string]string // when set, a test server serves each body at /<name>/apps.json, else 404
-		readOnly      bool              // write config with mode 0o400
-		env           map[string]string // set after the defaults
-		wantConfig    string            // the config file afterwards, when set
-		wantList      []catalogue       // catalogues.json afterwards, when set
-		wantListSame  bool              // catalogues.json is byte for byte as written
-		wantCaches    []string          // names of the dirs in cache_dir/catalogues afterwards, when set
-		wantRequests  []string          // paths the server was asked for, when set
-		wantCode      int
-		wantStdout    string // exact, unless wantStdoutHas is set
-		wantStdoutHas string // checks only that stdout contains this
-		wantStderr    string // exact, unless wantStderrHas is set
-		wantStderrHas string
+		name            string
+		args            []string
+		before          [][]string        // commands run first, each of which must succeed
+		config          string            // written to SCIGET_CONFIG; no file when empty
+		catalogues      []testCatalogue   // written to catalogues.json, in order
+		list            string            // written to catalogues.json instead, when set
+		readOnlyList    bool              // write catalogues.json with mode 0o400
+		lockedCaches    bool              // cache_dir/catalogues allows no deletions
+		serve           map[string]string // when set, a test server serves each body at /<name>/apps.json, else 404
+		readOnly        bool              // write config with mode 0o400
+		env             map[string]string // set after the defaults
+		stored          []string          // paths created under the default container_dir
+		wantExec        []string          // argv handed to Apptainer, when set
+		wantConfig      string            // the config file afterwards, when set
+		wantList        []catalogue       // catalogues.json afterwards, when set
+		wantListSame    bool              // catalogues.json is byte for byte as written
+		wantCaches      []string          // names of the dirs in cache_dir/catalogues afterwards, when set
+		wantRequests    []string          // paths the server was asked for, when set
+		wantCode        int
+		wantStdout      string // exact, unless wantStdoutHas is set
+		wantStdoutHas   string // checks only that stdout contains this
+		wantStdoutLacks string
+		wantStderr      string // exact, unless wantStderrHas is set
+		wantStderrHas   string
 	}{
 		{name: "no arguments", wantCode: 2,
 			wantStderr: "sciget: no command given" + usageHint},
@@ -92,6 +102,47 @@ func TestRun(t *testing.T) {
 			wantStdoutHas: "bash completion V2 for sciget"},
 		{name: "completion takes no arguments", args: []string{"completion", "bash", "x"}, wantCode: 2,
 			wantStderr: "sciget: unknown command \"x\" for \"sciget completion bash\"" + usageHint},
+
+		{name: "find no match", args: []string{"find", "spm"}, catalogues: neuroimaging,
+			wantStderr: "No containers match \"spm\".\n"},
+		{name: "find no match joins words", args: []string{"find", "spm", "12"}, catalogues: neuroimaging,
+			wantStderr: "No containers match \"spm 12\".\n"},
+		{name: "info unknown", args: []string{"info", "fsl/9"}, catalogues: neuroimaging, wantCode: 1,
+			wantStderr: "sciget: no container named \"fsl/9\"; run 'sciget find fsl' to list versions, or 'sciget refresh' to update the catalogues\n"},
+		{name: "info", args: []string{"info", "fsl/6.0.3"}, catalogues: neuroimaging,
+			wantStdout: "Name:        fsl/6.0.3\nCatalogue:   neuroimaging\nBuild:       20200905 (fsl_6.0.3_20200905)\nCategories:  image registration\nLicence:     (not stated)\nDOI:         (none)\nGUI:         yes\nLocation:    not on this machine\n"},
+		{name: "info missing argument", args: []string{"info"}, wantCode: 2,
+			wantStderr: "sciget: accepts 1 arg(s), received 0" + usageHint},
+		{name: "info completes names", args: []string{"__complete", "info", "fsl/"}, catalogues: neuroimaging,
+			wantStdout: "fsl/6.0.3\tbuilt 20200905\n:4\n", wantStderrHas: "Completion ended with directive"},
+
+		{name: "apptainer hidden from help", args: []string{"--help"}, wantStdoutHas: "info ", wantStdoutLacks: "apptainer"},
+		{name: "apptainer exec", args: []string{"apptainer", "exec", "fsl/6.0.3", "bet", "--help"},
+			catalogues: neuroimaging, config: `{"apptainer_path": "/bin/sh"}`, stored: []string{fslStored},
+			wantExec: []string{"/bin/sh", "exec", "STORE/" + fslStored, "bet", "--help"}},
+		{name: "apptainer shell", args: []string{"apptainer", "shell", "fsl/6.0.3"},
+			catalogues: neuroimaging, config: `{"apptainer_path": "/bin/sh"}`, stored: []string{fslStored},
+			wantExec: []string{"/bin/sh", "shell", "STORE/" + fslStored}},
+		{name: "apptainer exec unknown name", args: []string{"apptainer", "exec", "fsl/9", "bet"},
+			catalogues: neuroimaging, wantCode: 1,
+			wantStderr: "sciget: no container named \"fsl/9\"; run 'sciget find fsl' to list versions, or 'sciget refresh' to update the catalogues\n"},
+		{name: "apptainer shell unknown name", args: []string{"apptainer", "shell", "fsl/9"},
+			catalogues: neuroimaging, wantCode: 1,
+			wantStderr: "sciget: no container named \"fsl/9\"; run 'sciget find fsl' to list versions, or 'sciget refresh' to update the catalogues\n"},
+		{name: "apptainer unknown verb", args: []string{"apptainer", "exex", "fsl/6.0.3", "bet"}, wantCode: 2,
+			wantStderr: "sciget: unknown command \"exex\" for \"sciget apptainer\"" + usageHint},
+		{name: "apptainer alone shows help", args: []string{"apptainer"}, wantStdoutHas: "Run containers with Apptainer"},
+		{name: "apptainer exec not on this machine", args: []string{"apptainer", "exec", "fsl/6.0.3", "bet"},
+			catalogues: neuroimaging, wantCode: 1, wantStderr: "sciget: fsl/6.0.3 is not on this machine\n"},
+		{name: "apptainer not found", args: []string{"apptainer", "shell", "fsl/6.0.3"},
+			catalogues: neuroimaging, config: `{"apptainer_path": "no-such-apptainer"}`, stored: []string{fslStored},
+			wantCode: 1, wantStderr: "sciget: apptainer not found: \"no-such-apptainer\"; install Apptainer or set apptainer_path\n"},
+		{name: "apptainer flag before the name", args: []string{"apptainer", "exec", "--bind", "/x", "fsl/6.0.3", "bet"},
+			catalogues: neuroimaging, wantCode: 2, wantStderrHas: "unknown flag: --bind"},
+		{name: "apptainer exec needs a command", args: []string{"apptainer", "exec", "fsl/6.0.3"},
+			catalogues: neuroimaging, wantCode: 2, wantStderrHas: "requires at least 2 arg(s)"},
+		{name: "apptainer shell takes one name", args: []string{"apptainer", "shell", "fsl/6.0.3", "bash"},
+			catalogues: neuroimaging, wantCode: 2, wantStderrHas: "accepts 1 arg(s), received 2"},
 
 		{name: "find without catalogues", args: []string{"find"}, wantCode: 1, wantStderr: noCatalogues},
 		{name: "find with none in use", args: []string{"find"}, wantCode: 1, wantStderr: noneInUse,
@@ -193,14 +244,13 @@ func TestRun(t *testing.T) {
 		{name: "catalogue add the same again", catalogues: []testCatalogue{{name: "mylab"}, {name: "neuroimaging", unused: true}},
 			args:         []string{"catalogue", "add", "neuroimaging", exampleURL("neuroimaging")},
 			wantListSame: true,
-			wantStdout:   "Catalogue \"neuroimaging\" already exists with the same URL; nothing to do.\n",
+			wantStdout:   "Catalogue \"neuroimaging\" already exists with the same URL, dir and layout; nothing to do.\n",
 			wantList: []catalogue{{Name: "mylab", URL: exampleURL("mylab"), Use: true},
 				{Name: "neuroimaging", URL: exampleURL("neuroimaging")}}},
 		{name: "catalogue add a name with another URL", catalogues: []testCatalogue{{name: "neuroimaging"}},
 			args: []string{"catalogue", "add", "neuroimaging", mirrorURL}, wantCode: 1, wantListSame: true,
-			wantStderr: "sciget: catalogue \"neuroimaging\" already exists with URL " + exampleURL("neuroimaging") +
-				"; use --force-update to replace it, or choose another name\n",
-			wantList: []catalogue{{Name: "neuroimaging", URL: exampleURL("neuroimaging"), Use: true}}},
+			wantStderr: "sciget: catalogue \"neuroimaging\" already exists with different URL, dir or layout; use --force-update to replace it, or choose another name\n",
+			wantList:   []catalogue{{Name: "neuroimaging", URL: exampleURL("neuroimaging"), Use: true}}},
 		{name: "catalogue add --force-update", args: []string{"catalogue", "add", "--force-update", "neuroimaging", mirrorURL},
 			catalogues: []testCatalogue{{name: "mylab", apps: labCatalogue}, {name: "neuroimaging", apps: fslCatalogue}},
 			wantStdout: "Catalogue \"neuroimaging\" added at the top. Run 'sciget refresh' to download it.\n",
@@ -225,6 +275,45 @@ func TestRun(t *testing.T) {
 			wantCode: 2, wantStderr: "sciget: invalid catalogue URL: must not contain credentials" + usageHint},
 		{name: "catalogue add without a URL", args: []string{"catalogue", "add", "mylab"}, wantCode: 2,
 			wantStderr: "sciget: accepts 2 arg(s), received 1" + usageHint},
+		{name: "catalogue add share", args: []string{"catalogue", "add", "--dir", "/share", "--layout", "{tool}/{version}/{date}", "neuroimaging", exampleURL("neuroimaging")},
+			wantStdout: "Catalogue \"neuroimaging\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantList:   []catalogue{{Name: "neuroimaging", URL: exampleURL("neuroimaging"), Use: true, Dir: "/share", Layout: "{tool}/{version}/{date}"}}},
+		{name: "catalogue relative dir", args: []string{"catalogue", "add", "--dir", "share", "a", exampleURL("a")},
+			wantStdout: "Catalogue \"a\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantList:   []catalogue{{Name: "a", URL: exampleURL("a"), Use: true, Dir: filepath.Join(cwd, "share")}}},
+		{name: "catalogue empty layout", args: []string{"catalogue", "add", "--dir", "/share", "--layout", "", "a", exampleURL("a")}, wantCode: 2,
+			wantStderrHas: "sciget: invalid layout:"},
+
+		{name: "catalogue share no-op", catalogues: []testCatalogue{{name: "neuroimaging", dir: "/share", layout: "{tool}/{version}/{date}"}},
+			args: []string{"catalogue", "add", "--dir", "/share", "--layout", "{tool}/{version}/{date}", "neuroimaging", exampleURL("neuroimaging")}, wantListSame: true,
+			wantStdout: "Catalogue \"neuroimaging\" already exists with the same URL, dir and layout; nothing to do.\n"},
+		{name: "catalogue share change needs force", catalogues: []testCatalogue{{name: "neuroimaging"}},
+			args: []string{"catalogue", "add", "--dir", "/share", "neuroimaging", exampleURL("neuroimaging")}, wantCode: 1, wantListSame: true,
+			wantStderrHas: "use --force-update"},
+		{name: "catalogue share update keeps cache", catalogues: neuroimaging,
+			args:       []string{"catalogue", "add", "--force-update", "--dir", "/share", "neuroimaging", exampleURL("neuroimaging")},
+			wantStdout: "Catalogue \"neuroimaging\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantList:   []catalogue{{Name: "neuroimaging", URL: exampleURL("neuroimaging"), Use: true, Dir: "/share"}}, wantCaches: []string{"neuroimaging"}},
+		{name: "catalogue layout change needs force", catalogues: []testCatalogue{{name: "neuroimaging", dir: "/share"}},
+			args: []string{"catalogue", "add", "--dir", "/share", "--layout", "{tool}/{version}/{date}", "neuroimaging", exampleURL("neuroimaging")}, wantCode: 1, wantListSame: true,
+			wantStderrHas: "use --force-update"},
+		{name: "catalogue layout update keeps cache", catalogues: []testCatalogue{{name: "neuroimaging", dir: "/share", apps: fslCatalogue}},
+			args:       []string{"catalogue", "add", "--force-update", "--dir", "/share", "--layout", "{tool}/{version}/{date}", "neuroimaging", exampleURL("neuroimaging")},
+			wantStdout: "Catalogue \"neuroimaging\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantList:   []catalogue{{Name: "neuroimaging", URL: exampleURL("neuroimaging"), Use: true, Dir: "/share", Layout: "{tool}/{version}/{date}"}}, wantCaches: []string{"neuroimaging"}},
+		{name: "catalogue layout requires dir", args: []string{"catalogue", "add", "--layout", "{tool}/{version}/{date}", "a", exampleURL("a")}, wantCode: 2,
+			wantStderr: "sciget: --layout requires --dir" + usageHint},
+		{name: "catalogue bad layout", args: []string{"catalogue", "add", "--dir", "/share", "--layout", "{name}", "a", exampleURL("a")}, wantCode: 2,
+			wantStderrHas: "sciget: invalid layout:"},
+		{name: "catalogue empty dir", args: []string{"catalogue", "add", "--dir", "", "a", exampleURL("a")}, wantCode: 2,
+			wantStderr: "sciget: --dir must not be empty" + usageHint},
+		{name: "catalogue use keeps share", args: []string{"catalogue", "use", "a"}, catalogues: []testCatalogue{{name: "a", dir: "/share", layout: "{tool}/{version}/{date}", unused: true}},
+			wantStdout: "Catalogue \"a\" in use at the top. Run 'sciget refresh' to update it.\n",
+			wantList:   []catalogue{{Name: "a", URL: exampleURL("a"), Use: true, Dir: "/share", Layout: "{tool}/{version}/{date}"}}},
+		{name: "catalogue unuse keeps share", args: []string{"catalogue", "unuse", "a"}, catalogues: []testCatalogue{{name: "a", dir: "/share", layout: "{tool}/{version}/{date}"}},
+			wantStdout: "Catalogue \"a\" no longer in use.\n",
+			wantList:   []catalogue{{Name: "a", URL: exampleURL("a"), Dir: "/share", Layout: "{tool}/{version}/{date}"}}},
+
 		{name: "catalogue remove", args: []string{"catalogue", "remove", "neuroimaging"},
 			catalogues: []testCatalogue{{name: "neuroimaging", apps: fslCatalogue},
 				{name: "neuro", url: exampleURL("neuroimaging"), apps: fslCatalogue}, {name: "mylab", apps: labCatalogue}},
@@ -259,10 +348,10 @@ func TestRun(t *testing.T) {
 			wantStderr: "sciget: no catalogue named \"x\"\n"},
 		{name: "catalogue list", args: []string{"catalogue", "list"},
 			catalogues: []testCatalogue{{name: "mylab"}, {name: "old", unused: true}, {name: "neuroimaging"}},
-			wantStdout: "mylab\t1\t" + exampleURL("mylab") + "\nold\t-\t" + exampleURL("old") +
-				"\nneuroimaging\t2\t" + exampleURL("neuroimaging") + "\n"},
+			wantStdout: "mylab\t1\t" + exampleURL("mylab") + "\t\nold\t-\t" + exampleURL("old") +
+				"\t\nneuroimaging\t2\t" + exampleURL("neuroimaging") + "\t\n"},
 		{name: "catalogue alone lists", args: []string{"catalogue"}, catalogues: []testCatalogue{{name: "mylab"}},
-			wantStdout: "mylab\t1\t" + exampleURL("mylab") + "\n"},
+			wantStdout: "mylab\t1\t" + exampleURL("mylab") + "\t\n"},
 		{name: "catalogue list with a broken list", args: []string{"catalogue", "list"}, list: "{", wantCode: 1,
 			wantStderrHas: "sciget: reading catalogues "},
 		{name: "catalogue use completes names", args: []string{"__complete", "catalogue", "use", "n"},
@@ -277,10 +366,10 @@ func TestRun(t *testing.T) {
 		{name: "catalogue completion with a broken list", args: []string{"__complete", "catalogue", "use", ""},
 			list: "{", wantStdout: ":1\n", wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
 
-		{name: "config lists", args: []string{"config"}, config: `{"cache_dir": "/c"}`,
-			wantStdout: "cache_dir\t/c\tconfig\n"},
-		{name: "config list", args: []string{"config", "list"}, config: `{"cache_dir": "/c"}`,
-			wantStdout: "cache_dir\t/c\tconfig\n"},
+		{name: "config lists", args: []string{"config"}, config: `{"cache_dir": "/c"}`, env: map[string]string{"XDG_DATA_HOME": "/data"},
+			wantStdout: "cache_dir\t/c\tconfig\ncontainer_dir\t/data/sciget/containers\tdefault\ncontainer_layout\t{tool}_{version}_{date}/{tool}_{version}_{date}.simg\tdefault\napptainer_path\tapptainer\tdefault\n"},
+		{name: "config list", args: []string{"config", "list"}, config: `{"cache_dir": "/c"}`, env: map[string]string{"XDG_DATA_HOME": "/data"},
+			wantStdout: "cache_dir\t/c\tconfig\ncontainer_dir\t/data/sciget/containers\tdefault\ncontainer_layout\t{tool}_{version}_{date}/{tool}_{version}_{date}.simg\tdefault\napptainer_path\tapptainer\tdefault\n"},
 		{name: "config with an unknown subcommand", args: []string{"config", "bogus"}, wantCode: 2,
 			wantStderr: "sciget: unknown command \"bogus\" for \"sciget config\"" + usageHint},
 		{name: "config get a default", args: []string{"config", "get", "cache_dir"},
@@ -293,7 +382,7 @@ func TestRun(t *testing.T) {
 			env: map[string]string{"XDG_CACHE_HOME": "", "HOME": "", "LocalAppData": ""}, wantCode: 1,
 			wantStderrHas: "defined\n"},
 		{name: "config get an unknown key", args: []string{"config", "get", "cache-dir"}, wantCode: 2,
-			wantStderr: "sciget: unknown key \"cache-dir\"; valid keys: cache_dir" + usageHint},
+			wantStderr: "sciget: unknown key \"cache-dir\"; valid keys: cache_dir, container_dir, container_layout, apptainer_path" + usageHint},
 		{name: "config get without a key", args: []string{"config", "get"}, wantCode: 2,
 			wantStderr: "sciget: accepts 1 arg(s), received 0" + usageHint},
 		{name: "config set", args: []string{"config", "set", "cache_dir", "/c"},
@@ -316,7 +405,7 @@ func TestRun(t *testing.T) {
 		{name: "config unset", args: []string{"config", "unset", "cache_dir"},
 			config: `{"cache_dir": "/c"}`, wantConfig: "{}\n"},
 		{name: "config completes keys", args: []string{"__complete", "config", "get", "c"},
-			wantStdout: "cache_dir\n:4\n", wantStderrHas: "Completion ended with directive"},
+			wantStdout: "cache_dir\ncontainer_dir\ncontainer_layout\n:4\n", wantStderrHas: "Completion ended with directive"},
 	}
 
 	for _, tt := range tests {
@@ -325,6 +414,7 @@ func TestRun(t *testing.T) {
 				t.Skip("root ignores file modes")
 			}
 			setCacheHome(t, t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
 			cache, err := os.UserCacheDir()
 			if err != nil {
 				t.Fatal(err)
@@ -336,6 +426,18 @@ func TestRun(t *testing.T) {
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
+			store := filepath.Join(os.Getenv("XDG_DATA_HOME"), "sciget", "containers")
+			for _, p := range tt.stored {
+				if err := os.MkdirAll(filepath.Join(store, p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var execArgs []string
+			runApptainer = func(path string, args, env []string) error {
+				execArgs = args
+				return nil
+			}
+			defer func() { runApptainer = execApptainer }()
 
 			base := ""
 			var requests []string
@@ -367,7 +469,7 @@ func TestRun(t *testing.T) {
 			if tt.catalogues != nil {
 				var catalogues []catalogue
 				for _, tc := range tt.catalogues {
-					c := catalogue{Name: tc.name, URL: tc.url, Use: !tc.unused}
+					c := catalogue{Name: tc.name, URL: tc.url, Use: !tc.unused, Dir: tc.dir, Layout: tc.layout}
 					switch {
 					case c.URL != "":
 					case base != "":
@@ -417,10 +519,24 @@ func TestRun(t *testing.T) {
 			}
 			var stdout, stderr bytes.Buffer
 			code := run(tt.args, &stdout, &stderr)
+			if tt.wantExec != nil {
+				want := slices.Clone(tt.wantExec)
+				for i, a := range want {
+					want[i] = strings.Replace(a, "STORE", store, 1)
+				}
+				if !slices.Equal(execArgs, want) {
+					t.Errorf("exec args = %q, want %q", execArgs, want)
+				}
+			} else if execArgs != nil {
+				t.Errorf("exec args = %q, want no hand-over", execArgs)
+			}
 			if code != tt.wantCode {
 				t.Errorf("exit code = %d, want %d", code, tt.wantCode)
 			}
 			got := stdout.String()
+			if tt.wantStdoutLacks != "" && strings.Contains(got, tt.wantStdoutLacks) {
+				t.Errorf("stdout contains %q: %q", tt.wantStdoutLacks, got)
+			}
 			if tt.wantStdoutHas != "" {
 				if !strings.Contains(got, tt.wantStdoutHas) {
 					t.Errorf("stdout = %q, want it to contain %q", got, tt.wantStdoutHas)

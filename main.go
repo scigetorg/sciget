@@ -79,6 +79,8 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newConfigCommand())
 	root.AddCommand(newRefreshCommand())
 	root.AddCommand(newCatalogueCommand())
+	root.AddCommand(newInfoCommand())
+	root.AddCommand(newApptainerCommand())
 	return root
 }
 
