@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -11,15 +12,27 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
 // configKey is one setting the config file may hold.
 type configKey struct {
 	name  string
-	check func(value string) error
-	path  bool // config set makes a relative value absolute
+	kind  valueKind
+	check func(value string) error // receives the text form; nil accepts any value of the kind
+	path  bool                     // config set makes a relative value absolute
 }
+
+// valueKind is the JSON type of a setting's value. The zero value is text.
+type valueKind int
+
+const (
+	textKind   valueKind = iota // a JSON string
+	numberKind                  // a JSON integer
+	boolKind                    // JSON true or false
+	listKind                    // a JSON array of strings
+)
 
 // configKeys lists every setting, in the order config list shows them.
 var configKeys = []configKey{
@@ -27,13 +40,23 @@ var configKeys = []configKey{
 	{name: "container_dir", check: checkAbsolute, path: true},
 	{name: "container_layout", check: checkLayout},
 	{name: "apptainer_path", check: checkApptainerPath},
+	{name: "apptainer_global_args", kind: listKind, check: eachElement(checkArg)},
+	{name: "apptainer_exec_args", kind: listKind, check: eachElement(checkVerbArg)},
+	{name: "apptainer_shell_args", kind: listKind, check: eachElement(checkVerbArg)},
+	{name: "apptainer_extra_args", kind: listKind, check: eachElement(checkArg)},
+	{name: "apptainer_pass_env", kind: listKind, check: eachElement(checkEnvName)},
+	{name: "xauthority_var", check: checkEnvName},
+	{name: "tmp_vars", kind: listKind, check: eachElement(checkEnvName)},
+	{name: "tmp_target", check: checkBindTarget},
+	{name: "use_catalogue_args", kind: boolKind},
+	{name: "max_catalogue_size", kind: numberKind, check: checkCatalogueSize},
 }
 
 //go:embed defaults.json
 var defaultsJSON []byte
 
-// config is a loaded config file: its path and the keys it sets. Keys it
-// does not set have their default.
+// config is a loaded config file: its path and the keys it sets, each in
+// its text form. Keys it does not set have their default.
 type config struct {
 	path      string
 	overrides map[string]string
@@ -62,8 +85,8 @@ func configPath() (string, error) {
 }
 
 // loadConfig reads the config file at path. A missing file sets nothing.
-// Anything but a JSON object of known keys with valid string values is an
-// error.
+// Anything but a JSON object of known keys with valid values of their kinds
+// is an error.
 func loadConfig(path string) (config, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -72,27 +95,33 @@ func loadConfig(path string) (config, error) {
 	if err != nil {
 		return config{}, fmt.Errorf("reading config: %w", err)
 	}
-	var overrides map[string]string
-	if err := json.Unmarshal(data, &overrides); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return config{}, fmt.Errorf("reading config %s: %w", path, err)
 	}
-	if overrides == nil {
+	if raw == nil {
 		return config{}, fmt.Errorf("reading config %s: not a JSON object", path)
 	}
-	for _, name := range slices.Sorted(maps.Keys(overrides)) {
+	overrides := map[string]string{}
+	for _, name := range slices.Sorted(maps.Keys(raw)) {
 		key, err := findConfigKey(name)
 		if err != nil {
 			return config{}, fmt.Errorf("reading config %s: %w", path, err)
 		}
-		if err := key.check(overrides[name]); err != nil {
+		value, err := valueText(key.kind, raw[name])
+		if err == nil {
+			err = key.validate(value)
+		}
+		if err != nil {
 			return config{}, fmt.Errorf("reading config %s: invalid %s: %w", path, name, err)
 		}
+		overrides[name] = value
 	}
 	return config{path: path, overrides: overrides}, nil
 }
 
-// get returns the value of the named key and where it came from: "config"
-// if the file sets it, otherwise "default".
+// get returns the text form of the named key's value and where it came
+// from: "config" if the file sets it, otherwise "default".
 func (c config) get(name string) (value, source string, err error) {
 	key, err := findConfigKey(name)
 	if err != nil {
@@ -105,9 +134,41 @@ func (c config) get(name string) (value, source string, err error) {
 	return v, "default", err
 }
 
-// set checks value, stores it under name and writes the file. A relative
-// path is made absolute first. An unknown name or invalid value is a
-// usageError.
+// getList returns the value of the named list key.
+func (c config) getList(name string) ([]string, error) {
+	value, _, err := c.get(name)
+	if err != nil {
+		return nil, err
+	}
+	var list []string
+	if err := json.Unmarshal([]byte(value), &list); err != nil {
+		return nil, fmt.Errorf("reading %s: %w", name, err)
+	}
+	return list, nil
+}
+
+// getNumber returns the value of the named number key.
+func (c config) getNumber(name string) (int64, error) {
+	value, _, err := c.get(name)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("reading %s: %w", name, err)
+	}
+	return n, nil
+}
+
+// getBool returns the value of the named bool key.
+func (c config) getBool(name string) (bool, error) {
+	value, _, err := c.get(name)
+	return value == "true", err
+}
+
+// set checks value, given in its text form, stores it under name and
+// writes the file. A relative path is made absolute first. An unknown name
+// or invalid value is a usageError.
 func (c config) set(name, value string) error {
 	key, err := findConfigKey(name)
 	if err != nil {
@@ -118,7 +179,13 @@ func (c config) set(name, value string) error {
 			return fmt.Errorf("making %s absolute: %w", name, err)
 		}
 	}
-	if err := key.check(value); err != nil {
+	if key.kind != textKind {
+		// Canonical form, so "[ \"a\" ]" is stored and printed as ["a"].
+		if value, err = valueText(key.kind, []byte(value)); err != nil {
+			return usageError{fmt.Sprintf("invalid %s: %s", name, err)}
+		}
+	}
+	if err := key.validate(value); err != nil {
 		return usageError{fmt.Sprintf("invalid %s: %s", name, err)}
 	}
 	c.overrides[name] = value
@@ -138,9 +205,22 @@ func (c config) unset(name string) error {
 	return writeConfig(c.path, c.overrides)
 }
 
-// writeConfig writes overrides to the config file at path, in place.
+// writeConfig writes overrides, each in its text form, to the config file
+// at path, in place, each as its kind's JSON type.
 func writeConfig(path string, overrides map[string]string) error {
-	if err := writeJSONFile(path, overrides); err != nil {
+	values := map[string]any{}
+	for name, value := range overrides {
+		key, err := findConfigKey(name)
+		if err != nil {
+			return fmt.Errorf("writing config: %w", err)
+		}
+		if key.kind == textKind {
+			values[name] = value
+		} else {
+			values[name] = json.RawMessage(value)
+		}
+	}
+	if err := writeJSONFile(path, values); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 	return nil
@@ -193,10 +273,10 @@ func findConfigKey(name string) (configKey, error) {
 	return configKey{}, fmt.Errorf("unknown key %q; valid keys: %s", name, strings.Join(names, ", "))
 }
 
-// defaultValue returns a key's default from defaults.json, with base
-// directories expanded in path keys.
+// defaultValue returns the text form of a key's default from
+// defaults.json, with base directories expanded in path keys.
 func defaultValue(name string) (string, error) {
-	var defaults map[string]string
+	var defaults map[string]json.RawMessage
 	if err := json.Unmarshal(defaultsJSON, &defaults); err != nil {
 		return "", fmt.Errorf("reading defaults: %w", err)
 	}
@@ -204,19 +284,72 @@ func defaultValue(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	value, ok := defaults[name]
+	raw, ok := defaults[name]
 	if !ok {
 		return "", fmt.Errorf("no default for %s", name)
+	}
+	value, err := valueText(key.kind, raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid default for %s: %w", name, err)
 	}
 	if key.path {
 		if value, err = expandBaseDirs(value); err != nil {
 			return "", fmt.Errorf("invalid default for %s: %w", name, err)
 		}
 	}
-	if err := key.check(value); err != nil {
+	if err := key.validate(value); err != nil {
 		return "", fmt.Errorf("invalid default for %s: %w", name, err)
 	}
 	return value, nil
+}
+
+// validate checks a value in its text form with the key's check, if any.
+func (k configKey) validate(value string) error {
+	if k.check == nil {
+		return nil
+	}
+	return k.check(value)
+}
+
+// valueText returns a value read from a JSON file in its text form: a text
+// value as is, any other kind as compact JSON. The text form is what config
+// get prints, config set takes and checks receive.
+func valueText(kind valueKind, raw []byte) (string, error) {
+	// Unmarshal turns null into a zero value without error.
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return "", errors.New("must not be null")
+	}
+	switch kind {
+	case numberKind:
+		var n int64
+		if err := json.Unmarshal(raw, &n); err != nil {
+			return "", errors.New("must be a whole number")
+		}
+		return strconv.FormatInt(n, 10), nil
+	case boolKind:
+		var b bool
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return "", errors.New("must be true or false")
+		}
+		return strconv.FormatBool(b), nil
+	case listKind:
+		var list []string
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return "", errors.New("must be a JSON array of strings")
+		}
+		var out bytes.Buffer
+		enc := json.NewEncoder(&out)
+		enc.SetEscapeHTML(false) // keep "&" and "<" readable in config list
+		if err := enc.Encode(list); err != nil {
+			return "", err
+		}
+		return strings.TrimSuffix(out.String(), "\n"), nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return "", errors.New("must be a JSON string")
+	}
+	return text, nil
 }
 
 // baseDirs lists the placeholders a default path may use.
@@ -293,6 +426,87 @@ func checkLayout(value string) error {
 		if element == "" || element == ".." || strings.ContainsRune(element, 0) {
 			return errors.New("must have no empty or '..' path elements or NUL")
 		}
+	}
+	return nil
+}
+
+// eachElement turns a check of one string into a check of a list's text
+// form.
+func eachElement(check func(string) error) func(string) error {
+	return func(value string) error {
+		var list []string
+		if err := json.Unmarshal([]byte(value), &list); err != nil {
+			return err
+		}
+		for _, element := range list {
+			if err := check(element); err != nil {
+				return fmt.Errorf("%q %w", element, err)
+			}
+		}
+		return nil
+	}
+}
+
+// checkArg checks one literal Apptainer argument.
+func checkArg(value string) error {
+	switch {
+	case value == "":
+		return errors.New("must not be empty")
+	case strings.ContainsRune(value, 0):
+		return errors.New("must not contain NUL")
+	case strings.ContainsAny(value, "{}"):
+		return errors.New("must not contain { or }")
+	}
+	return nil
+}
+
+// checkVerbArg checks one verb argument: a placeholder or a literal.
+func checkVerbArg(value string) error {
+	if _, ok := placeholderArgs[value]; ok {
+		return nil
+	}
+	if strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}") {
+		return errors.New("is not a known placeholder")
+	}
+	return checkArg(value)
+}
+
+// checkEnvName checks an environment variable name.
+func checkEnvName(value string) error {
+	for i, r := range value {
+		if r == '_' || 'A' <= r && r <= 'Z' || 'a' <= r && r <= 'z' || i > 0 && '0' <= r && r <= '9' {
+			continue
+		}
+		return errors.New("must be an environment variable name")
+	}
+	if value == "" {
+		return errors.New("must be an environment variable name")
+	}
+	return nil
+}
+
+// bindSeparators are the characters Apptainer splits a --bind value on.
+const bindSeparators = `,:\`
+
+// checkBindTarget checks a path used as the target of a --bind.
+func checkBindTarget(value string) error {
+	if err := checkAbsolute(value); err != nil {
+		return err
+	}
+	if strings.ContainsAny(value, bindSeparators) {
+		return errors.New(`must not contain "," ":" or "\"`)
+	}
+	return nil
+}
+
+// maxCatalogueLimit bounds max_catalogue_size, so that limit+1 cannot
+// overflow when a download reads one byte past it.
+const maxCatalogueLimit = 1 << 40
+
+func checkCatalogueSize(value string) error {
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < 1 || n > maxCatalogueLimit {
+		return fmt.Errorf("must be from 1 to %d (1 TiB)", int64(maxCatalogueLimit))
 	}
 	return nil
 }

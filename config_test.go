@@ -35,8 +35,8 @@ func TestLoadConfig(t *testing.T) {
 		{name: "keys match exactly", json: `{"CACHE_DIR": "/c"}`, wantErr: `unknown key "CACHE_DIR"`},
 		{name: "kebab-case", json: `{"cache-dir": "/c"}`, wantErr: `unknown key "cache-dir"`},
 		{name: "empty value", json: `{"cache_dir": ""}`, wantErr: "invalid cache_dir: must be an absolute path"},
-		{name: "null value", json: `{"cache_dir": null}`, wantErr: "invalid cache_dir: must be an absolute path"},
-		{name: "number value", json: `{"cache_dir": 5}`, wantErr: "cannot unmarshal number"},
+		{name: "null value", json: `{"cache_dir": null}`, wantErr: "invalid cache_dir: must not be null"},
+		{name: "number value", json: `{"cache_dir": 5}`, wantErr: "invalid cache_dir: must be a JSON string"},
 		{name: "container path", json: `{"container_dir": "/containers"}`, want: map[string]string{"container_dir": "/containers"}},
 		{name: "relative container path", json: `{"container_dir": "containers"}`, wantErr: "invalid container_dir"},
 		{name: "layout", json: `{"container_layout": "{tool}/{version}/{date}"}`, want: map[string]string{"container_layout": "{tool}/{version}/{date}"}},
@@ -333,35 +333,50 @@ func TestWriteConfigList(t *testing.T) {
 		t.Fatal(err)
 	}
 	cacheDir := filepath.Join(cache, "sciget")
-	containerDir := filepath.Join("/data", "sciget", "containers")
+	verbArgs := `["--cleanenv","{env}","{xauthority}","{tmp}","{pwd}"]`
+	// Every key after cache_dir, at its default.
+	rest := [][2]string{
+		{"container_dir", filepath.Join("/data", "sciget", "containers")},
+		{"container_layout", layout},
+		{"apptainer_path", "apptainer"},
+		{"apptainer_global_args", `["--silent"]`},
+		{"apptainer_exec_args", verbArgs},
+		{"apptainer_shell_args", verbArgs},
+		{"apptainer_extra_args", "[]"},
+		{"apptainer_pass_env", `["DISPLAY"]`},
+		{"xauthority_var", "XAUTHORITY"},
+		{"tmp_vars", `["TMP","TMPDIR","TEMP","TEMPDIR"]`},
+		{"tmp_target", "/tmp"},
+		{"use_catalogue_args", "true"},
+		{"max_catalogue_size", "67108864"},
+	}
+	var piped, aligned strings.Builder
+	width := len(verbArgs) + 2
+	fmt.Fprintf(&aligned, "%-23s%-*s%s\n", "KEY", width, "VALUE", "SOURCE")
+	fmt.Fprintf(&aligned, "%-23s%-*s%s\n", "cache_dir", width, cacheDir, "default")
+	for _, row := range rest {
+		fmt.Fprintf(&piped, "%s\t%s\tdefault\n", row[0], row[1])
+		fmt.Fprintf(&aligned, "%-23s%-*s%s\n", row[0], width, row[1], "default")
+	}
 	tests := []struct {
 		name      string
 		overrides map[string]string
 		terminal  bool
 		want      string
 	}{
-		{name: "tab-separated when piped", want: "cache_dir\t" + cacheDir + "\tdefault\n"},
-		{name: "from the config", overrides: map[string]string{"cache_dir": "/c"}, want: "cache_dir\t/c\tconfig\n"},
-		{name: "aligned with a header on a terminal", terminal: true,
-			want: fmt.Sprintf("%-18s%-*s%s\n", "KEY", len(layout)+2, "VALUE", "SOURCE") +
-				fmt.Sprintf("%-18s%-*s%s\n", "cache_dir", len(layout)+2, cacheDir, "default") +
-				fmt.Sprintf("%-18s%-*s%s\n", "container_dir", len(layout)+2, containerDir, "default") +
-				fmt.Sprintf("%-18s%-*s%s\n", "container_layout", len(layout)+2, layout, "default") +
-				fmt.Sprintf("%-18s%-*s%s\n", "apptainer_path", len(layout)+2, "apptainer", "default")},
+		{name: "tab-separated when piped", want: "cache_dir\t" + cacheDir + "\tdefault\n" + piped.String()},
+		{name: "from the config", overrides: map[string]string{"cache_dir": "/c"}, want: "cache_dir\t/c\tconfig\n" + piped.String()},
+		{name: "aligned with a header on a terminal", terminal: true, want: aligned.String()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			want := tt.want
-			if !tt.terminal {
-				want += "container_dir\t" + containerDir + "\tdefault\ncontainer_layout\t" + layout + "\tdefault\napptainer_path\tapptainer\tdefault\n"
-			}
 			c := config{overrides: tt.overrides}
 			var out bytes.Buffer
 			if err := writeConfigList(&out, c, tt.terminal); err != nil {
 				t.Fatal(err)
 			}
-			if got := out.String(); got != want {
-				t.Errorf("output = %q, want %q", got, want)
+			if got := out.String(); got != tt.want {
+				t.Errorf("output = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -370,7 +385,7 @@ func TestWriteConfigList(t *testing.T) {
 func TestDefaultValue(t *testing.T) {
 	setCacheHome(t, t.TempDir())
 	setConfigHome(t, t.TempDir())
-	var defaults map[string]string
+	var defaults map[string]json.RawMessage
 	if err := json.Unmarshal(defaultsJSON, &defaults); err != nil {
 		t.Fatal(err)
 	}
@@ -387,11 +402,11 @@ func TestDefaultValue(t *testing.T) {
 			if _, ok := defaults[key.name]; !ok {
 				t.Fatal("missing default")
 			}
-			value, err := defaultValue(key.name)
+			value, err := defaultValue(key.name) // decodes it as key.kind
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := key.check(value); err != nil {
+			if err := key.validate(value); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -436,6 +451,79 @@ func TestCheckApptainerPath(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := checkApptainerPath(tt.value); (err != nil) != tt.bad {
+				t.Errorf("error = %v, want error: %v", err, tt.bad)
+			}
+		})
+	}
+}
+
+func TestValueText(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		kind    valueKind
+		json    string
+		want    string
+		wantErr string
+	}{
+		{name: "text", json: `"/c"`, want: "/c"},
+		{name: "text null", json: "null", wantErr: "must not be null"},
+		{name: "number", kind: numberKind, json: "1024", want: "1024"},
+		{name: "number fraction", kind: numberKind, json: "1.5", wantErr: "must be a whole number"},
+		{name: "number string", kind: numberKind, json: `"1"`, wantErr: "must be a whole number"},
+		{name: "bool", kind: boolKind, json: "false", want: "false"},
+		{name: "bool string", kind: boolKind, json: `"true"`, wantErr: "must be true or false"},
+		{name: "list compacted", kind: listKind, json: `[ "--bind", "a&b" ]`, want: `["--bind","a&b"]`},
+		{name: "empty list", kind: listKind, json: "[]", want: "[]"},
+		{name: "list null", kind: listKind, json: " null ", wantErr: "must not be null"},
+		{name: "list of numbers", kind: listKind, json: "[1]", wantErr: "must be a JSON array of strings"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := valueText(tt.kind, []byte(tt.json))
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Errorf("valueText() = %q, %v, want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLaunchChecks(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		check func(string) error
+		value string
+		bad   bool
+	}{
+		{name: "arg", check: checkArg, value: "--nv"},
+		{name: "empty arg", check: checkArg, bad: true},
+		{name: "NUL arg", check: checkArg, value: "a\x00", bad: true},
+		{name: "arg with a brace", check: checkArg, value: "{pwd}", bad: true},
+		{name: "verb arg placeholder", check: checkVerbArg, value: "{tmp}"},
+		{name: "verb arg literal", check: checkVerbArg, value: "--cleanenv"},
+		{name: "verb arg unknown placeholder", check: checkVerbArg, value: "{home}", bad: true},
+		{name: "verb arg brace inside", check: checkVerbArg, value: "a{pwd}", bad: true},
+		{name: "env name", check: checkEnvName, value: "WAYLAND_DISPLAY2"},
+		{name: "env name leading digit", check: checkEnvName, value: "2X", bad: true},
+		{name: "env name with a dash", check: checkEnvName, value: "A-B", bad: true},
+		{name: "empty env name", check: checkEnvName, bad: true},
+		{name: "bind target", check: checkBindTarget, value: "/scratch"},
+		{name: "relative bind target", check: checkBindTarget, value: "tmp", bad: true},
+		{name: "bind target with a colon", check: checkBindTarget, value: "/a:b", bad: true},
+		{name: "bind target with a comma", check: checkBindTarget, value: "/a,b", bad: true},
+		{name: "size", check: checkCatalogueSize, value: "1"},
+		{name: "size at the cap", check: checkCatalogueSize, value: "1099511627776"},
+		{name: "size zero", check: checkCatalogueSize, value: "0", bad: true},
+		{name: "size over the cap", check: checkCatalogueSize, value: "1099511627777", bad: true},
+		{name: "list elements", check: eachElement(checkEnvName), value: `["TMP","TMPDIR"]`},
+		{name: "list with a bad element", check: eachElement(checkEnvName), value: `["TMP","1"]`, bad: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.check(tt.value); (err != nil) != tt.bad {
 				t.Errorf("error = %v, want error: %v", err, tt.bad)
 			}
 		})

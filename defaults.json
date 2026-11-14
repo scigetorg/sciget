@@ -2,5 +2,15 @@
   "cache_dir": "{user_cache_dir}/sciget",
   "container_dir": "{user_data_dir}/sciget/containers",
   "container_layout": "{tool}_{version}_{date}/{tool}_{version}_{date}.simg",
-  "apptainer_path": "apptainer"
+  "apptainer_path": "apptainer",
+  "apptainer_global_args": ["--silent"],
+  "apptainer_exec_args": ["--cleanenv", "{env}", "{xauthority}", "{tmp}", "{pwd}"],
+  "apptainer_shell_args": ["--cleanenv", "{env}", "{xauthority}", "{tmp}", "{pwd}"],
+  "apptainer_extra_args": [],
+  "apptainer_pass_env": ["DISPLAY"],
+  "xauthority_var": "XAUTHORITY",
+  "tmp_vars": ["TMP", "TMPDIR", "TEMP", "TEMPDIR"],
+  "tmp_target": "/tmp",
+  "use_catalogue_args": true,
+  "max_catalogue_size": 67108864
 }
