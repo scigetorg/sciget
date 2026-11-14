@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -36,6 +37,12 @@ func TestLoadConfig(t *testing.T) {
 		{name: "empty value", json: `{"cache_dir": ""}`, wantErr: "invalid cache_dir: must be an absolute path"},
 		{name: "null value", json: `{"cache_dir": null}`, wantErr: "invalid cache_dir: must be an absolute path"},
 		{name: "number value", json: `{"cache_dir": 5}`, wantErr: "cannot unmarshal number"},
+		{name: "container path", json: `{"container_dir": "/containers"}`, want: map[string]string{"container_dir": "/containers"}},
+		{name: "relative container path", json: `{"container_dir": "containers"}`, wantErr: "invalid container_dir"},
+		{name: "layout", json: `{"container_layout": "{tool}/{version}/{date}"}`, want: map[string]string{"container_layout": "{tool}/{version}/{date}"}},
+		{name: "bad layout", json: `{"container_layout": "{name}"}`, wantErr: "invalid container_layout"},
+		{name: "binary name", json: `{"apptainer_path": "singularity"}`, want: map[string]string{"apptainer_path": "singularity"}},
+		{name: "relative binary path", json: `{"apptainer_path": "bin/apptainer"}`, wantErr: "invalid apptainer_path"},
 		{name: "relative path", json: `{"cache_dir": "cache"}`, wantErr: "invalid cache_dir: must be an absolute path"},
 	}
 
@@ -162,6 +169,10 @@ func TestConfigSet(t *testing.T) {
 			key: "cache_dir", value: "/d", want: "{\n  \"cache_dir\": \"/d\"\n}\n"},
 		{name: "relative path made absolute", key: "cache_dir", value: "cache",
 			want: fmt.Sprintf("{\n  \"cache_dir\": %q\n}\n", filepath.Join(cwd, "cache"))},
+		{name: "relative container directory", key: "container_dir", value: "containers",
+			want: fmt.Sprintf("{\n  \"container_dir\": %q\n}\n", filepath.Join(cwd, "containers"))},
+		{name: "bad layout", key: "container_layout", value: "{tool}/{version}", wantUsageErr: "invalid container_layout"},
+		{name: "relative binary path", key: "apptainer_path", value: "bin/apptainer", wantUsageErr: "invalid apptainer_path"},
 		{name: "empty value", key: "cache_dir", wantUsageErr: "invalid cache_dir: must be an absolute path"},
 		{name: "unknown key", key: "CACHE_DIR", value: "/c", wantUsageErr: `unknown key "CACHE_DIR"`},
 	}
@@ -312,12 +323,17 @@ func TestWriteConfig(t *testing.T) {
 
 func TestWriteConfigList(t *testing.T) {
 	setCacheHome(t, "/home")
+	t.Setenv("XDG_DATA_HOME", "/data")
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		t.Fatal(err)
 	}
+	layout, err := defaultValue("container_layout")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cacheDir := filepath.Join(cache, "sciget")
-	width := len(cacheDir) + 2
+	containerDir := filepath.Join("/data", "sciget", "containers")
 	tests := []struct {
 		name      string
 		overrides map[string]string
@@ -325,22 +341,102 @@ func TestWriteConfigList(t *testing.T) {
 		want      string
 	}{
 		{name: "tab-separated when piped", want: "cache_dir\t" + cacheDir + "\tdefault\n"},
-		{name: "from the config", overrides: map[string]string{"cache_dir": "/c"},
-			want: "cache_dir\t/c\tconfig\n"},
+		{name: "from the config", overrides: map[string]string{"cache_dir": "/c"}, want: "cache_dir\t/c\tconfig\n"},
 		{name: "aligned with a header on a terminal", terminal: true,
-			want: fmt.Sprintf("%-11s%-*s%s\n", "KEY", width, "VALUE", "SOURCE") +
-				fmt.Sprintf("%-11s%-*s%s\n", "cache_dir", width, cacheDir, "default")},
+			want: fmt.Sprintf("%-18s%-*s%s\n", "KEY", len(layout)+2, "VALUE", "SOURCE") +
+				fmt.Sprintf("%-18s%-*s%s\n", "cache_dir", len(layout)+2, cacheDir, "default") +
+				fmt.Sprintf("%-18s%-*s%s\n", "container_dir", len(layout)+2, containerDir, "default") +
+				fmt.Sprintf("%-18s%-*s%s\n", "container_layout", len(layout)+2, layout, "default") +
+				fmt.Sprintf("%-18s%-*s%s\n", "apptainer_path", len(layout)+2, "apptainer", "default")},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			want := tt.want
+			if !tt.terminal {
+				want += "container_dir\t" + containerDir + "\tdefault\ncontainer_layout\t" + layout + "\tdefault\napptainer_path\tapptainer\tdefault\n"
+			}
 			c := config{overrides: tt.overrides}
 			var out bytes.Buffer
 			if err := writeConfigList(&out, c, tt.terminal); err != nil {
 				t.Fatal(err)
 			}
-			if got := out.String(); got != tt.want {
-				t.Errorf("output =\n%s\nwant\n%s", got, tt.want)
+			if got := out.String(); got != want {
+				t.Errorf("output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestDefaultValue(t *testing.T) {
+	setCacheHome(t, t.TempDir())
+	setConfigHome(t, t.TempDir())
+	var defaults map[string]string
+	if err := json.Unmarshal(defaultsJSON, &defaults); err != nil {
+		t.Fatal(err)
+	}
+	if len(defaults) != len(configKeys) {
+		t.Fatalf("defaults has %d keys, configKeys has %d", len(defaults), len(configKeys))
+	}
+	for name := range defaults {
+		if _, err := findConfigKey(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, key := range configKeys {
+		t.Run(key.name, func(t *testing.T) {
+			if _, ok := defaults[key.name]; !ok {
+				t.Fatal("missing default")
+			}
+			value, err := defaultValue(key.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := key.check(value); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name, key, cacheHome, dataHome, want string
+	}{
+		{name: "XDG data home", key: "container_dir", dataHome: "/data",
+			want: filepath.Join("/data", "sciget", "containers")},
+		{name: "home fallback", key: "container_dir",
+			want: filepath.Join(os.Getenv("HOME"), ".local", "share", "sciget", "containers")},
+		{name: "braces in a base directory", key: "cache_dir", cacheHome: "/scratch/{project}",
+			want: filepath.Join("/scratch/{project}", "sciget")},
+		{name: "placeholder in a base directory", key: "container_dir", dataHome: "/d/{user_cache_dir}",
+			want: filepath.Join("/d/{user_cache_dir}", "sciget", "containers")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.cacheHome != "" {
+				t.Setenv("XDG_CACHE_HOME", tt.cacheHome)
+			}
+			t.Setenv("XDG_DATA_HOME", tt.dataHome)
+			value, err := defaultValue(tt.key)
+			if err != nil || value != tt.want {
+				t.Errorf("default = %q, %v, want %q", value, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckApptainerPath(t *testing.T) {
+	for _, tt := range []struct {
+		name, value string
+		bad         bool
+	}{
+		{name: "name", value: "apptainer"},
+		{name: "alternative name", value: "singularity"},
+		{name: "absolute", value: filepath.Join(t.TempDir(), "apptainer")},
+		{name: "relative", value: "bin/apptainer", bad: true},
+		{name: "dot relative", value: "./apptainer", bad: true},
+		{name: "empty", bad: true},
+		{name: "NUL", value: "apptainer\x00", bad: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := checkApptainerPath(tt.value); (err != nil) != tt.bad {
+				t.Errorf("error = %v, want error: %v", err, tt.bad)
 			}
 		})
 	}

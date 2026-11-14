@@ -1,0 +1,6 @@
+{
+  "cache_dir": "{user_cache_dir}/sciget",
+  "container_dir": "{user_data_dir}/sciget/containers",
+  "container_layout": "{tool}_{version}_{date}/{tool}_{version}_{date}.simg",
+  "apptainer_path": "apptainer"
+}

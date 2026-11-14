@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,16 +16,21 @@ import (
 
 // configKey is one setting the config file may hold.
 type configKey struct {
-	name         string
-	defaultValue func() (string, error)
-	check        func(value string) error
-	path         bool // config set makes a relative value absolute
+	name  string
+	check func(value string) error
+	path  bool // config set makes a relative value absolute
 }
 
 // configKeys lists every setting, in the order config list shows them.
 var configKeys = []configKey{
-	{name: "cache_dir", defaultValue: defaultCacheDir, check: checkAbsolute, path: true},
+	{name: "cache_dir", check: checkAbsolute, path: true},
+	{name: "container_dir", check: checkAbsolute, path: true},
+	{name: "container_layout", check: checkLayout},
+	{name: "apptainer_path", check: checkApptainerPath},
 }
+
+//go:embed defaults.json
+var defaultsJSON []byte
 
 // config is a loaded config file: its path and the keys it sets. Keys it
 // does not set have their default.
@@ -95,7 +101,7 @@ func (c config) get(name string) (value, source string, err error) {
 	if v, ok := c.overrides[name]; ok {
 		return v, "config", nil
 	}
-	v, err := key.defaultValue()
+	v, err := defaultValue(key.name)
 	return v, "default", err
 }
 
@@ -187,12 +193,108 @@ func findConfigKey(name string) (configKey, error) {
 	return configKey{}, fmt.Errorf("unknown key %q; valid keys: %s", name, strings.Join(names, ", "))
 }
 
-func defaultCacheDir() (string, error) {
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("finding the cache directory: %w", err)
+// defaultValue returns a key's default from defaults.json, with base
+// directories expanded in path keys.
+func defaultValue(name string) (string, error) {
+	var defaults map[string]string
+	if err := json.Unmarshal(defaultsJSON, &defaults); err != nil {
+		return "", fmt.Errorf("reading defaults: %w", err)
 	}
-	return filepath.Join(dir, "sciget"), nil
+	key, err := findConfigKey(name)
+	if err != nil {
+		return "", err
+	}
+	value, ok := defaults[name]
+	if !ok {
+		return "", fmt.Errorf("no default for %s", name)
+	}
+	if key.path {
+		if value, err = expandBaseDirs(value); err != nil {
+			return "", fmt.Errorf("invalid default for %s: %w", name, err)
+		}
+	}
+	if err := key.check(value); err != nil {
+		return "", fmt.Errorf("invalid default for %s: %w", name, err)
+	}
+	return value, nil
+}
+
+// baseDirs lists the placeholders a default path may use.
+var baseDirs = []struct {
+	placeholder string
+	dir         func() (string, error)
+}{
+	{placeholder: "{user_cache_dir}", dir: os.UserCacheDir},
+	{placeholder: "{user_config_dir}", dir: os.UserConfigDir},
+	{placeholder: "{user_data_dir}", dir: userDataDir},
+}
+
+// expandBaseDirs replaces the baseDirs placeholders in template, resolving
+// only those it uses.
+func expandBaseDirs(template string) (string, error) {
+	// Check the template, not the result: a base directory may contain braces.
+	remaining := template
+	for _, b := range baseDirs {
+		remaining = strings.ReplaceAll(remaining, b.placeholder, "")
+	}
+	if strings.ContainsAny(remaining, "{}") {
+		return "", errors.New("unknown placeholder")
+	}
+	var pairs []string
+	for _, b := range baseDirs {
+		if !strings.Contains(template, b.placeholder) {
+			continue
+		}
+		dir, err := b.dir()
+		if err != nil {
+			return "", fmt.Errorf("expanding %s: %w", b.placeholder, err)
+		}
+		pairs = append(pairs, b.placeholder, filepath.ToSlash(dir))
+	}
+	// One pass, so a placeholder inside a base directory is left alone.
+	return filepath.FromSlash(strings.NewReplacer(pairs...).Replace(template)), nil
+}
+
+// userDataDir returns $XDG_DATA_HOME, else ~/.local/share, on every platform.
+func userDataDir() (string, error) {
+	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "share"), nil
+}
+
+func checkApptainerPath(value string) error {
+	if value == "" || strings.ContainsRune(value, 0) || !filepath.IsAbs(value) && strings.ContainsAny(value, "/"+string(filepath.Separator)) {
+		return errors.New("must be a bare name or an absolute path")
+	}
+	return nil
+}
+
+// checkLayout validates the placeholders and relative path of a layout.
+func checkLayout(value string) error {
+	remaining := value
+	for _, placeholder := range []string{"{tool}", "{version}", "{date}"} {
+		if !strings.Contains(value, placeholder) {
+			return fmt.Errorf("must contain %s", placeholder)
+		}
+		remaining = strings.ReplaceAll(remaining, placeholder, "x")
+	}
+	if strings.ContainsAny(remaining, "{}") {
+		return errors.New("unknown layout placeholder")
+	}
+	if filepath.IsAbs(remaining) || filepath.VolumeName(remaining) != "" {
+		return errors.New("must be a relative path")
+	}
+	for _, element := range strings.Split(filepath.ToSlash(remaining), "/") {
+		if element == "" || element == ".." || strings.ContainsRune(element, 0) {
+			return errors.New("must have no empty or '..' path elements or NUL")
+		}
+	}
+	return nil
 }
 
 func checkAbsolute(value string) error {
