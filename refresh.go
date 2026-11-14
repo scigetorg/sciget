@@ -22,10 +22,18 @@ func newRefreshCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cfg, err := readConfig()
+			if err != nil {
+				return err
+			}
+			maxSize, err := cfg.getNumber("max_catalogue_size")
+			if err != nil {
+				return err
+			}
 			client := &http.Client{}
 			var failures []error
 			for _, cat := range used {
-				changed, err := refreshCatalogue(client, cat.URL, cat.dir(cacheDir))
+				changed, err := refreshCatalogue(client, cat.URL, cat.dir(cacheDir), maxSize)
 				if err != nil {
 					failures = append(failures, fmt.Errorf("catalogue %q: %w", cat.Name, err))
 					continue
@@ -45,9 +53,10 @@ func newRefreshCommand() *cobra.Command {
 
 // refreshCatalogue downloads the catalogue at catalogueURL and, if it differs
 // from apps.json in dir, replaces that file. It reports whether it did. Each
-// success also writes the URL to dir's url file.
-func refreshCatalogue(client *http.Client, catalogueURL, dir string) (bool, error) {
-	data, err := downloadCatalogue(client, catalogueURL)
+// success also writes the URL to dir's url file. A catalogue larger than
+// maxSize bytes is an error.
+func refreshCatalogue(client *http.Client, catalogueURL, dir string, maxSize int64) (bool, error) {
+	data, err := downloadCatalogue(client, catalogueURL, maxSize)
 	if err != nil {
 		return false, err
 	}
@@ -71,13 +80,10 @@ func refreshCatalogue(client *http.Client, catalogueURL, dir string) (bool, erro
 	return true, nil
 }
 
-// maxCatalogueSize bounds a downloaded catalogue, so a catalogue URL that
-// names some other, larger file fails before it fills memory.
-const maxCatalogueSize = 64 << 20
-
 // downloadCatalogue returns the body of a GET of catalogueURL, which must
-// answer 200 with at most maxCatalogueSize bytes.
-func downloadCatalogue(client *http.Client, catalogueURL string) ([]byte, error) {
+// answer 200 with at most maxSize bytes, so a catalogue URL that names some
+// other, larger file fails before it fills memory.
+func downloadCatalogue(client *http.Client, catalogueURL string, maxSize int64) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, catalogueURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("downloading catalogue: %w", err)
@@ -91,13 +97,13 @@ func downloadCatalogue(client *http.Client, catalogueURL string) ([]byte, error)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("downloading catalogue: %s returned %s", catalogueURL, resp.Status)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogueSize+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("downloading catalogue: %w", err)
 	}
-	if len(data) > maxCatalogueSize {
-		return nil, fmt.Errorf("downloading catalogue: %s is larger than %d MB",
-			catalogueURL, maxCatalogueSize>>20)
+	if int64(len(data)) > maxSize {
+		return nil, fmt.Errorf("downloading catalogue: %s is larger than max_catalogue_size (%d bytes)",
+			catalogueURL, maxSize)
 	}
 	return data, nil
 }

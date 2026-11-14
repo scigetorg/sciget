@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// maxSize is the catalogue size limit the refresh tests pass.
+const maxSize = 1024
+
 func TestRefreshCatalogue(t *testing.T) {
 	const catalogue = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905"}}}}`
 	const other = `{"fsl": {"apps": {"fsl 6.0.4": {"version": "20210101"}}}}`
@@ -25,7 +28,7 @@ func TestRefreshCatalogue(t *testing.T) {
 		body        string
 		gzip        bool // the server compresses the body
 		short       bool // the server promises more bytes than it sends
-		large       bool // the server sends one byte more than maxCatalogueSize
+		large       bool // the server sends one byte more than maxSize
 		closed      bool // the server is gone before the request
 		wantChanged bool
 		want        string // apps.json afterwards
@@ -54,7 +57,7 @@ func TestRefreshCatalogue(t *testing.T) {
 		{name: "url write fails", existing: catalogue, body: other, urlBlocked: true, want: catalogue,
 			wantErr: "writing catalogue: "},
 		{name: "larger than the cap", existing: catalogue, large: true, want: catalogue,
-			wantErr: "is larger than 64 MB"},
+			wantErr: "is larger than max_catalogue_size (1024 bytes)"},
 		{name: "body cut short", existing: catalogue, body: catalogue, short: true, want: catalogue,
 			wantErr: "downloading catalogue: unexpected EOF"},
 		{name: "server gone", existing: catalogue, closed: true, want: catalogue,
@@ -75,7 +78,7 @@ func TestRefreshCatalogue(t *testing.T) {
 					zw.Write([]byte(tt.body))
 					zw.Close()
 				case tt.large:
-					w.Write(make([]byte, maxCatalogueSize+1))
+					w.Write(make([]byte, maxSize+1))
 				case tt.short:
 					w.Header().Set("Content-Length", "1000")
 					w.Write([]byte(tt.body))
@@ -117,7 +120,7 @@ func TestRefreshCatalogue(t *testing.T) {
 			}
 
 			catalogueURL := srv.URL + "/apps.json"
-			changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir)
+			changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir, maxSize)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
@@ -164,7 +167,7 @@ func TestRefreshCatalogue(t *testing.T) {
 				if err := os.Chtimes(path, old, old); err != nil {
 					t.Fatal(err)
 				}
-				changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir)
+				changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir, maxSize)
 				if err != nil || changed {
 					t.Errorf("second refresh: changed = %v, error = %v, want no change", changed, err)
 				}
