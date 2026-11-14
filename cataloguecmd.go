@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -21,17 +22,38 @@ func newCatalogueCommand() *cobra.Command {
 	}
 
 	var addLast, forceUpdate bool
+	var dir, layout string
 	add := &cobra.Command{
 		Use:               "add <name> <url>",
 		Short:             "Add a catalogue and use it first",
 		Args:              exactArgs(2),
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return addCatalogue(cmd.OutOrStdout(), args[0], args[1], addLast, forceUpdate)
+			if cmd.Flags().Changed("layout") && !cmd.Flags().Changed("dir") {
+				return usageError{"--layout requires --dir"}
+			}
+			if cmd.Flags().Changed("dir") && dir == "" {
+				return usageError{"--dir must not be empty"}
+			}
+			if cmd.Flags().Changed("layout") {
+				if err := checkLayout(layout); err != nil {
+					return usageError{"invalid layout: " + err.Error()}
+				}
+			}
+			if dir != "" {
+				var err error
+				dir, err = filepath.Abs(dir)
+				if err != nil {
+					return fmt.Errorf("making dir absolute: %w", err)
+				}
+			}
+			return addCatalogue(cmd.OutOrStdout(), args[0], args[1], dir, layout, addLast, forceUpdate)
 		},
 	}
 	add.Flags().BoolVar(&addLast, "append", false, "use it last instead of first")
-	add.Flags().BoolVar(&forceUpdate, "force-update", false, "replace the URL of a catalogue with this name")
+	add.Flags().BoolVar(&forceUpdate, "force-update", false, "replace a catalogue with this name")
+	add.Flags().StringVar(&dir, "dir", "", "read-only container directory")
+	add.Flags().StringVar(&layout, "layout", "", "container path template in the directory")
 
 	var useLast bool
 	use := &cobra.Command{
@@ -88,9 +110,9 @@ func runCatalogueList(cmd *cobra.Command, args []string) error {
 }
 
 // addCatalogue registers a catalogue and uses it first, or last if last is
-// set. A name already registered with another URL is an error unless
-// forceUpdate is set; then the old entry and its cache directory go.
-func addCatalogue(w io.Writer, name, url string, last, forceUpdate bool) error {
+// set. Changing its URL, dir or layout requires forceUpdate. Only a URL
+// change removes the old cache directory.
+func addCatalogue(w io.Writer, name, url, dir, layout string, last, forceUpdate bool) error {
 	cacheDir, path, catalogues, err := readCatalogues()
 	if err != nil {
 		return err
@@ -105,18 +127,20 @@ func addCatalogue(w io.Writer, name, url string, last, forceUpdate bool) error {
 	oldDir := ""
 	if i := findCatalogue(catalogues, name); i >= 0 {
 		old := catalogues[i]
-		if old.URL == url {
-			_, err := fmt.Fprintf(w, "Catalogue %q already exists with the same URL; nothing to do.\n", name)
+		if old.URL == url && old.Dir == dir && old.Layout == layout {
+			_, err := fmt.Fprintf(w, "Catalogue %q already exists with the same URL, dir and layout; nothing to do.\n", name)
 			return err
 		}
 		if !forceUpdate {
-			return fmt.Errorf("catalogue %q already exists with URL %s; use --force-update to replace it, or choose another name",
-				name, old.URL)
+			return fmt.Errorf("catalogue %q already exists with different URL, dir or layout; use --force-update to replace it, or choose another name",
+				name)
 		}
-		oldDir = old.dir(cacheDir)
+		if old.URL != url {
+			oldDir = old.dir(cacheDir)
+		}
 		catalogues = slices.Delete(catalogues, i, i+1)
 	}
-	catalogues = placeCatalogue(catalogues, catalogue{Name: name, URL: url, Use: true}, last)
+	catalogues = placeCatalogue(catalogues, catalogue{Name: name, URL: url, Use: true, Dir: dir, Layout: layout}, last)
 	if err := writeCatalogueList(path, catalogues); err != nil {
 		return err
 	}

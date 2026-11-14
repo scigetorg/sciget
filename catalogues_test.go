@@ -30,6 +30,13 @@ func TestLoadCatalogueList(t *testing.T) {
 			want: []catalogue{
 				{Name: "neuroimaging", URL: "https://example.org/neuroimaging/apps.json", Use: true},
 				{Name: "neuro", URL: "https://example.org/neuroimaging/apps.json", Use: true}}},
+		{name: "share", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"dir":"/share","layout":"{tool}/{version}/{date}"}]`,
+			want: []catalogue{{Name: "a", URL: "https://e.org/a.json", Use: true, Dir: "/share", Layout: "{tool}/{version}/{date}"}}},
+		{name: "relative share", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"dir":"share"}]`, wantErr: "invalid dir"},
+		{name: "bad layout", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"dir":"/share","layout":"{name}"}]`, wantErr: "invalid layout"},
+		{name: "layout without dir", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"layout":"{tool}/{version}/{date}"}]`, wantErr: "layout without a dir"},
+		{name: "dir case", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"Dir":"/share"}]`, wantErr: `unknown field "Dir"`},
+		{name: "layout case", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"Layout":"{tool}/{version}/{date}"}]`, wantErr: `unknown field "Layout"`},
 		{name: "path is a directory", dir: true, wantErr: "reading catalogues: "},
 		{name: "invalid JSON", json: "[", wantErr: "unexpected EOF"},
 		{name: "anything after the list", json: "[] []", wantErr: "unexpected data after the list"},
@@ -208,7 +215,7 @@ func TestCatalogueDir(t *testing.T) {
 
 func TestWriteCatalogueTable(t *testing.T) {
 	catalogues := []catalogue{
-		{Name: "mylab", URL: "https://lab.example/a.json", Use: true},
+		{Name: "mylab", URL: "https://lab.example/a.json", Use: true, Dir: "/share"},
 		{Name: "old", URL: "https://old.example/a.json"},
 		{Name: "neuroimaging", URL: "https://example.org/a.json", Use: true},
 	}
@@ -218,13 +225,13 @@ func TestWriteCatalogueTable(t *testing.T) {
 		want     string
 	}{
 		{name: "tab-separated when piped",
-			want: "mylab\t1\thttps://lab.example/a.json\nold\t-\thttps://old.example/a.json\n" +
-				"neuroimaging\t2\thttps://example.org/a.json\n"},
+			want: "mylab\t1\thttps://lab.example/a.json\t/share\nold\t-\thttps://old.example/a.json\t\n" +
+				"neuroimaging\t2\thttps://example.org/a.json\t\n"},
 		{name: "aligned with a header on a terminal", terminal: true,
-			want: fmt.Sprintf("%-14s%-7s%s\n", "NAME", "ORDER", "URL") +
-				fmt.Sprintf("%-14s%-7s%s\n", "mylab", "1", "https://lab.example/a.json") +
-				fmt.Sprintf("%-14s%-7s%s\n", "old", "-", "https://old.example/a.json") +
-				fmt.Sprintf("%-14s%-7s%s\n", "neuroimaging", "2", "https://example.org/a.json")},
+			want: fmt.Sprintf("%-14s%-7s%-28s%s\n", "NAME", "ORDER", "URL", "DIR") +
+				fmt.Sprintf("%-14s%-7s%-28s%s\n", "mylab", "1", "https://lab.example/a.json", "/share") +
+				fmt.Sprintf("%-14s%-7s%-28s%s\n", "old", "-", "https://old.example/a.json", "") +
+				fmt.Sprintf("%-14s%-7s%-28s%s\n", "neuroimaging", "2", "https://example.org/a.json", "")},
 	}
 
 	for _, tt := range tests {

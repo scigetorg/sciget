@@ -21,17 +21,21 @@ import (
 // catalogue is one entry of catalogues.json: a named apps.json and whether it
 // is in use.
 type catalogue struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-	Use  bool   `json:"use"`
+	Name   string `json:"name"`
+	URL    string `json:"url"`
+	Use    bool   `json:"use"`
+	Dir    string `json:"dir,omitempty"`
+	Layout string `json:"layout,omitempty"`
 }
 
 // catalogueEntry is how loadCatalogueList decodes an entry. Use is a pointer
 // so that a missing or null "use" is told apart from false.
 type catalogueEntry struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-	Use  *bool  `json:"use"`
+	Name   string `json:"name"`
+	URL    string `json:"url"`
+	Use    *bool  `json:"use"`
+	Dir    string `json:"dir"`
+	Layout string `json:"layout"`
 }
 
 // dir returns the catalogue's directory in cacheDir. Its name ends in a hash
@@ -135,7 +139,7 @@ func parseCatalogueList(data []byte) ([]catalogue, error) {
 	}
 	for _, o := range objects {
 		for _, key := range slices.Sorted(maps.Keys(o)) {
-			if key != "name" && key != "url" && key != "use" {
+			if key != "name" && key != "url" && key != "use" && key != "dir" && key != "layout" {
 				return nil, fmt.Errorf("unknown field %q", key)
 			}
 		}
@@ -155,7 +159,20 @@ func parseCatalogueList(data []byte) ([]catalogue, error) {
 		if findCatalogue(catalogues, e.Name) >= 0 {
 			return nil, fmt.Errorf("catalogue %q is listed twice", e.Name)
 		}
-		catalogues = append(catalogues, catalogue{Name: e.Name, URL: e.URL, Use: *e.Use})
+		if e.Dir != "" {
+			if err := checkAbsolute(e.Dir); err != nil {
+				return nil, fmt.Errorf("catalogue %q has an invalid dir: %w", e.Name, err)
+			}
+		}
+		if e.Layout != "" {
+			if e.Dir == "" {
+				return nil, fmt.Errorf("catalogue %q has a layout without a dir", e.Name)
+			}
+			if err := checkLayout(e.Layout); err != nil {
+				return nil, fmt.Errorf("catalogue %q has an invalid layout: %w", e.Name, err)
+			}
+		}
+		catalogues = append(catalogues, catalogue{Name: e.Name, URL: e.URL, Use: *e.Use, Dir: e.Dir, Layout: e.Layout})
 	}
 	return catalogues, nil
 }
@@ -202,9 +219,9 @@ func writeCatalogueTable(w io.Writer, catalogues []catalogue, terminal bool) err
 			order++
 			position = strconv.Itoa(order)
 		}
-		fmt.Fprintf(&rows, "%s\t%s\t%s\n", c.Name, position, c.URL)
+		fmt.Fprintf(&rows, "%s\t%s\t%s\t%s\n", c.Name, position, c.URL, c.Dir)
 	}
-	return writeTable(w, terminal, "NAME\tORDER\tURL\n", rows.String())
+	return writeTable(w, terminal, "NAME\tORDER\tURL\tDIR\n", rows.String())
 }
 
 func checkCatalogueName(name string) error {
