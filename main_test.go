@@ -43,9 +43,33 @@ func TestRun(t *testing.T) {
 	const noneInUse = "sciget: no catalogues in use; run 'sciget catalogue use <name>'\n"
 	neuroimaging := []testCatalogue{{name: "neuroimaging", apps: fslCatalogue}}
 	const fslStored = "fsl_6.0.3_20200905/fsl_6.0.3_20200905.simg"
+	const fuseCatalogue = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905", "apptainer_args": ["--bind", "/dev/fuse"]}}}}`
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
+	}
+	physicalCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every key after cache_dir at its default, as config list prints it
+	// with XDG_DATA_HOME=/data.
+	const otherDefaults = "container_dir\t/data/sciget/containers\tdefault\n" +
+		"container_layout\t{tool}_{version}_{date}/{tool}_{version}_{date}.simg\tdefault\n" +
+		"apptainer_path\tapptainer\tdefault\n" +
+		"apptainer_global_args\t[\"--silent\"]\tdefault\n" +
+		"apptainer_exec_args\t[\"--cleanenv\",\"{env}\",\"{xauthority}\",\"{tmp}\",\"{pwd}\"]\tdefault\n" +
+		"apptainer_shell_args\t[\"--cleanenv\",\"{env}\",\"{xauthority}\",\"{tmp}\",\"{pwd}\"]\tdefault\n" +
+		"apptainer_extra_args\t[]\tdefault\n" +
+		"apptainer_pass_env\t[\"DISPLAY\"]\tdefault\n" +
+		"xauthority_var\tXAUTHORITY\tdefault\n" +
+		"tmp_vars\t[\"TMP\",\"TMPDIR\",\"TEMP\",\"TEMPDIR\"]\tdefault\n" +
+		"tmp_target\t/tmp\tdefault\n" +
+		"use_catalogue_args\ttrue\tdefault\n" +
+		"max_catalogue_size\t67108864\tdefault\n"
+	var keyNames []string
+	for _, key := range configKeys {
+		keyNames = append(keyNames, key.name)
 	}
 
 	tests := []struct {
@@ -61,14 +85,14 @@ func TestRun(t *testing.T) {
 		readOnly        bool              // write config with mode 0o400
 		env             map[string]string // set after the defaults
 		stored          []string          // paths created under the default container_dir
-		wantExec        []string          // argv handed to Apptainer, when set
+		wantExec        []string          // argv handed to Apptainer, when set; <store> and <cwd> stand for those paths
 		wantConfig      string            // the config file afterwards, when set
 		wantList        []catalogue       // catalogues.json afterwards, when set
 		wantListSame    bool              // catalogues.json is byte for byte as written
 		wantCaches      []string          // names of the dirs in cache_dir/catalogues afterwards, when set
 		wantRequests    []string          // paths the server was asked for, when set
 		wantCode        int
-		wantStdout      string // exact, unless wantStdoutHas is set
+		wantStdout      string // exact, unless wantStdoutHas is set; <store> and <cwd> as in wantExec
 		wantStdoutHas   string // checks only that stdout contains this
 		wantStdoutLacks string
 		wantStderr      string // exact, unless wantStderrHas is set
@@ -119,10 +143,41 @@ func TestRun(t *testing.T) {
 		{name: "apptainer hidden from help", args: []string{"--help"}, wantStdoutHas: "info ", wantStdoutLacks: "apptainer"},
 		{name: "apptainer exec", args: []string{"apptainer", "exec", "fsl/6.0.3", "bet", "--help"},
 			catalogues: neuroimaging, config: `{"apptainer_path": "/bin/sh"}`, stored: []string{fslStored},
-			wantExec: []string{"/bin/sh", "exec", "STORE/" + fslStored, "bet", "--help"}},
+			wantExec: []string{"/bin/sh", "--silent", "exec", "--cleanenv", "--pwd", "<cwd>", "<store>/" + fslStored, "bet", "--help"}},
 		{name: "apptainer shell", args: []string{"apptainer", "shell", "fsl/6.0.3"},
 			catalogues: neuroimaging, config: `{"apptainer_path": "/bin/sh"}`, stored: []string{fslStored},
-			wantExec: []string{"/bin/sh", "shell", "STORE/" + fslStored}},
+			wantExec: []string{"/bin/sh", "--silent", "shell", "--cleanenv", "--pwd", "<cwd>", "<store>/" + fslStored}},
+		{name: "apptainer dry run", args: []string{"apptainer", "exec", "--dry-run", "fsl/6.0.3", "bet", "", "it's"},
+			catalogues: neuroimaging, config: `{"apptainer_path": "/bin/sh"}`, stored: []string{fslStored},
+			wantStdout: "/bin/sh --silent exec --cleanenv --pwd <cwd> <store>/" + fslStored + " bet '' 'it'\\''s'\n"},
+		{name: "apptainer dry run with display and extra args", args: []string{"apptainer", "shell", "--dry-run", "fsl/6.0.3"},
+			catalogues: neuroimaging, config: `{"apptainer_path": "/bin/sh", "apptainer_extra_args": ["--writable-tmpfs"]}`,
+			stored: []string{fslStored}, env: map[string]string{"DISPLAY": ":1"},
+			wantStdout: "/bin/sh --silent shell --cleanenv --env DISPLAY=:1 --pwd <cwd> --writable-tmpfs <store>/" + fslStored + "\n"},
+		{name: "apptainer catalogue args", args: []string{"apptainer", "shell", "--dry-run", "fsl/6.0.3"},
+			catalogues: []testCatalogue{{name: "neuroimaging", apps: fuseCatalogue}}, config: `{"apptainer_path": "/bin/sh"}`,
+			stored:     []string{fslStored},
+			wantStdout: "/bin/sh --silent shell --cleanenv --pwd <cwd> --bind /dev/fuse <store>/" + fslStored + "\n"},
+		{name: "apptainer catalogue args turned off", args: []string{"apptainer", "shell", "--dry-run", "fsl/6.0.3"},
+			catalogues: []testCatalogue{{name: "neuroimaging", apps: fuseCatalogue}},
+			config:     `{"apptainer_path": "/bin/sh", "use_catalogue_args": false}`, stored: []string{fslStored},
+			wantStdout: "/bin/sh --silent shell --cleanenv --pwd <cwd> <store>/" + fslStored + "\n"},
+		{name: "apptainer exec with overridden settings", args: []string{"apptainer", "exec", "--dry-run", "fsl/6.0.3", "true"},
+			catalogues: neuroimaging, stored: []string{fslStored},
+			config: `{"apptainer_path": "/bin/sh", "apptainer_global_args": ["--debug"],
+				"apptainer_exec_args": ["--contain", "{env}", "{xauthority}", "{tmp}"], "apptainer_pass_env": ["MYVAR"],
+				"xauthority_var": "MYXAUTH", "tmp_vars": ["MYTMP"], "tmp_target": "/scratch"}`,
+			env: map[string]string{"MYVAR": "v", "MYXAUTH": filepath.Join(physicalCwd, "main_test.go"), "MYTMP": "/t", "DISPLAY": ":0"},
+			wantStdout: "/bin/sh --debug exec --contain --env MYVAR=v --bind <cwd>/main_test.go:<cwd>/main_test.go:ro" +
+				" --env MYXAUTH=<cwd>/main_test.go --bind /t:/scratch <store>/" + fslStored + " true\n"},
+		{name: "apptainer shell with overridden settings", args: []string{"apptainer", "shell", "--dry-run", "fsl/6.0.3"},
+			catalogues: neuroimaging, stored: []string{fslStored},
+			config:     `{"apptainer_path": "/bin/sh", "apptainer_global_args": [], "apptainer_shell_args": ["--no-home"]}`,
+			wantStdout: "/bin/sh shell --no-home <store>/" + fslStored + "\n"},
+		{name: "apptainer display with a comma", args: []string{"apptainer", "shell", "fsl/6.0.3"},
+			catalogues: neuroimaging, config: `{"apptainer_path": "/bin/sh"}`, stored: []string{fslStored},
+			env: map[string]string{"DISPLAY": "a,b"}, wantCode: 1,
+			wantStderr: "sciget: cannot pass DISPLAY to the container: its value contains \",\"\n"},
 		{name: "apptainer exec unknown name", args: []string{"apptainer", "exec", "fsl/9", "bet"},
 			catalogues: neuroimaging, wantCode: 1,
 			wantStderr: "sciget: no container named \"fsl/9\"; run 'sciget find fsl' to list versions, or 'sciget refresh' to update the catalogues\n"},
@@ -200,6 +255,9 @@ func TestRun(t *testing.T) {
 
 		{name: "refresh", args: []string{"refresh"}, catalogues: []testCatalogue{{name: "neuroimaging"}},
 			serve: map[string]string{"neuroimaging": fslCatalogue}, wantStdout: "Catalogue \"neuroimaging\" updated.\n"},
+		{name: "refresh over max_catalogue_size", args: []string{"refresh"}, catalogues: []testCatalogue{{name: "neuroimaging"}},
+			config: `{"max_catalogue_size": 10}`, serve: map[string]string{"neuroimaging": fslCatalogue}, wantCode: 1,
+			wantStderrHas: "is larger than max_catalogue_size (10 bytes)"},
 		{name: "refresh when up to date", args: []string{"refresh"}, catalogues: neuroimaging,
 			serve: map[string]string{"neuroimaging": fslCatalogue}, wantStdout: "Catalogue \"neuroimaging\" is up to date.\n"},
 		{name: "refresh in order", args: []string{"refresh"},
@@ -367,9 +425,9 @@ func TestRun(t *testing.T) {
 			list: "{", wantStdout: ":1\n", wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
 
 		{name: "config lists", args: []string{"config"}, config: `{"cache_dir": "/c"}`, env: map[string]string{"XDG_DATA_HOME": "/data"},
-			wantStdout: "cache_dir\t/c\tconfig\ncontainer_dir\t/data/sciget/containers\tdefault\ncontainer_layout\t{tool}_{version}_{date}/{tool}_{version}_{date}.simg\tdefault\napptainer_path\tapptainer\tdefault\n"},
+			wantStdout: "cache_dir\t/c\tconfig\n" + otherDefaults},
 		{name: "config list", args: []string{"config", "list"}, config: `{"cache_dir": "/c"}`, env: map[string]string{"XDG_DATA_HOME": "/data"},
-			wantStdout: "cache_dir\t/c\tconfig\ncontainer_dir\t/data/sciget/containers\tdefault\ncontainer_layout\t{tool}_{version}_{date}/{tool}_{version}_{date}.simg\tdefault\napptainer_path\tapptainer\tdefault\n"},
+			wantStdout: "cache_dir\t/c\tconfig\n" + otherDefaults},
 		{name: "config with an unknown subcommand", args: []string{"config", "bogus"}, wantCode: 2,
 			wantStderr: "sciget: unknown command \"bogus\" for \"sciget config\"" + usageHint},
 		{name: "config get a default", args: []string{"config", "get", "cache_dir"},
@@ -382,11 +440,31 @@ func TestRun(t *testing.T) {
 			env: map[string]string{"XDG_CACHE_HOME": "", "HOME": "", "LocalAppData": ""}, wantCode: 1,
 			wantStderrHas: "defined\n"},
 		{name: "config get an unknown key", args: []string{"config", "get", "cache-dir"}, wantCode: 2,
-			wantStderr: "sciget: unknown key \"cache-dir\"; valid keys: cache_dir, container_dir, container_layout, apptainer_path" + usageHint},
+			wantStderr: "sciget: unknown key \"cache-dir\"; valid keys: " + strings.Join(keyNames, ", ") + usageHint},
 		{name: "config get without a key", args: []string{"config", "get"}, wantCode: 2,
 			wantStderr: "sciget: accepts 1 arg(s), received 0" + usageHint},
 		{name: "config set", args: []string{"config", "set", "cache_dir", "/c"},
 			wantConfig: "{\n  \"cache_dir\": \"/c\"\n}\n"},
+		{name: "config set a list", args: []string{"config", "set", "apptainer_extra_args", `[ "--nv" ]`},
+			wantConfig: "{\n  \"apptainer_extra_args\": [\n    \"--nv\"\n  ]\n}\n"},
+		{name: "config set a number", args: []string{"config", "set", "max_catalogue_size", "1024"},
+			wantConfig: "{\n  \"max_catalogue_size\": 1024\n}\n"},
+		{name: "config set a bool", args: []string{"config", "set", "use_catalogue_args", "false"},
+			wantConfig: "{\n  \"use_catalogue_args\": false\n}\n"},
+		{name: "config set a list that is not JSON", args: []string{"config", "set", "apptainer_extra_args", "x"}, wantCode: 2,
+			wantStderr: "sciget: invalid apptainer_extra_args: must be a JSON array of strings" + usageHint},
+		{name: "config set a bool that is not true or false", args: []string{"config", "set", "use_catalogue_args", "yes"}, wantCode: 2,
+			wantStderr: "sciget: invalid use_catalogue_args: must be true or false" + usageHint},
+		{name: "config set a size over the cap", args: []string{"config", "set", "max_catalogue_size", "2199023255552"}, wantCode: 2,
+			wantStderr: "sciget: invalid max_catalogue_size: must be from 1 to 1099511627776 (1 TiB)" + usageHint},
+		{name: "config set an unknown placeholder", args: []string{"config", "set", "apptainer_exec_args", `["{foo}"]`}, wantCode: 2,
+			wantStderr: "sciget: invalid apptainer_exec_args: \"{foo}\" is not a known placeholder" + usageHint},
+		{name: "config set a placeholder outside the verb args", args: []string{"config", "set", "apptainer_extra_args", `["{pwd}"]`}, wantCode: 2,
+			wantStderr: "sciget: invalid apptainer_extra_args: \"{pwd}\" must not contain { or }" + usageHint},
+		{name: "config get a list", args: []string{"config", "get", "apptainer_global_args"}, wantStdout: "[\"--silent\"]\n"},
+		{name: "config with a value of the wrong type", args: []string{"config", "get", "apptainer_extra_args"},
+			config: `{"apptainer_extra_args": "--nv"}`, wantCode: 1,
+			wantStderrHas: "invalid apptainer_extra_args: must be a JSON array of strings"},
 		{name: "config set on a read-only file", args: []string{"config", "set", "cache_dir", "/d"},
 			config: `{"cache_dir": "/c"}`, readOnly: true, wantCode: 1,
 			wantStderrHas: "sciget: writing config: ", wantConfig: `{"cache_dir": "/c"}`},
@@ -423,6 +501,10 @@ func TestRun(t *testing.T) {
 			configFile := filepath.Join(t.TempDir(), "config.json")
 			listFile := filepath.Join(filepath.Dir(configFile), "catalogues.json")
 			t.Setenv("SCIGET_CONFIG", configFile)
+			// The placeholders read these; rows set them through env.
+			for _, k := range []string{"DISPLAY", "XAUTHORITY", "TMP", "TMPDIR", "TEMP", "TEMPDIR"} {
+				t.Setenv(k, "")
+			}
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
@@ -519,10 +601,11 @@ func TestRun(t *testing.T) {
 			}
 			var stdout, stderr bytes.Buffer
 			code := run(tt.args, &stdout, &stderr)
+			paths := strings.NewReplacer("<store>", store, "<cwd>", physicalCwd)
 			if tt.wantExec != nil {
 				want := slices.Clone(tt.wantExec)
 				for i, a := range want {
-					want[i] = strings.Replace(a, "STORE", store, 1)
+					want[i] = paths.Replace(a)
 				}
 				if !slices.Equal(execArgs, want) {
 					t.Errorf("exec args = %q, want %q", execArgs, want)
@@ -541,8 +624,8 @@ func TestRun(t *testing.T) {
 				if !strings.Contains(got, tt.wantStdoutHas) {
 					t.Errorf("stdout = %q, want it to contain %q", got, tt.wantStdoutHas)
 				}
-			} else if got != tt.wantStdout {
-				t.Errorf("stdout = %q, want %q", got, tt.wantStdout)
+			} else if want := paths.Replace(tt.wantStdout); got != want {
+				t.Errorf("stdout = %q, want %q", got, want)
 			}
 			got = stderr.String()
 			if tt.wantStderrHas != "" {

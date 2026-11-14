@@ -118,13 +118,190 @@ func execApptainer(path string, args, env []string) error {
 	return nil
 }
 
-// apptainerArgs builds argv with the configured binary name as argv[0].
-func apptainerArgs(apptainer, verb, image string, command []string) []string {
-	args := []string{apptainer, verb, image}
+// launchSettings holds the config values that shape an Apptainer command
+// line.
+type launchSettings struct {
+	apptainer     string   // apptainer_path, as configured
+	global        []string // apptainer_global_args
+	verbArgs      []string // apptainer_exec_args or apptainer_shell_args
+	extra         []string // apptainer_extra_args
+	catalogue     []string // the container's apptainer_args, if use_catalogue_args
+	passEnv       []string // apptainer_pass_env
+	xauthorityVar string
+	tmpVars       []string
+	tmpTarget     string
+}
+
+// readLaunchSettings reads the settings for running c with verb.
+func readLaunchSettings(cfg config, verb string, c container) (launchSettings, error) {
+	var s launchSettings
+	var err error
+	if s.apptainer, _, err = cfg.get("apptainer_path"); err != nil {
+		return s, err
+	}
+	for name, list := range map[string]*[]string{
+		"apptainer_global_args":       &s.global,
+		"apptainer_" + verb + "_args": &s.verbArgs,
+		"apptainer_extra_args":        &s.extra,
+		"apptainer_pass_env":          &s.passEnv,
+		"tmp_vars":                    &s.tmpVars,
+	} {
+		if *list, err = cfg.getList(name); err != nil {
+			return s, err
+		}
+	}
+	if s.xauthorityVar, _, err = cfg.get("xauthority_var"); err != nil {
+		return s, err
+	}
+	if s.tmpTarget, _, err = cfg.get("tmp_target"); err != nil {
+		return s, err
+	}
+	useCatalogue, err := cfg.getBool("use_catalogue_args")
+	if err != nil {
+		return s, err
+	}
+	if useCatalogue {
+		s.catalogue = c.apptainerArgs
+	}
+	return s, nil
+}
+
+// apptainerArgs builds argv for running image with verb: the binary as
+// configured, global arguments, the verb, its arguments with placeholders
+// expanded, extra and catalogue arguments, the image and, for exec, the
+// command.
+func apptainerArgs(s launchSettings, verb, image string, command []string) ([]string, error) {
+	args := append([]string{s.apptainer}, s.global...)
+	args = append(args, verb)
+	for _, arg := range s.verbArgs {
+		if expand, ok := placeholderArgs[arg]; ok {
+			expanded, err := expand(s)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, expanded...)
+			continue
+		}
+		args = append(args, arg)
+	}
+	args = append(args, s.extra...)
+	args = append(args, s.catalogue...)
+	args = append(args, image)
 	if verb == "exec" {
 		args = append(args, command...)
 	}
-	return args
+	return args, nil
+}
+
+// placeholderArgs maps each placeholder a verb argument may be to the
+// arguments it expands to at run time.
+var placeholderArgs = map[string]func(launchSettings) ([]string, error){
+	"{env}":        envArgs,
+	"{xauthority}": xauthorityArgs,
+	"{tmp}":        tmpArgs,
+	"{pwd}":        pwdArgs,
+}
+
+// envArgs passes each non-empty variable in passEnv through --cleanenv.
+func envArgs(s launchSettings) ([]string, error) {
+	var args []string
+	for _, name := range s.passEnv {
+		value := os.Getenv(name)
+		if value == "" {
+			continue
+		}
+		if err := checkEnvValue(name, value); err != nil {
+			return nil, err
+		}
+		args = append(args, "--env", name+"="+value)
+	}
+	return args, nil
+}
+
+// xauthorityArgs binds the X authority file read-only and passes its path,
+// if the variable names a regular file.
+func xauthorityArgs(s launchSettings) ([]string, error) {
+	path := os.Getenv(s.xauthorityVar)
+	if path == "" {
+		return nil, nil
+	}
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		return nil, nil
+	}
+	if err := checkEnvValue(s.xauthorityVar, path); err != nil {
+		return nil, err
+	}
+	if err := checkBindPath(s.xauthorityVar, path); err != nil {
+		return nil, err
+	}
+	return []string{"--bind", path + ":" + path + ":ro", "--env", s.xauthorityVar + "=" + path}, nil
+}
+
+// tmpArgs binds the directory named by the last non-empty variable in
+// tmpVars to tmpTarget.
+func tmpArgs(s launchSettings) ([]string, error) {
+	var name, dir string
+	for _, v := range s.tmpVars {
+		if value := os.Getenv(v); value != "" {
+			name, dir = v, value
+		}
+	}
+	if dir == "" {
+		return nil, nil
+	}
+	if err := checkBindPath(name, dir); err != nil {
+		return nil, err
+	}
+	return []string{"--bind", dir + ":" + s.tmpTarget}, nil
+}
+
+// pwdArgs starts the container in the physical working directory.
+func pwdArgs(launchSettings) ([]string, error) {
+	dir, err := os.Getwd()
+	if err == nil {
+		dir, err = filepath.EvalSymlinks(dir)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("finding the current directory: %w", err)
+	}
+	return []string{"--pwd", dir}, nil
+}
+
+// checkEnvValue rejects a value Apptainer would misread in --env: it splits
+// the value on commas and evaluates it in the container.
+func checkEnvValue(name, value string) error {
+	if i := strings.IndexAny(value, ",$`\\\""); i >= 0 {
+		return fmt.Errorf("cannot pass %s to the container: its value contains %q", name, value[i:i+1])
+	}
+	return nil
+}
+
+// checkBindPath rejects a path Apptainer would misread in --bind.
+func checkBindPath(name, path string) error {
+	if i := strings.IndexAny(path, bindSeparators); i >= 0 {
+		return fmt.Errorf("cannot bind %s into the container: its value contains %q", name, path[i:i+1])
+	}
+	return nil
+}
+
+// shellJoin quotes args for a POSIX shell and joins them, so the line can
+// be pasted and run.
+func shellJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = arg
+		if arg == "" || strings.ContainsFunc(arg, needsQuoting) {
+			quoted[i] = "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+		}
+	}
+	return strings.Join(quoted, " ")
+}
+
+// needsQuoting reports whether r is outside the characters a shell word
+// may hold bare.
+func needsQuoting(r rune) bool {
+	return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' ||
+		strings.ContainsRune("_@%+=:,./-", r))
 }
 
 func newApptainerCommand() *cobra.Command {
@@ -143,6 +320,7 @@ func newApptainerCommand() *cobra.Command {
 
 // newApptainerVerbCommand builds an exec or shell command with shared launch checks.
 func newApptainerVerbCommand(verb string) *cobra.Command {
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:               verb + " <tool/version>",
 		Short:             "Open a container shell",
@@ -165,15 +343,25 @@ func newApptainerVerbCommand(verb string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			apptainer, _, err := cfg.get("apptainer_path")
+			settings, err := readLaunchSettings(cfg, verb, c)
 			if err != nil {
 				return err
 			}
-			path, err := exec.LookPath(apptainer)
+			path, err := exec.LookPath(settings.apptainer)
 			if err != nil {
-				return fmt.Errorf("apptainer not found: %q; install Apptainer or set apptainer_path", apptainer)
+				return fmt.Errorf("apptainer not found: %q; install Apptainer or set apptainer_path", settings.apptainer)
 			}
-			return runApptainer(path, apptainerArgs(apptainer, verb, loc.path, args[1:]), os.Environ())
+			argv, err := apptainerArgs(settings, verb, loc.path, args[1:])
+			if err != nil {
+				return err
+			}
+			if dryRun {
+				// The resolved path, so the printed line runs the same binary.
+				line := shellJoin(append([]string{path}, argv[1:]...))
+				_, err := fmt.Fprintln(cmd.OutOrStdout(), line)
+				return err
+			}
+			return runApptainer(path, argv, os.Environ())
 		},
 	}
 	if verb == "exec" {
@@ -186,6 +374,7 @@ func newApptainerVerbCommand(verb string) *cobra.Command {
 			return nil
 		}
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the Apptainer command instead of running it")
 	cmd.Flags().SetInterspersed(false)
 	return cmd
 }

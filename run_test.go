@@ -266,21 +266,162 @@ func TestLocate(t *testing.T) {
 }
 
 func TestApptainerArgs(t *testing.T) {
+	base := launchSettings{
+		apptainer:     "apptainer",
+		global:        []string{"--silent"},
+		verbArgs:      []string{"--cleanenv", "{env}", "{xauthority}", "{tmp}", "{pwd}"},
+		extra:         []string{"--nv"},
+		catalogue:     []string{"--bind", "/dev/fuse"},
+		passEnv:       []string{"DISPLAY"},
+		xauthorityVar: "XAUTHORITY",
+		tmpVars:       []string{"TMP", "TMPDIR", "TEMP", "TEMPDIR"},
+		tmpTarget:     "/tmp",
+	}
 	tests := []struct {
-		name    string
-		verb    string
-		command []string
-		want    []string
+		name       string
+		verb       string
+		verbArgs   []string          // replaces base.verbArgs when set
+		tmpTarget  string            // replaces base.tmpTarget when set
+		env        map[string]string // set after clearing every variable the placeholders read
+		xauthority string            // "file", "dir", "missing", or the name of a file to create: what XAUTHORITY names
+		symlinkCwd bool              // run from a symlink to the working directory
+		want       []string          // <cwd> and <xauth> stand for those paths
+		wantErr    string
 	}{
-		{name: "exec", verb: "exec", command: []string{"bet", "--help"},
-			want: []string{"apptainer", "exec", "/s/fsl.simg", "bet", "--help"}},
-		{name: "shell", verb: "shell", want: []string{"apptainer", "shell", "/s/fsl.simg"}},
+		{name: "exec", verb: "exec",
+			want: []string{"apptainer", "--silent", "exec", "--cleanenv", "--pwd", "<cwd>", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg", "bet", "--help"}},
+		{name: "shell", verb: "shell",
+			want: []string{"apptainer", "--silent", "shell", "--cleanenv", "--pwd", "<cwd>", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
+		{name: "literal verb args", verb: "shell", verbArgs: []string{"--contain"},
+			want: []string{"apptainer", "--silent", "shell", "--contain", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
+		{name: "display passed", verb: "shell", verbArgs: []string{"{env}"}, env: map[string]string{"DISPLAY": ":0"},
+			want: []string{"apptainer", "--silent", "shell", "--env", "DISPLAY=:0", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
+		{name: "display with a comma", verb: "shell", env: map[string]string{"DISPLAY": "a,B=b"},
+			wantErr: `cannot pass DISPLAY to the container: its value contains ","`},
+		{name: "display with a dollar", verb: "shell", env: map[string]string{"DISPLAY": "$(id)"},
+			wantErr: `cannot pass DISPLAY to the container: its value contains "$"`},
+		{name: "display with a backtick", verb: "shell", env: map[string]string{"DISPLAY": "`id`"},
+			wantErr: "cannot pass DISPLAY to the container: its value contains \"`\""},
+		{name: "display with a backslash", verb: "shell", env: map[string]string{"DISPLAY": `a\b`},
+			wantErr: `cannot pass DISPLAY to the container: its value contains "\\"`},
+		{name: "display with a double quote", verb: "shell", env: map[string]string{"DISPLAY": `a"b`},
+			wantErr: `cannot pass DISPLAY to the container: its value contains "\""`},
+		{name: "xauthority file", verb: "shell", verbArgs: []string{"{xauthority}"}, xauthority: "file",
+			want: []string{"apptainer", "--silent", "shell", "--bind", "<xauth>:<xauth>:ro", "--env", "XAUTHORITY=<xauth>", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
+		{name: "xauthority missing", verb: "shell", verbArgs: []string{"{xauthority}"}, xauthority: "missing",
+			want: []string{"apptainer", "--silent", "shell", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
+		{name: "xauthority directory", verb: "shell", verbArgs: []string{"{xauthority}"}, xauthority: "dir",
+			want: []string{"apptainer", "--silent", "shell", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
+		{name: "xauthority with a colon", verb: "shell", verbArgs: []string{"{xauthority}"}, xauthority: "a:b",
+			wantErr: `cannot bind XAUTHORITY into the container: its value contains ":"`},
+		{name: "xauthority with a comma", verb: "shell", verbArgs: []string{"{xauthority}"}, xauthority: "a,b",
+			wantErr: `cannot pass XAUTHORITY to the container: its value contains ","`},
+		{name: "xauthority with a backslash", verb: "shell", verbArgs: []string{"{xauthority}"}, xauthority: `a\b`,
+			wantErr: `cannot pass XAUTHORITY to the container: its value contains "\\"`},
+		{name: "xauthority with a dollar", verb: "shell", verbArgs: []string{"{xauthority}"}, xauthority: "a$b",
+			wantErr: `cannot pass XAUTHORITY to the container: its value contains "$"`},
+		{name: "last tmp variable wins", verb: "shell", verbArgs: []string{"{tmp}"},
+			env:  map[string]string{"TMP": "/a", "TEMPDIR": "/b"},
+			want: []string{"apptainer", "--silent", "shell", "--bind", "/b:/tmp", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
+		{name: "tmp target", verb: "shell", verbArgs: []string{"{tmp}"}, tmpTarget: "/scratch",
+			env:  map[string]string{"TMPDIR": "/a"},
+			want: []string{"apptainer", "--silent", "shell", "--bind", "/a:/scratch", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
+		{name: "tmp with a comma", verb: "shell", env: map[string]string{"TMPDIR": "/a,b"},
+			wantErr: `cannot bind TMPDIR into the container: its value contains ","`},
+		{name: "tmp with a colon", verb: "shell", env: map[string]string{"TMPDIR": "/a:b"},
+			wantErr: `cannot bind TMPDIR into the container: its value contains ":"`},
+		{name: "tmp with a backslash", verb: "shell", env: map[string]string{"TMPDIR": `/a\b`},
+			wantErr: `cannot bind TMPDIR into the container: its value contains "\\"`},
+		{name: "physical working directory", verb: "shell", verbArgs: []string{"{pwd}"}, symlinkCwd: true,
+			want: []string{"apptainer", "--silent", "shell", "--pwd", "<cwd>", "--nv", "--bind", "/dev/fuse", "/s/fsl.simg"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := apptainerArgs("apptainer", tt.verb, "/s/fsl.simg", tt.command)
-			if !slices.Equal(got, tt.want) {
-				t.Errorf("apptainerArgs() = %q, want %q", got, tt.want)
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cwd := filepath.Join(dir, "work")
+			if err := os.Mkdir(cwd, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(cwd)
+			if tt.symlinkCwd {
+				link := filepath.Join(dir, "link")
+				if err := os.Symlink(cwd, link); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(link)
+				t.Setenv("PWD", link) // os.Getwd prefers $PWD when it names the same directory
+			}
+			xauth := filepath.Join(dir, ".Xauthority")
+			switch tt.xauthority {
+			case "file":
+				err = os.WriteFile(xauth, nil, 0o600)
+			case "dir":
+				err = os.Mkdir(xauth, 0o700)
+			case "", "missing":
+			default:
+				xauth = filepath.Join(dir, tt.xauthority)
+				err = os.WriteFile(xauth, nil, 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// After t.TempDir, which reads TMPDIR.
+			for _, name := range []string{"DISPLAY", "XAUTHORITY", "TMP", "TMPDIR", "TEMP", "TEMPDIR"} {
+				t.Setenv(name, "")
+			}
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+			if tt.xauthority != "" {
+				t.Setenv("XAUTHORITY", xauth)
+			}
+			s := base
+			if tt.verbArgs != nil {
+				s.verbArgs = tt.verbArgs
+			}
+			if tt.tmpTarget != "" {
+				s.tmpTarget = tt.tmpTarget
+			}
+			got, err := apptainerArgs(s, tt.verb, "/s/fsl.simg", []string{"bet", "--help"})
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := slices.Clone(tt.want)
+			for i := range want {
+				want[i] = strings.NewReplacer("<cwd>", cwd, "<xauth>", xauth).Replace(want[i])
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("apptainerArgs() = %q\nwant %q", got, want)
+			}
+		})
+	}
+}
+
+func TestShellJoin(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "bare", args: []string{"/usr/bin/apptainer", "--bind", "/a:/b,c", "x=1@%+"},
+			want: "/usr/bin/apptainer --bind /a:/b,c x=1@%+"},
+		{name: "space", args: []string{"echo", "a b"}, want: "echo 'a b'"},
+		{name: "empty", args: []string{"echo", ""}, want: "echo ''"},
+		{name: "single quote", args: []string{"echo", "it's"}, want: `echo 'it'\''s'`},
+		{name: "shell characters", args: []string{"echo", "$HOME;*"}, want: "echo '$HOME;*'"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shellJoin(tt.args); got != tt.want {
+				t.Errorf("shellJoin() = %s, want %s", got, tt.want)
 			}
 		})
 	}
