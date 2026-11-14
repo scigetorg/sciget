@@ -16,7 +16,7 @@ func TestLoadConfig(t *testing.T) {
 	tests := []struct {
 		name    string
 		json    string // written to config.json; no file when empty
-		dir     bool   // config.json is a directory
+		dir     bool   // create config.json as a directory to force a read fail
 		want    map[string]string
 		wantErr string
 	}{

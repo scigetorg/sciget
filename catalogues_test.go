@@ -16,7 +16,7 @@ func TestLoadCatalogueList(t *testing.T) {
 	tests := []struct {
 		name    string
 		json    string // written to catalogues.json; no file when empty
-		dir     bool   // catalogues.json is a directory
+		dir     bool   // create catalogues.json as a directory to force a read fail
 		want    []catalogue
 		wantErr string
 	}{
