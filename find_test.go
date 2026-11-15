@@ -35,6 +35,10 @@ func TestMatchContainers(t *testing.T) {
 		{name: "hidden with --all", words: []string{"fsl/6.0.4"}, all: true,
 			want: []string{"fsl/6.0.4", "fsl/6.0.4_arm64"}},
 		{name: "no match", words: []string{"spm"}},
+		{name: "a category matches", words: []string{"Functional"},
+			want: []string{"afni/21.2.00", "fsl/6.0.3"}},
+		{name: "name and category together", words: []string{"fsl", "registration"},
+			want: []string{"fsl/6.0.3"}},
 	}
 
 	for _, tt := range tests {

@@ -167,7 +167,13 @@ func TestCheckCatalogueURL(t *testing.T) {
 		wantErr string
 	}{
 		{name: "https", value: "https://example.org/neuroimaging/apps.json"},
-		{name: "http with a port", value: "http://127.0.0.1:8080/apps.json"},
+		{name: "http refused", value: "http://example.org/apps.json",
+			wantErr: "must use https; plain http is allowed only to this machine (localhost)"},
+		{name: "http to a loopback address", value: "http://127.0.0.1:8080/apps.json"},
+		{name: "http to localhost", value: "http://localhost:8080/apps.json"},
+		{name: "http to IPv6 loopback", value: "http://[::1]:8080/apps.json"},
+		{name: "http to a name like localhost", value: "http://localhost.example.org/apps.json",
+			wantErr: "must use https; plain http is allowed only to this machine (localhost)"},
 		{name: "no scheme", value: "example.org/apps.json", wantErr: "must start with https:// or http://"},
 		{name: "another scheme", value: "ftp://example.org/apps.json", wantErr: "must start with https:// or http://"},
 		{name: "no host", value: "https:///apps.json", wantErr: "must name a host"},

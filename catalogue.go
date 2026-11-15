@@ -7,8 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 // container is one row of the catalogue: a single container file, which may
@@ -23,10 +25,19 @@ type container struct {
 	dois          []string
 	apptainerArgs []string // added to every run; all entries agree
 	categories    []string
-	graphical     bool   // some entry has a graphical command
-	hidden        bool   // every entry is hidden
-	catalogue     string // the name of the catalogue it comes from
-	shadowed      bool   // an earlier catalogue in use has the same name
+	graphical     bool    // some entry has a graphical command
+	hidden        bool    // every entry is hidden
+	catalogue     string  // the name of the catalogue it comes from
+	shadowed      bool    // an earlier catalogue in use has the same name
+	entries       []entry // visible entries with a command, in key order
+}
+
+// entry is a visible catalogue entry that runs a command in its container,
+// such as a graphical program.
+type entry struct {
+	key   string // "fsleyesGUI-fsl 6.0.3"
+	label string // "fsleyesGUI"
+	exec  string // "fsleyes"
 }
 
 // name returns the name users type: "fsl/6.0.3".
@@ -67,7 +78,7 @@ func readContainers() ([]container, error) {
 	for _, cat := range used {
 		containers, err := loadCatalogue(filepath.Join(cat.dir(cacheDir), "apps.json"))
 		if err != nil {
-			return nil, err
+			return nil, &catalogueError{name: cat.Name, err: err}
 		}
 		for _, c := range containers {
 			c.catalogue = cat.Name
@@ -81,12 +92,30 @@ func readContainers() ([]container, error) {
 	return all, nil
 }
 
+// catalogueError is why the catalogue in use called name could not be read.
+// Its text is err's alone; the TUI uses the name.
+type catalogueError struct {
+	name string
+	err  error
+}
+
+func (e *catalogueError) Error() string { return e.err.Error() }
+func (e *catalogueError) Unwrap() error { return e.err }
+
+// notDownloadedError is a catalogue in use whose apps.json, at path, does
+// not exist yet.
+type notDownloadedError struct{ path string }
+
+func (e *notDownloadedError) Error() string {
+	return fmt.Sprintf("no catalogue at %s; run 'sciget refresh'", e.path)
+}
+
 // loadCatalogue reads apps.json at path and returns its containers, sorted by
 // tool and then by version.
 func loadCatalogue(path string) ([]container, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("no catalogue at %s; run 'sciget refresh'", path)
+		return nil, &notDownloadedError{path: path}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogue: %w", err)
@@ -97,6 +126,10 @@ func loadCatalogue(path string) ([]container, error) {
 	}
 	return containers, nil
 }
+
+// valueOptions are the apptainer_args options whose next word is their
+// value. Add one when a catalogue needs it.
+var valueOptions = []string{"--bind", "-B"}
 
 // parseCatalogue returns the containers in data, the JSON of apps.json,
 // sorted by tool and then by version.
@@ -109,6 +142,16 @@ func parseCatalogue(data []byte) ([]container, error) {
 	byName := map[string]*container{}
 	for tool, t := range tools {
 		for key, app := range t.Apps {
+			// Every string kept is checked here, once, so no output path
+			// can print a terminal escape from a catalogue.
+			texts := slices.Concat([]string{tool, key, app.Image, app.BuildDate, app.DOI, app.Exec},
+				t.Categories, app.Licences, app.ApptainerArgs)
+			if slices.ContainsFunc(texts, func(s string) bool { return printable(s) != s }) {
+				return nil, fmt.Errorf("catalogue entry %q of %q has a control character", key, tool)
+			}
+			if strings.TrimSpace(app.Exec) == "" {
+				app.Exec = ""
+			}
 			// Keys are "<label> <version>", except that entries with an
 			// image may end in another word ("amico 2.1.0 arm64").
 			image := app.Image
@@ -128,11 +171,23 @@ func parseCatalogue(data []byte) ([]container, error) {
 				return nil, fmt.Errorf("catalogue entry %q has no version", key)
 			case app.BuildDate == "":
 				return nil, fmt.Errorf("catalogue entry %q has no build date", key)
+			case unsafeLayoutValue(tool) || unsafeLayoutValue(toolVersion) || unsafeLayoutValue(app.BuildDate):
+				return nil, fmt.Errorf("catalogue entry %q has a tool, version or build date with \"/\" or \"..\"", key)
 			}
 
-			for _, arg := range app.ApptainerArgs {
-				if arg == "" || strings.ContainsRune(arg, 0) {
-					return nil, fmt.Errorf("catalogue entry %q has an empty or NUL apptainer_args element", key)
+			// The arguments go before the image, so a stray word would be
+			// read as the image: each is an option, and an option in
+			// valueOptions is followed by exactly one value.
+			args := app.ApptainerArgs
+			for i := 0; i < len(args); i++ {
+				if len(args[i]) < 2 || args[i][0] != '-' || args[i] == "--" {
+					return nil, fmt.Errorf("catalogue entry %q has apptainer_args element %q, which is not an option or its value", key, args[i])
+				}
+				if slices.Contains(valueOptions, args[i]) {
+					i++
+					if i == len(args) || args[i] == "" || args[i][0] == '-' {
+						return nil, fmt.Errorf("catalogue entry %q has apptainer_args option %q without a value", key, args[i-1])
+					}
 				}
 			}
 
@@ -160,6 +215,10 @@ func parseCatalogue(data []byte) ([]container, error) {
 			}
 			if app.ShowInApplist == nil || *app.ShowInApplist {
 				c.hidden = false
+				if app.Exec != "" {
+					label, _, _ := strings.Cut(key, "-")
+					c.entries = append(c.entries, entry{key: key, label: label, exec: app.Exec})
+				}
 			}
 		}
 	}
@@ -171,6 +230,7 @@ func parseCatalogue(data []byte) ([]container, error) {
 	for _, c := range byName {
 		c.licences = slices.Compact(slices.Sorted(slices.Values(c.licences)))
 		c.dois = slices.Compact(slices.Sorted(slices.Values(c.dois)))
+		slices.SortFunc(c.entries, func(a, b entry) int { return strings.Compare(a.key, b.key) })
 		containers = append(containers, *c)
 	}
 	slices.SortFunc(containers, compareContainers)
@@ -242,3 +302,22 @@ func lookupContainer(containers []container, name string) (container, error) {
 	tool, _, _ := strings.Cut(name, "/")
 	return container{}, fmt.Errorf("no container named %q; run 'sciget find %s' to list versions, or 'sciget refresh' to update the catalogues", name, tool)
 }
+
+// printable returns s fit to draw: whole terminal escape sequences, control
+// characters (C0, DEL, C1) and Unicode format characters (such as
+// bidirectional overrides and zero-width characters) are removed, so text
+// from outside sciget can neither inject codes nor reorder or hide text.
+// Use it only for display; launching and lookups use the raw value.
+func printable(s string) string {
+	s = escapeSequence.ReplaceAllString(s, "")
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r >= 0x7f && r < 0xa0 || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// escapeSequence matches ANSI escape sequences: CSI ("ESC [ ... final"),
+// OSC ("ESC ] ... BEL or ESC \\") and two-character escapes.
+var escapeSequence = regexp.MustCompile(`\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])`)

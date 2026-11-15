@@ -27,13 +27,19 @@ type notOnMachineError struct{ name string }
 
 func (e notOnMachineError) Error() string { return e.name + " is not on this machine" }
 
+// unsafeLayoutValue reports whether v cannot fill a layout: it is empty, or
+// could name another directory.
+func unsafeLayoutValue(v string) bool {
+	return v == "" || strings.Contains(v, "..") || strings.ContainsAny(v, "/\x00"+string(filepath.Separator))
+}
+
 // layoutPath fills a validated layout with safe container values.
 func layoutPath(layout string, c container) (string, error) {
 	if err := checkLayout(layout); err != nil {
 		return "", fmt.Errorf("container %q has an invalid layout: %w", c.name(), err)
 	}
 	for _, value := range []string{c.tool, c.version, c.buildDate} {
-		if value == "" || strings.Contains(value, "..") || strings.ContainsAny(value, "/\x00"+string(filepath.Separator)) {
+		if unsafeLayoutValue(value) {
 			return "", fmt.Errorf("catalogue entry %q has an unsafe layout value %q", c.name(), value)
 		}
 	}

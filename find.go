@@ -38,27 +38,28 @@ func newFindCommand() *cobra.Command {
 	return cmd
 }
 
-// matchContainers returns the containers whose name contains every word,
-// ignoring case. Hidden containers are left out unless all is set.
+// matchContainers returns the containers matching every word (see
+// matches). Hidden containers are left out unless all is set.
 func matchContainers(containers []container, words []string, all bool) []container {
 	var found []container
 	for _, c := range containers {
-		if c.hidden && !all {
-			continue
-		}
-		name := strings.ToLower(c.name())
-		matches := true
-		for _, w := range words {
-			if !strings.Contains(name, strings.ToLower(w)) {
-				matches = false
-				break
-			}
-		}
-		if matches {
+		if (!c.hidden || all) && matches(c, words) {
 			found = append(found, c)
 		}
 	}
 	return found
+}
+
+// matches reports whether every word appears, ignoring case, in c's name
+// or one of its categories. find and the TUI share it.
+func matches(c container, words []string) bool {
+	text := strings.ToLower(c.name() + " " + strings.Join(c.categories, " "))
+	for _, w := range words {
+		if !strings.Contains(text, strings.ToLower(w)) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeContainers prints one line per container, noting those that are

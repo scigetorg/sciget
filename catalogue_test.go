@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ func TestLoadCatalogue(t *testing.T) {
 		want           []string
 		licences, dois []string
 		apptainerArgs  []string
+		entries        []string // "label:exec" per entry, checked when set
 		wantErr        string
 	}{
 		{name: "missing file", wantErr: "no catalogue at "},
@@ -43,8 +45,58 @@ func TestLoadCatalogue(t *testing.T) {
 				"fsl 1":{"version":"1","apptainer_args":["--bind","/dev/fuse"]},
 				"GUI-fsl 1":{"version":"1"}}}}`,
 			wantErr: "with apptainer_args"},
+		{name: "escape in a tool name", json: "{\"fsl\\u001b[2J\": {\"apps\": {\"fsl 1\": {\"version\": \"1\"}}}}",
+			wantErr: "has a control character"},
+		{name: "bidi override in an entry key", json: `{"fsl": {"apps": {"GUI\u202e-fsl 1": {"version": "1"}}}}`,
+			wantErr: `catalogue entry "GUI\u202e-fsl 1" of "fsl" has a control character`},
+		{name: "newline in a version", json: `{"fsl": {"apps": {"fsl 1\n": {"version": "1"}}}}`,
+			wantErr: "has a control character"},
+		{name: "escape in a category", json: `{"fsl": {"categories": ["a\u001b]0;x\u0007"], "apps": {"fsl 1": {"version": "1"}}}}`,
+			wantErr: "has a control character"},
+		{name: "escape in a licence", json: `{"fsl": {"apps": {"fsl 1": {"version": "1", "license": ["\u001b[2J"]}}}}`,
+			wantErr: "has a control character"},
+		{name: "escape in a DOI", json: `{"fsl": {"apps": {"fsl 1": {"version": "1", "doi": "\u001b[31m10.1/x"}}}}`,
+			wantErr: "has a control character"},
+		{name: "escape in a build date", json: `{"fsl": {"apps": {"fsl 1": {"version": "\u001b[31m1"}}}}`,
+			wantErr: "has a control character"},
+		{name: "escape in exec", json: `{"fsl": {"apps": {"GUI-fsl 1": {"version": "1", "exec": "x\u001b[2J"}}}}`,
+			wantErr: "has a control character"},
+		{name: "slash in a tool", json: `{"a/b": {"apps": {"a/b 1": {"version": "1"}}}}`,
+			wantErr: `with "/" or ".."`},
+		{name: "dots in a version", json: `{"fsl": {"apps": {"fsl ..": {"version": "1"}}}}`,
+			wantErr: `with "/" or ".."`},
+		{name: "path as a build date", json: `{"fsl": {"apps": {"fsl 1": {"version": "../.."}}}}`,
+			wantErr: `with "/" or ".."`},
 		{name: "empty apptainer args element", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":[""]}}}}`,
-			wantErr: "has an empty or NUL apptainer_args element"},
+			wantErr: `apptainer_args element ""`},
+		{name: "apptainer args: a word after an option without a value", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["--nv","/other.sif"]}}}}`,
+			wantErr: `apptainer_args element "/other.sif"`},
+		{name: "apptainer args: an option as a value", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["--bind","--bind","/other.sif"]}}}}`,
+			wantErr: `apptainer_args option "--bind" without a value`},
+		{name: "apptainer args: a trailing value option", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["--nv","--bind"]}}}}`,
+			wantErr: `apptainer_args option "--bind" without a value`},
+		{name: "apptainer args: an empty value", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["-B",""]}}}}`,
+			wantErr: `apptainer_args option "-B" without a value`},
+		{name: "apptainer args: a lone dash", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["-"]}}}}`,
+			wantErr: `apptainer_args element "-"`},
+		{name: "apptainer args: an end of options", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["--","/other.sif"]}}}}`,
+			wantErr: `apptainer_args element "--"`},
+		{name: "apptainer args: -B and its value", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["-B","/a:/b","--nv"]}}}}`,
+			want: []string{"fsl/1 fsl_1_1 []"}, apptainerArgs: []string{"-B", "/a:/b", "--nv"}},
+		{name: "apptainer args: a word first", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["/other.sif"]}}}}`,
+			wantErr: `apptainer_args element "/other.sif", which is not an option or its value`},
+		{name: "apptainer args: a word after option=value", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["--bind=/a","/other.sif"]}}}}`,
+			wantErr: `apptainer_args element "/other.sif"`},
+		{name: "apptainer args: two words", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":["--bind","/a","/other.sif"]}}}}`,
+			wantErr: `apptainer_args element "/other.sif"`},
+		{name: "entries: visible ones with a command, in key order",
+			json: `{"fsl": {"apps": {
+				"fsl 6.0.3": {"version": "1"},
+				"fsleyesGUI-fsl 6.0.3": {"version": "1", "exec": "fsleyes"},
+				"bet-fsl 6.0.3": {"version": "1", "exec": "bet"},
+				"hidden-fsl 6.0.3": {"version": "1", "exec": "x", "show_in_applist": false},
+				"blank-fsl 6.0.3": {"version": "1", "exec": "  "}}}}`,
+			want: []string{"fsl/6.0.3 fsl_6.0.3_1 [] graphical"}, entries: []string{"bet:bet", "fsleyesGUI:fsleyes"}},
 		{name: "label with a space",
 			json: `{"napari": {"apps": {"napari GUI-napari 0.9.2": {"version": "20250101", "exec": "napari"}}}}`,
 			want: []string{"napari/0.9.2 napari_0.9.2_20250101 [] graphical"}},
@@ -115,6 +167,15 @@ func TestLoadCatalogue(t *testing.T) {
 				if !slices.Equal(c.licences, tt.licences) || !slices.Equal(c.dois, tt.dois) {
 					t.Errorf("metadata = %v, %v, want %v, %v", c.licences, c.dois, tt.licences, tt.dois)
 				}
+				if tt.entries != nil {
+					var got []string
+					for _, e := range c.entries {
+						got = append(got, e.label+":"+e.exec)
+					}
+					if !slices.Equal(got, tt.entries) {
+						t.Errorf("entries = %q, want %q", got, tt.entries)
+					}
+				}
 				if !slices.Equal(c.apptainerArgs, tt.apptainerArgs) {
 					t.Errorf("apptainer args = %q, want %q", c.apptainerArgs, tt.apptainerArgs)
 				}
@@ -129,6 +190,65 @@ func TestLoadCatalogue(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("containers = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadContainers(t *testing.T) {
+	use := []catalogue{{Name: "neuro", URL: exampleURL("neuro"), Use: true}}
+	for _, tt := range []struct {
+		name       string
+		catalogues []catalogue
+		apps       string // the catalogue's apps.json; not downloaded when empty
+		wantIs     error
+		wantName   string // the catalogueError's name
+		missing    bool   // a notDownloadedError
+		want       int
+	}{
+		{name: "no catalogues", wantIs: errNoCatalogues},
+		{name: "none in use", catalogues: []catalogue{{Name: "neuro", URL: exampleURL("neuro")}}, wantIs: errNoneInUse},
+		{name: "not downloaded", catalogues: use, wantName: "neuro", missing: true},
+		{name: "broken", catalogues: use, apps: "{", wantName: "neuro"},
+		{name: "read", catalogues: use, apps: `{"fsl": {"apps": {"fsl 1": {"version": "1"}}}}`, want: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("SCIGET_CONFIG", filepath.Join(base, "config.json"))
+			cacheDir := filepath.Join(base, "cache")
+			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{"cache_dir": cacheDir}); err != nil {
+				t.Fatal(err)
+			}
+			path, err := catalogueListPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writeCatalogueList(path, tt.catalogues); err != nil {
+				t.Fatal(err)
+			}
+			if tt.apps != "" {
+				dir := tt.catalogues[0].dir(cacheDir)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(tt.apps), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := readContainers()
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Errorf("error = %v, want %v", err, tt.wantIs)
+			}
+			var catErr *catalogueError
+			if errors.As(err, &catErr) != (tt.wantName != "") || tt.wantName != "" && catErr.name != tt.wantName {
+				t.Errorf("error = %v, want a catalogueError named %q", err, tt.wantName)
+			}
+			var missing *notDownloadedError
+			if errors.As(err, &missing) != tt.missing {
+				t.Errorf("error = %v, want notDownloadedError %v", err, tt.missing)
+			}
+			if len(got) != tt.want {
+				t.Errorf("read %d containers, want %d", len(got), tt.want)
 			}
 		})
 	}
@@ -182,6 +302,27 @@ func TestLookupContainer(t *testing.T) {
 			}
 			if got.catalogue != tt.wantCatalogue {
 				t.Errorf("catalogue = %q, want %q", got.catalogue, tt.wantCatalogue)
+			}
+		})
+	}
+}
+
+func TestPrintable(t *testing.T) {
+	for _, tt := range []struct {
+		name, in, want string
+	}{
+		{name: "plain", in: "itksnap 4.4.0", want: "itksnap 4.4.0"},
+		{name: "whole escape sequence", in: "evil\x1b[2Jname", want: "evilname"},
+		{name: "colour codes", in: "\x1b[31merror\x1b[0m: x", want: "error: x"},
+		{name: "OSC title", in: "a\x1b]0;title\x07b", want: "ab"},
+		{name: "bidi override and zero width", in: "a\u202eb\u200bc", want: "abc"},
+		{name: "newline and tab", in: "a\nb\tc", want: "abc"},
+		{name: "DEL and C1", in: "a\x7fb\u0085c\u009bd", want: "abcd"},
+		{name: "unicode kept", in: "Zürich › ✓", want: "Zürich › ✓"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := printable(tt.in); got != tt.want {
+				t.Errorf("printable(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

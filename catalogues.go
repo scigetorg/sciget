@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -67,6 +68,12 @@ func readCatalogues() (cacheDir, path string, catalogues []catalogue, err error)
 	return cacheDir, path, catalogues, nil
 }
 
+// Errors from usedCatalogues, which the TUI tells apart.
+var (
+	errNoCatalogues = errors.New("no catalogues; run 'sciget catalogue add <name> <url>'")
+	errNoneInUse    = errors.New("no catalogues in use; run 'sciget catalogue use <name>'")
+)
+
 // usedCatalogues returns cache_dir and the catalogues in use, in order. Having
 // none is an error.
 func usedCatalogues() (cacheDir string, used []catalogue, err error) {
@@ -75,7 +82,7 @@ func usedCatalogues() (cacheDir string, used []catalogue, err error) {
 		return "", nil, err
 	}
 	if len(catalogues) == 0 {
-		return "", nil, errors.New("no catalogues; run 'sciget catalogue add <name> <url>'")
+		return "", nil, errNoCatalogues
 	}
 	for _, c := range catalogues {
 		if c.Use {
@@ -83,7 +90,7 @@ func usedCatalogues() (cacheDir string, used []catalogue, err error) {
 		}
 	}
 	if len(used) == 0 {
-		return "", nil, errors.New("no catalogues in use; run 'sciget catalogue use <name>'")
+		return "", nil, errNoneInUse
 	}
 	return cacheDir, used, nil
 }
@@ -139,7 +146,7 @@ func parseCatalogueList(data []byte) ([]catalogue, error) {
 	}
 	for _, o := range objects {
 		for _, key := range slices.Sorted(maps.Keys(o)) {
-			if key != "name" && key != "url" && key != "use" && key != "dir" && key != "layout" {
+			if !slices.Contains([]string{"name", "url", "use", "dir", "layout"}, key) {
 				return nil, fmt.Errorf("unknown field %q", key)
 			}
 		}
@@ -238,11 +245,19 @@ func checkCatalogueName(name string) error {
 	return nil
 }
 
+// checkCatalogueURL checks a catalogue's URL: https, with a host and no
+// credentials. A catalogue decides what runs, so plain http is allowed only
+// to this machine, where it never crosses the network (a test server, or a
+// port forwarded through an SSH tunnel).
 func checkCatalogueURL(value string) error {
 	if err := checkURL(value); err != nil {
 		return err
 	}
-	if u, _ := url.Parse(value); u.User != nil {
+	u, _ := url.Parse(value)
+	if ip := net.ParseIP(u.Hostname()); u.Scheme == "http" && u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return errors.New("must use https; plain http is allowed only to this machine (localhost)")
+	}
+	if u.User != nil {
 		return errors.New("must not contain credentials")
 	}
 	return nil
