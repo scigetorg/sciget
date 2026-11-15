@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -18,37 +19,74 @@ func newRefreshCommand() *cobra.Command {
 		Short: "Download the latest catalogues in use",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cacheDir, used, err := usedCatalogues()
+			results, err := refreshCatalogues()
 			if err != nil {
 				return err
 			}
-			cfg, err := readConfig()
-			if err != nil {
-				return err
-			}
-			maxSize, err := cfg.getNumber("max_catalogue_size")
-			if err != nil {
-				return err
-			}
-			client := &http.Client{}
 			var failures []error
-			for _, cat := range used {
-				changed, err := refreshCatalogue(client, cat.URL, cat.dir(cacheDir), maxSize)
-				if err != nil {
-					failures = append(failures, fmt.Errorf("catalogue %q: %w", cat.Name, err))
+			for _, r := range results {
+				if r.err != nil {
+					failures = append(failures, fmt.Errorf("catalogue %q: %w", r.name, r.err))
 					continue
 				}
 				result := "is up to date."
-				if changed {
+				if r.changed {
 					result = "updated."
 				}
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Catalogue %q %s\n", cat.Name, result); err != nil {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Catalogue %q %s\n", r.name, result); err != nil {
 					return err
 				}
 			}
 			return errors.Join(failures...)
 		},
 	}
+}
+
+// refreshResult is one catalogue's refresh: whether its copy changed, or
+// why it failed.
+type refreshResult struct {
+	name    string
+	changed bool
+	err     error
+}
+
+// refreshCatalogues downloads every catalogue in use, in order, with a
+// client of network_timeout_seconds. One catalogue failing does not stop
+// the others. sciget refresh and the TUI both use it.
+func refreshCatalogues() ([]refreshResult, error) {
+	cacheDir, used, err := usedCatalogues()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := readConfig()
+	if err != nil {
+		return nil, err
+	}
+	maxSize, err := cfg.getNumber("max_catalogue_size")
+	if err != nil {
+		return nil, err
+	}
+	client, err := newHTTPClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	client.CheckRedirect = httpsOnly // as the catalogue URL itself must be
+	var results []refreshResult
+	for _, cat := range used {
+		changed, err := refreshCatalogue(client, cat.URL, cat.dir(cacheDir), maxSize)
+		results = append(results, refreshResult{name: cat.Name, changed: changed, err: err})
+	}
+	return results, nil
+}
+
+// newHTTPClient returns a client whose requests time out after
+// network_timeout_seconds in total.
+func newHTTPClient(cfg config) (*http.Client, error) {
+	seconds, err := cfg.getNumber("network_timeout_seconds")
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Timeout: time.Duration(seconds) * time.Second}, nil
 }
 
 // refreshCatalogue downloads the catalogue at catalogueURL and, if it differs
@@ -108,21 +146,27 @@ func downloadCatalogue(client *http.Client, catalogueURL string, maxSize int64) 
 	return data, nil
 }
 
-// writeCatalogue writes data to path.incomplete and renames it to path, so
-// readers see the old file or the new one, never a partial write in progress.
-// The directory must exist.
+// writeCatalogue writes data to a new temporary file beside path and
+// renames it to path, so readers see the old file or the new one, never a
+// partial write, and two refreshes at once never share a file. The
+// directory must exist.
 func writeCatalogue(path string, data []byte) error {
-	incomplete := path + ".incomplete"
-	f, err := os.OpenFile(incomplete, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.incomplete")
 	if err != nil {
 		return err
 	}
 	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(0o644)
+	}
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
-	if err != nil {
-		return err
+	if err == nil {
+		err = os.Rename(f.Name(), path)
 	}
-	return os.Rename(incomplete, path)
+	if err != nil {
+		os.Remove(f.Name())
+	}
+	return err
 }

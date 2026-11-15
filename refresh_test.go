@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,8 +22,7 @@ func TestRefreshCatalogue(t *testing.T) {
 	tests := []struct {
 		name        string
 		existing    string // apps.json before the refresh; no file when empty
-		incomplete  string // apps.json.incomplete before the refresh; no file when empty
-		blocked     bool   // apps.json.incomplete is a directory, so the write fails
+		blocked     bool   // the directory is read-only, so apps.json cannot be replaced
 		urlBlocked  bool   // url is a directory, so writing it fails
 		status      int    // the server's status; 200 when zero
 		body        string
@@ -39,8 +39,6 @@ func TestRefreshCatalogue(t *testing.T) {
 		{name: "different catalogue", existing: catalogue, body: other, wantChanged: true, want: other},
 		{name: "damaged local copy is replaced", existing: "{}", body: catalogue, wantChanged: true,
 			want: catalogue},
-		{name: "stale incomplete file", incomplete: strings.Repeat("x", 500), body: catalogue,
-			wantChanged: true, want: catalogue},
 		{name: "compressed", body: catalogue, gzip: true, wantChanged: true, want: catalogue},
 		{name: "not found", existing: catalogue, status: http.StatusNotFound, want: catalogue,
 			wantErr: "returned 404 Not Found"},
@@ -102,17 +100,20 @@ func TestRefreshCatalogue(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tt.incomplete != "" {
-				if err := os.WriteFile(path+".incomplete", []byte(tt.incomplete), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if tt.blocked {
-				if err := os.Mkdir(path+".incomplete", 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
 			urlPath := filepath.Join(dir, "url")
+			if tt.blocked {
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("needs a directory the test cannot write to")
+				}
+				// url already exists, so only the new apps.json fails.
+				if err := os.WriteFile(urlPath, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(dir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(dir, 0o755) })
+			}
 			if tt.urlBlocked {
 				if err := os.Mkdir(urlPath, 0o755); err != nil {
 					t.Fatal(err)
@@ -158,10 +159,10 @@ func TestRefreshCatalogue(t *testing.T) {
 					t.Errorf("apps.json rewritten: %v", err)
 				}
 			}
+			if left, _ := filepath.Glob(filepath.Join(dir, "apps.json.*.incomplete")); len(left) > 0 {
+				t.Errorf("temporary files left behind: %v", left)
+			}
 			if tt.wantChanged {
-				if _, err := os.Stat(path + ".incomplete"); !errors.Is(err, os.ErrNotExist) {
-					t.Errorf("apps.json.incomplete left behind: %v", err)
-				}
 
 				// A second refresh must see what the first wrote as the same catalogue.
 				if err := os.Chtimes(path, old, old); err != nil {

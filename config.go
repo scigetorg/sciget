@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -50,6 +51,11 @@ var configKeys = []configKey{
 	{name: "tmp_target", check: checkBindTarget},
 	{name: "use_catalogue_args", kind: boolKind},
 	{name: "max_catalogue_size", kind: numberKind, check: checkCatalogueSize},
+	{name: "display_start_command", kind: listKind, check: eachElement(checkArg)},
+	{name: "display_start_seconds", kind: numberKind, check: checkSeconds},
+	{name: "launch_check_seconds", kind: numberKind, check: checkSeconds},
+	{name: "network_timeout_seconds", kind: numberKind, check: checkSeconds},
+	{name: "update_url", check: checkHTTPSURL},
 }
 
 //go:embed defaults.json
@@ -507,6 +513,27 @@ func checkCatalogueSize(value string) error {
 	n, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || n < 1 || n > maxCatalogueLimit {
 		return fmt.Errorf("must be from 1 to %d (1 TiB)", int64(maxCatalogueLimit))
+	}
+	return nil
+}
+
+// checkSeconds checks a number of seconds from 1 to 3600.
+func checkSeconds(value string) error {
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < 1 || n > 3600 {
+		return errors.New("must be from 1 to 3600 seconds")
+	}
+	return nil
+}
+
+// checkHTTPSURL checks an https URL with a host and no user information.
+func checkHTTPSURL(value string) error {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return errors.New("must be an https URL")
+	}
+	if u.User != nil {
+		return errors.New("must not contain a user name or password")
 	}
 	return nil
 }

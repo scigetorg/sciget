@@ -66,7 +66,12 @@ func TestRun(t *testing.T) {
 		"tmp_vars\t[\"TMP\",\"TMPDIR\",\"TEMP\",\"TEMPDIR\"]\tdefault\n" +
 		"tmp_target\t/tmp\tdefault\n" +
 		"use_catalogue_args\ttrue\tdefault\n" +
-		"max_catalogue_size\t67108864\tdefault\n"
+		"max_catalogue_size\t67108864\tdefault\n" +
+		"display_start_command\t[]\tdefault\n" +
+		"display_start_seconds\t30\tdefault\n" +
+		"launch_check_seconds\t5\tdefault\n" +
+		"network_timeout_seconds\t30\tdefault\n" +
+		"update_url\thttps://github.com/scigetorg/sciget/releases/latest\tdefault\n"
 	var keyNames []string
 	for _, key := range configKeys {
 		keyNames = append(keyNames, key.name)
@@ -100,6 +105,8 @@ func TestRun(t *testing.T) {
 	}{
 		{name: "no arguments", wantCode: 2,
 			wantStderr: "sciget: no command given" + usageHint},
+		{name: "ui without a terminal", args: []string{"ui"}, wantCode: 1,
+			wantStderr: "sciget: sciget ui needs a terminal\n"},
 		{name: "help", args: []string{"help"}, wantStdoutHas: helpText},
 		{name: "help for a command", args: []string{"help", "version"},
 			wantStdoutHas: "Usage:\n  sciget version [flags]\n"},
@@ -302,12 +309,12 @@ func TestRun(t *testing.T) {
 		{name: "catalogue add the same again", catalogues: []testCatalogue{{name: "mylab"}, {name: "neuroimaging", unused: true}},
 			args:         []string{"catalogue", "add", "neuroimaging", exampleURL("neuroimaging")},
 			wantListSame: true,
-			wantStdout:   "Catalogue \"neuroimaging\" already exists with the same URL, dir and layout; nothing to do.\n",
+			wantStdout:   "Catalogue \"neuroimaging\" already exists with the same settings; nothing to do.\n",
 			wantList: []catalogue{{Name: "mylab", URL: exampleURL("mylab"), Use: true},
 				{Name: "neuroimaging", URL: exampleURL("neuroimaging")}}},
 		{name: "catalogue add a name with another URL", catalogues: []testCatalogue{{name: "neuroimaging"}},
 			args: []string{"catalogue", "add", "neuroimaging", mirrorURL}, wantCode: 1, wantListSame: true,
-			wantStderr: "sciget: catalogue \"neuroimaging\" already exists with different URL, dir or layout; use --force-update to replace it, or choose another name\n",
+			wantStderr: "sciget: catalogue \"neuroimaging\" already exists with different settings; use --force-update to replace it, or choose another name\n",
 			wantList:   []catalogue{{Name: "neuroimaging", URL: exampleURL("neuroimaging"), Use: true}}},
 		{name: "catalogue add --force-update", args: []string{"catalogue", "add", "--force-update", "neuroimaging", mirrorURL},
 			catalogues: []testCatalogue{{name: "mylab", apps: labCatalogue}, {name: "neuroimaging", apps: fslCatalogue}},
@@ -329,6 +336,11 @@ func TestRun(t *testing.T) {
 				"starting with a letter or digit" + usageHint},
 		{name: "catalogue add a bad URL", args: []string{"catalogue", "add", "mylab", "example.org/apps.json"}, wantCode: 2,
 			wantStderr: "sciget: invalid catalogue URL: must start with https:// or http://" + usageHint},
+		{name: "catalogue add a plain http URL", args: []string{"catalogue", "add", "mylab", "http://mirror.local/apps.json"}, wantCode: 2,
+			wantStderr: "sciget: invalid catalogue URL: must use https; plain http is allowed only to this machine (localhost)" + usageHint},
+		{name: "catalogue add plain http to this machine", args: []string{"catalogue", "add", "mylab", "http://localhost:8080/apps.json"},
+			wantStdout: "Catalogue \"mylab\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantList:   []catalogue{{Name: "mylab", URL: "http://localhost:8080/apps.json", Use: true}}},
 		{name: "catalogue add a URL with credentials", args: []string{"catalogue", "add", "mylab", "https://u:p@e.org/a.json"},
 			wantCode: 2, wantStderr: "sciget: invalid catalogue URL: must not contain credentials" + usageHint},
 		{name: "catalogue add without a URL", args: []string{"catalogue", "add", "mylab"}, wantCode: 2,
@@ -344,7 +356,7 @@ func TestRun(t *testing.T) {
 
 		{name: "catalogue share no-op", catalogues: []testCatalogue{{name: "neuroimaging", dir: "/share", layout: "{tool}/{version}/{date}"}},
 			args: []string{"catalogue", "add", "--dir", "/share", "--layout", "{tool}/{version}/{date}", "neuroimaging", exampleURL("neuroimaging")}, wantListSame: true,
-			wantStdout: "Catalogue \"neuroimaging\" already exists with the same URL, dir and layout; nothing to do.\n"},
+			wantStdout: "Catalogue \"neuroimaging\" already exists with the same settings; nothing to do.\n"},
 		{name: "catalogue share change needs force", catalogues: []testCatalogue{{name: "neuroimaging"}},
 			args: []string{"catalogue", "add", "--dir", "/share", "neuroimaging", exampleURL("neuroimaging")}, wantCode: 1, wantListSame: true,
 			wantStderrHas: "use --force-update"},
@@ -719,6 +731,8 @@ func TestExitCode(t *testing.T) {
 			wantCode: 1, wantStderr: "sciget: a failed\nsciget: b failed\n"},
 		{name: "two-line usage error", err: usageError{"a\nb"}, wantCode: 2,
 			wantStderr: "sciget: a\nsciget: b\nRun 'sciget help' for usage.\n"},
+		{name: "escape sequences removed, lines kept", err: errors.New("404 Not \x1b[31mFound\x1b[0m\nb \x1b]0;x\x07failed"),
+			wantCode: 1, wantStderr: "sciget: 404 Not Found\nsciget: b failed\n"},
 	}
 
 	for _, tt := range tests {

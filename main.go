@@ -40,8 +40,13 @@ func exitCode(err error, stderr io.Writer) int {
 		return 0
 	}
 
-	// A joined error has one failure per line; each gets the prefix.
-	message := strings.ReplaceAll(err.Error(), "\n", "\nsciget: ")
+	// A joined error has one failure per line; each gets the prefix. An
+	// error can quote text from outside sciget, so each line is cleaned.
+	lines := strings.Split(err.Error(), "\n")
+	for i, line := range lines {
+		lines[i] = printable(line)
+	}
+	message := strings.Join(lines, "\nsciget: ")
 	var usageErr usageError
 	if errors.As(err, &usageErr) {
 		fmt.Fprintf(stderr, "sciget: %s\nRun 'sciget help' for usage.\n", message)
@@ -66,6 +71,9 @@ func newRootCommand() *cobra.Command {
 
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if isTerminal(os.Stdin) && isTerminal(cmd.OutOrStdout()) {
+				return runTUI(cmd.OutOrStdout())
+			}
 			return usageError{"no command given"}
 		},
 	}
@@ -81,6 +89,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newCatalogueCommand())
 	root.AddCommand(newInfoCommand())
 	root.AddCommand(newApptainerCommand())
+	root.AddCommand(newUICommand())
 	return root
 }
 

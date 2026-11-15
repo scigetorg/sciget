@@ -12,5 +12,10 @@
   "tmp_vars": ["TMP", "TMPDIR", "TEMP", "TEMPDIR"],
   "tmp_target": "/tmp",
   "use_catalogue_args": true,
-  "max_catalogue_size": 67108864
+  "max_catalogue_size": 67108864,
+  "display_start_command": [],
+  "display_start_seconds": 30,
+  "launch_check_seconds": 5,
+  "network_timeout_seconds": 30,
+  "update_url": "https://github.com/scigetorg/sciget/releases/latest"
 }

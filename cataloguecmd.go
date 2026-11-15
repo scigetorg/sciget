@@ -47,7 +47,8 @@ func newCatalogueCommand() *cobra.Command {
 					return fmt.Errorf("making dir absolute: %w", err)
 				}
 			}
-			return addCatalogue(cmd.OutOrStdout(), args[0], args[1], dir, layout, addLast, forceUpdate)
+			c := catalogue{Name: args[0], URL: args[1], Use: true, Dir: dir, Layout: layout}
+			return addCatalogue(cmd.OutOrStdout(), c, addLast, forceUpdate)
 		},
 	}
 	add.Flags().BoolVar(&addLast, "append", false, "use it last instead of first")
@@ -109,38 +110,39 @@ func runCatalogueList(cmd *cobra.Command, args []string) error {
 	return writeCatalogueTable(out, catalogues, isTerminal(out))
 }
 
-// addCatalogue registers a catalogue and uses it first, or last if last is
-// set. Changing its URL, dir or layout requires forceUpdate. Only a URL
-// change removes the old cache directory.
-func addCatalogue(w io.Writer, name, url, dir, layout string, last, forceUpdate bool) error {
+// addCatalogue registers the catalogue c and uses it first, or last if last
+// is set. Changing an existing one's URL, dir or layout requires
+// forceUpdate. Only a URL change removes the old cache directory.
+func addCatalogue(w io.Writer, c catalogue, last, forceUpdate bool) error {
 	cacheDir, path, catalogues, err := readCatalogues()
 	if err != nil {
 		return err
 	}
+	name := c.Name
 	if err := checkCatalogueName(name); err != nil {
 		return usageError{fmt.Sprintf("invalid catalogue name %q: %s", name, err)}
 	}
-	if err := checkCatalogueURL(url); err != nil {
+	if err := checkCatalogueURL(c.URL); err != nil {
 		return usageError{"invalid catalogue URL: " + err.Error()}
 	}
 
 	oldDir := ""
 	if i := findCatalogue(catalogues, name); i >= 0 {
 		old := catalogues[i]
-		if old.URL == url && old.Dir == dir && old.Layout == layout {
-			_, err := fmt.Fprintf(w, "Catalogue %q already exists with the same URL, dir and layout; nothing to do.\n", name)
+		if old.URL == c.URL && old.Dir == c.Dir && old.Layout == c.Layout {
+			_, err := fmt.Fprintf(w, "Catalogue %q already exists with the same settings; nothing to do.\n", name)
 			return err
 		}
 		if !forceUpdate {
-			return fmt.Errorf("catalogue %q already exists with different URL, dir or layout; use --force-update to replace it, or choose another name",
+			return fmt.Errorf("catalogue %q already exists with different settings; use --force-update to replace it, or choose another name",
 				name)
 		}
-		if old.URL != url {
+		if old.URL != c.URL {
 			oldDir = old.dir(cacheDir)
 		}
 		catalogues = slices.Delete(catalogues, i, i+1)
 	}
-	catalogues = placeCatalogue(catalogues, catalogue{Name: name, URL: url, Use: true, Dir: dir, Layout: layout}, last)
+	catalogues = placeCatalogue(catalogues, c, last)
 	if err := writeCatalogueList(path, catalogues); err != nil {
 		return err
 	}

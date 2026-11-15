@@ -334,6 +334,7 @@ func TestWriteConfigList(t *testing.T) {
 	}
 	cacheDir := filepath.Join(cache, "sciget")
 	verbArgs := `["--cleanenv","{env}","{xauthority}","{tmp}","{pwd}"]`
+	const updateURL = "https://github.com/scigetorg/sciget/releases/latest"
 	// Every key after cache_dir, at its default.
 	rest := [][2]string{
 		{"container_dir", filepath.Join("/data", "sciget", "containers")},
@@ -349,14 +350,23 @@ func TestWriteConfigList(t *testing.T) {
 		{"tmp_target", "/tmp"},
 		{"use_catalogue_args", "true"},
 		{"max_catalogue_size", "67108864"},
+		{"display_start_command", "[]"},
+		{"display_start_seconds", "30"},
+		{"launch_check_seconds", "5"},
+		{"network_timeout_seconds", "30"},
+		{"update_url", updateURL},
 	}
 	var piped, aligned strings.Builder
-	width := len(verbArgs) + 2
-	fmt.Fprintf(&aligned, "%-23s%-*s%s\n", "KEY", width, "VALUE", "SOURCE")
-	fmt.Fprintf(&aligned, "%-23s%-*s%s\n", "cache_dir", width, cacheDir, "default")
+	width := len(cacheDir)
+	for _, row := range rest {
+		width = max(width, len(row[1]))
+	}
+	width += 2 // the longest value and the gap
+	fmt.Fprintf(&aligned, "%-25s%-*s%s\n", "KEY", width, "VALUE", "SOURCE")
+	fmt.Fprintf(&aligned, "%-25s%-*s%s\n", "cache_dir", width, cacheDir, "default")
 	for _, row := range rest {
 		fmt.Fprintf(&piped, "%s\t%s\tdefault\n", row[0], row[1])
-		fmt.Fprintf(&aligned, "%-23s%-*s%s\n", row[0], width, row[1], "default")
+		fmt.Fprintf(&aligned, "%-25s%-*s%s\n", row[0], width, row[1], "default")
 	}
 	tests := []struct {
 		name      string
@@ -521,6 +531,13 @@ func TestLaunchChecks(t *testing.T) {
 		{name: "size over the cap", check: checkCatalogueSize, value: "1099511627777", bad: true},
 		{name: "list elements", check: eachElement(checkEnvName), value: `["TMP","TMPDIR"]`},
 		{name: "list with a bad element", check: eachElement(checkEnvName), value: `["TMP","1"]`, bad: true},
+		{name: "seconds", check: checkSeconds, value: "30"},
+		{name: "seconds zero", check: checkSeconds, value: "0", bad: true},
+		{name: "seconds over an hour", check: checkSeconds, value: "3601", bad: true},
+		{name: "https URL", check: checkHTTPSURL, value: "https://example.org/x"},
+		{name: "http URL", check: checkHTTPSURL, value: "http://example.org/x", bad: true},
+		{name: "URL without host", check: checkHTTPSURL, value: "https:///x", bad: true},
+		{name: "URL with user information", check: checkHTTPSURL, value: "https://me:secret@example.org/x", bad: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.check(tt.value); (err != nil) != tt.bad {
