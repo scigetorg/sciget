@@ -28,7 +28,8 @@ type notOnMachineError struct{ name string }
 func (e notOnMachineError) Error() string {
 	// Quoted, because the name comes from a catalogue and the line is
 	// meant to be pasted into a shell.
-	return e.name + " is not on this machine; to download it, run: " + shellJoin([]string{"sciget", "pull", e.name})
+	return e.name + " is not on this machine; to download it, run: " + shellJoin([]string{"sciget", "pull", e.name}) +
+		", or let sciget download when needed: sciget config set auto_pull true"
 }
 
 // unsafeLayoutValue reports whether v cannot fill a layout: it is empty, or
@@ -350,6 +351,11 @@ func newApptainerVerbCommand(verb string) *cobra.Command {
 				return err
 			}
 			loc, err := locate(cfg, c)
+			var missing notOnMachineError
+			if errors.As(err, &missing) && !dryRun {
+				stderr := cmd.ErrOrStderr()
+				loc, err = pullOnRun(cfg, c, os.Stdin, stderr, isTerminal(os.Stdin) && isTerminal(stderr))
+			}
 			if err != nil {
 				return err
 			}

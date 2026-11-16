@@ -24,10 +24,11 @@ type download struct {
 // downloadFile downloads url into a new file beside dest, named
 // "<dest's name>.*.incomplete", and returns that file's path. The file
 // holds exactly the size HEAD reports and matches want. On any error the
-// file is deleted. dest's directory must exist. progress, if not nil, is
-// called at most twice a second and once at the end.
-func downloadFile(client *http.Client, url, dest string, want download, progress func(done, total int64)) (string, error) {
-	size, err := headSize(client, url)
+// file is deleted, including when ctx is cancelled. dest's directory must
+// exist. progress, if not nil, is called at most twice a second and once at
+// the end.
+func downloadFile(ctx context.Context, client *http.Client, url, dest string, want download, progress func(done, total int64)) (string, error) {
+	size, err := headSize(ctx, client, url)
 	if err != nil {
 		return "", err
 	}
@@ -43,7 +44,11 @@ func downloadFile(client *http.Client, url, dest string, want download, progress
 		return "", err
 	}
 
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -87,8 +92,12 @@ func downloadFile(client *http.Client, url, dest string, want download, progress
 }
 
 // headSize returns the size a HEAD request for url reports.
-func headSize(client *http.Client, url string) (int64, error) {
-	resp, err := client.Head(url)
+func headSize(ctx context.Context, client *http.Client, url string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}

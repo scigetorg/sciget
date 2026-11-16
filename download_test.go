@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -85,7 +86,7 @@ func TestDownloadFile(t *testing.T) {
 			}
 
 			var calls [][2]int64
-			path, err := downloadFile(srv.Client(), srv.URL+"/fsl.simg", dest, tt.want, func(done, total int64) {
+			path, err := downloadFile(context.Background(), srv.Client(), srv.URL+"/fsl.simg", dest, tt.want, func(done, total int64) {
 				calls = append(calls, [2]int64{done, total})
 			})
 			if tt.wantErr != "" {
