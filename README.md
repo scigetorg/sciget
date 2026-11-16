@@ -4,10 +4,9 @@ Install and run containerised scientific software, on a workstation or an HPC
 login node. sciget reads a catalogue of published containers, fetches each
 container's image, and runs it through Apptainer. One static binary, no root.
 
-> **Status: not yet released.** sciget runs containers that are already on
-> the machine, such as those on a CVMFS share; a container that is not there
-> is an error until downloads arrive. Installing containers as desktop
-> launchers (`sciget install`) is planned and not yet available.
+> **Status: not yet released.** sciget runs containers on a CVMFS share or
+> downloaded with `sciget pull` from Nectar or S3. Downloads from the
+> Quay and GHCR registries, and modules, are planned.
 
 ## Building
 
@@ -46,9 +45,29 @@ such as a port forwarded through an SSH tunnel
 | `sciget refresh` | Download the latest catalogues in use |
 | `sciget find [words...]` | List the containers in the catalogues in use (`--all` includes hidden ones) |
 | `sciget info <tool/version>` | Show a container's details and where it is |
+| `sciget pull <tool/version>` | Download a container into the store |
+| `sciget doctor` | Report problems, such as stopped downloads, and the commands that fix them |
 | `sciget config [get\|set\|unset\|list]` | Show and change settings |
 | `sciget completion <shell>` | Print a shell completion script |
 | `sciget version` | Print the version |
+
+## Pulling containers
+
+`sciget pull fsl/6.0.7.8` downloads a container that is not already on
+the machine (on its catalogue's share, or in the store) into the store,
+`container_dir`. It tries each of `download_urls` in turn, Nectar then S3
+by default. A download counts only when its size matches what the server
+reported, its SHA-256 matches the catalogue's (when the catalogue gives
+one), and Apptainer can open it. Set `warn_missing_checksum` to true to be
+told when no SHA-256 was published. Before downloading, sciget checks the
+disk has room (quotas are not seen).
+
+A stopped download starts again from the beginning; a killed one leaves a
+`*.incomplete` file, which `sciget doctor` lists. sciget does not delete
+containers: to remove one, delete its folder in the store.
+
+Keep `container_dir` separate from neurocommand's container folder: an
+image sciget puts there makes neurocommand skip setting it up.
 
 ## Licence
 
