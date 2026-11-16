@@ -58,6 +58,8 @@ var configKeys = []configKey{
 	{name: "update_url", check: checkHTTPSURL},
 	{name: "download_urls", kind: listKind, check: eachElement(checkDownloadURL)},
 	{name: "warn_missing_checksum", kind: boolKind},
+	{name: "auto_pull", kind: boolKind},
+	{name: "parallel_pulls", kind: numberKind, check: checkParallelPulls},
 }
 
 //go:embed defaults.json
@@ -524,6 +526,14 @@ func checkSeconds(value string) error {
 	n, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || n < 1 || n > 3600 {
 		return errors.New("must be from 1 to 3600 seconds")
+	}
+	return nil
+}
+
+func checkParallelPulls(value string) error {
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < 1 || n > 8 {
+		return errors.New("must be from 1 to 8")
 	}
 	return nil
 }

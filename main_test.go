@@ -73,7 +73,9 @@ func TestRun(t *testing.T) {
 		"network_timeout_seconds\t30\tdefault\n" +
 		"update_url\thttps://github.com/scigetorg/sciget/releases/latest\tdefault\n" +
 		"download_urls\t[\"https://object-store.rc.nectar.org.au/v1/AUTH_dead991e1fa847e3afcca2d3a7041f5d/neurodesk/{file}\",\"https://neurocontainers.s3.us-east-2.amazonaws.com/{file}\"]\tdefault\n" +
-		"warn_missing_checksum\tfalse\tdefault\n"
+		"warn_missing_checksum\tfalse\tdefault\n" +
+		"auto_pull\tfalse\tdefault\n" +
+		"parallel_pulls\t3\tdefault\n"
 	var keyNames []string
 	for _, key := range configKeys {
 		keyNames = append(keyNames, key.name)
@@ -197,7 +199,7 @@ func TestRun(t *testing.T) {
 			wantStderr: "sciget: unknown command \"exex\" for \"sciget apptainer\"" + usageHint},
 		{name: "apptainer alone shows help", args: []string{"apptainer"}, wantStdoutHas: "Run containers with Apptainer"},
 		{name: "apptainer exec not on this machine", args: []string{"apptainer", "exec", "fsl/6.0.3", "bet"},
-			catalogues: neuroimaging, wantCode: 1, wantStderr: "sciget: fsl/6.0.3 is not on this machine; to download it, run: sciget pull fsl/6.0.3\n"},
+			catalogues: neuroimaging, wantCode: 1, wantStderr: "sciget: fsl/6.0.3 is not on this machine; to download it, run: sciget pull fsl/6.0.3, or let sciget download when needed: sciget config set auto_pull true\n"},
 		{name: "apptainer not found", args: []string{"apptainer", "shell", "fsl/6.0.3"},
 			catalogues: neuroimaging, config: `{"apptainer_path": "no-such-apptainer"}`, stored: []string{fslStored},
 			wantCode: 1, wantStderr: "sciget: apptainer not found: \"no-such-apptainer\"; install Apptainer or set apptainer_path\n"},
