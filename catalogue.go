@@ -25,11 +25,12 @@ type container struct {
 	dois          []string
 	apptainerArgs []string // added to every run; all entries agree
 	categories    []string
-	graphical     bool    // some entry has a graphical command
-	hidden        bool    // every entry is hidden
-	catalogue     string  // the name of the catalogue it comes from
-	shadowed      bool    // an earlier catalogue in use has the same name
-	entries       []entry // visible entries with a command, in key order
+	graphical     bool     // some entry has a graphical command
+	hidden        bool     // every entry is hidden
+	catalogue     string   // the name of the catalogue it comes from
+	shadowed      bool     // an earlier catalogue in use has the same name
+	entries       []entry  // visible entries with a command, in key order
+	published     download // the image's size and SHA-256, if the catalogue gives them
 }
 
 // entry is a visible catalogue entry that runs a command in its container,
@@ -63,6 +64,8 @@ type catalogueApp struct {
 	Exec          string   `json:"exec"`
 	Image         string   `json:"image"`
 	ShowInApplist *bool    `json:"show_in_applist"`
+	SHA256        string   `json:"sha256"`
+	Size          int64    `json:"size"`
 }
 
 // readContainers returns the containers of every catalogue in use, sorted by
@@ -173,7 +176,12 @@ func parseCatalogue(data []byte) ([]container, error) {
 				return nil, fmt.Errorf("catalogue entry %q has no build date", key)
 			case unsafeLayoutValue(tool) || unsafeLayoutValue(toolVersion) || unsafeLayoutValue(app.BuildDate):
 				return nil, fmt.Errorf("catalogue entry %q has a tool, version or build date with \"/\" or \"..\"", key)
+			case app.SHA256 != "" && !sha256Hex.MatchString(app.SHA256):
+				return nil, fmt.Errorf("catalogue entry %q has a sha256 that is not 64 lowercase hex digits", key)
+			case app.Size < 0:
+				return nil, fmt.Errorf("catalogue entry %q has a negative size", key)
 			}
+			published := download{size: app.Size, sha256: app.SHA256}
 
 			// The arguments go before the image, so a stray word would be
 			// read as the image: each is an option, and an option in
@@ -195,7 +203,7 @@ func parseCatalogue(data []byte) ([]container, error) {
 			if c == nil {
 				c = &container{tool: tool, version: toolVersion, image: image,
 					buildDate: app.BuildDate, categories: t.Categories, hidden: true,
-					apptainerArgs: app.ApptainerArgs}
+					apptainerArgs: app.ApptainerArgs, published: published}
 				byName[c.name()] = c
 			}
 			if app.BuildDate != c.buildDate {
@@ -205,6 +213,9 @@ func parseCatalogue(data []byte) ([]container, error) {
 			if !slices.Equal(app.ApptainerArgs, c.apptainerArgs) {
 				return nil, fmt.Errorf("catalogue lists %s with apptainer_args %q and %q",
 					c.name(), c.apptainerArgs, app.ApptainerArgs)
+			}
+			if published != c.published {
+				return nil, fmt.Errorf("catalogue lists %s with different sizes or SHA-256s", c.name())
 			}
 			c.licences = append(c.licences, app.Licences...)
 			if app.DOI != "" {
@@ -236,6 +247,9 @@ func parseCatalogue(data []byte) ([]container, error) {
 	slices.SortFunc(containers, compareContainers)
 	return containers, nil
 }
+
+// sha256Hex matches a SHA-256 written as lowercase hex.
+var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // compareContainers orders containers by tool, then by version.
 func compareContainers(a, b container) int {

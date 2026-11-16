@@ -71,7 +71,9 @@ func TestRun(t *testing.T) {
 		"display_start_seconds\t30\tdefault\n" +
 		"launch_check_seconds\t5\tdefault\n" +
 		"network_timeout_seconds\t30\tdefault\n" +
-		"update_url\thttps://github.com/scigetorg/sciget/releases/latest\tdefault\n"
+		"update_url\thttps://github.com/scigetorg/sciget/releases/latest\tdefault\n" +
+		"download_urls\t[\"https://object-store.rc.nectar.org.au/v1/AUTH_dead991e1fa847e3afcca2d3a7041f5d/neurodesk/{file}\",\"https://neurocontainers.s3.us-east-2.amazonaws.com/{file}\"]\tdefault\n" +
+		"warn_missing_checksum\tfalse\tdefault\n"
 	var keyNames []string
 	for _, key := range configKeys {
 		keyNames = append(keyNames, key.name)

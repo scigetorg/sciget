@@ -19,6 +19,7 @@ func TestLoadCatalogue(t *testing.T) {
 		licences, dois []string
 		apptainerArgs  []string
 		entries        []string // "label:exec" per entry, checked when set
+		published      download
 		wantErr        string
 	}{
 		{name: "missing file", wantErr: "no catalogue at "},
@@ -41,6 +42,20 @@ func TestLoadCatalogue(t *testing.T) {
 				"fsl 1":{"version":"1","apptainer_args":["--bind","/dev/fuse"]},
 				"GUI-fsl 1":{"version":"1","apptainer_args":["--bind","/dev/fuse"]}}}}`,
 			want: []string{"fsl/1 fsl_1_1 []"}, apptainerArgs: []string{"--bind", "/dev/fuse"}},
+		{name: "size and SHA-256", json: `{"fsl":{"apps":{
+				"fsl 1":{"version":"1","size":42,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				"GUI-fsl 1":{"version":"1","size":42,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}`,
+			want: []string{"fsl/1 fsl_1_1 []"}, published: download{size: 42, sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+		{name: "SHA-256 in capitals", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","sha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}}`,
+			wantErr: "not 64 lowercase hex digits"},
+		{name: "short SHA-256", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","sha256":"abc"}}}}`,
+			wantErr: "not 64 lowercase hex digits"},
+		{name: "negative size", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","size":-1}}}}`,
+			wantErr: "negative size"},
+		{name: "SHA-256s that disagree", json: `{"fsl":{"apps":{
+				"fsl 1":{"version":"1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				"GUI-fsl 1":{"version":"1"}}}}`,
+			wantErr: "different sizes or SHA-256s"},
 		{name: "apptainer args that disagree", json: `{"fsl":{"apps":{
 				"fsl 1":{"version":"1","apptainer_args":["--bind","/dev/fuse"]},
 				"GUI-fsl 1":{"version":"1"}}}}`,
@@ -175,6 +190,9 @@ func TestLoadCatalogue(t *testing.T) {
 					if !slices.Equal(got, tt.entries) {
 						t.Errorf("entries = %q, want %q", got, tt.entries)
 					}
+				}
+				if c.published != tt.published {
+					t.Errorf("published = %+v, want %+v", c.published, tt.published)
 				}
 				if !slices.Equal(c.apptainerArgs, tt.apptainerArgs) {
 					t.Errorf("apptainer args = %q, want %q", c.apptainerArgs, tt.apptainerArgs)

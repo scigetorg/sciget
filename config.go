@@ -56,6 +56,8 @@ var configKeys = []configKey{
 	{name: "launch_check_seconds", kind: numberKind, check: checkSeconds},
 	{name: "network_timeout_seconds", kind: numberKind, check: checkSeconds},
 	{name: "update_url", check: checkHTTPSURL},
+	{name: "download_urls", kind: listKind, check: eachElement(checkDownloadURL)},
+	{name: "warn_missing_checksum", kind: boolKind},
 }
 
 //go:embed defaults.json
@@ -536,6 +538,15 @@ func checkHTTPSURL(value string) error {
 		return errors.New("must not contain a user name or password")
 	}
 	return nil
+}
+
+// checkDownloadURL checks a download URL template: a catalogue URL (see
+// checkCatalogueURL) with {file} exactly once.
+func checkDownloadURL(value string) error {
+	if strings.Count(value, "{file}") != 1 {
+		return errors.New("must contain {file} exactly once")
+	}
+	return checkCatalogueURL(value)
 }
 
 func checkAbsolute(value string) error {

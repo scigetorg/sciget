@@ -355,6 +355,8 @@ func TestWriteConfigList(t *testing.T) {
 		{"launch_check_seconds", "5"},
 		{"network_timeout_seconds", "30"},
 		{"update_url", updateURL},
+		{"download_urls", `["https://object-store.rc.nectar.org.au/v1/AUTH_dead991e1fa847e3afcca2d3a7041f5d/neurodesk/{file}","https://neurocontainers.s3.us-east-2.amazonaws.com/{file}"]`},
+		{"warn_missing_checksum", "false"},
 	}
 	var piped, aligned strings.Builder
 	width := len(cacheDir)
@@ -538,6 +540,11 @@ func TestLaunchChecks(t *testing.T) {
 		{name: "http URL", check: checkHTTPSURL, value: "http://example.org/x", bad: true},
 		{name: "URL without host", check: checkHTTPSURL, value: "https:///x", bad: true},
 		{name: "URL with user information", check: checkHTTPSURL, value: "https://me:secret@example.org/x", bad: true},
+		{name: "download URL", check: checkDownloadURL, value: "https://example.org/c/{file}"},
+		{name: "download URL to this machine", check: checkDownloadURL, value: "http://127.0.0.1:8080/{file}"},
+		{name: "download URL without {file}", check: checkDownloadURL, value: "https://example.org/c/", bad: true},
+		{name: "download URL with {file} twice", check: checkDownloadURL, value: "https://example.org/{file}/{file}", bad: true},
+		{name: "download URL over plain http", check: checkDownloadURL, value: "http://example.org/{file}", bad: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.check(tt.value); (err != nil) != tt.bad {
