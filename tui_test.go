@@ -228,27 +228,28 @@ func TestRefreshOutcome(t *testing.T) {
 }
 
 func TestRefreshMsg(t *testing.T) {
-	t.Run("selection kept, locations dropped", func(t *testing.T) {
+	t.Run("selection kept, location looked up again", func(t *testing.T) {
 		m := launchModel(t)
 		m.handle(refreshMsg{results: []refreshResult{{name: "neuro"}}, containers: tuiContainers})
-		if c, _ := m.selected(); c.name() != "itksnap/4.4.0" || len(m.locations) != 0 || m.refreshing {
-			t.Errorf("selected %s, locations %v, refreshing %v", c.name(), m.locations, m.refreshing)
+		if c, _ := m.selected(); c.name() != "itksnap/4.4.0" || m.locFor != "" || m.refreshing {
+			t.Errorf("selected %s, locFor %q, refreshing %v", c.name(), m.locFor, m.refreshing)
 		}
 	})
 	t.Run("a location from before the refresh is dropped", func(t *testing.T) {
 		m := launchModel(t)
+		old := m.locID
 		m.handle(refreshMsg{results: []refreshResult{{name: "neuro"}}, containers: tuiContainers})
-		m.handle(locationMsg{gen: 0, name: "itksnap/4.4.0", text: notHere})
-		if _, ok := m.locations["itksnap/4.4.0"]; ok {
-			t.Errorf("locations %v, want the old reply dropped", m.locations)
+		m.handle(locationMsg{id: old, text: notHere})
+		if m.location == notHere {
+			t.Errorf("location %q, want the old reply dropped", m.location)
 		}
 	})
 	t.Run("a held launch is cancelled", func(t *testing.T) {
 		m := launchModel(t)
-		m.locations["itksnap/4.4.0"] = checking
+		m.location = checking
 		m.launch(1)
 		m.handle(refreshMsg{results: []refreshResult{{name: "neuro"}}, containers: tuiContainers})
-		if cmd := m.handle(locationMsg{gen: m.locGen, name: "itksnap/4.4.0", text: onHere + " (store)"}); cmd != nil || len(m.launches) != 0 {
+		if cmd := m.handle(locationMsg{id: m.locID, text: onHere + " (downloaded)"}); cmd != nil || len(m.launches) != 0 {
 			t.Errorf("command %v, launches %v, want nothing started", cmd != nil, m.launches)
 		}
 	})

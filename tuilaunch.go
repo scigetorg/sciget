@@ -63,10 +63,9 @@ func (m *model) launch(i int) tea.Cmd {
 	if !ok || i >= m.buttonCount() {
 		return nil
 	}
-	switch loc := m.locations[c.name()]; {
-	case loc == notHere:
-		m.notice = &callout{state: "failed", detail: c.name() + " is not on this machine yet"}
-		return nil
+	switch loc := m.location; {
+	case strings.HasPrefix(loc, notHere):
+		return m.requestPull(c)
 	case loc == checking || loc == "":
 		m.waiting = &pending{c.name(), i}
 		m.notice = &callout{state: "starting", detail: "Checking " + c.name() + " is on this machine…"}

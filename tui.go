@@ -38,6 +38,9 @@ func runTUI(out io.Writer) error {
 	}
 	containers, err := readContainers()
 	m := newModel(s, containers, err, loadState(statePath(s.cacheDir)))
+	if problems, _ := findProblems(s.cfg); len(problems) > 0 {
+		m.notice = &callout{detail: fmt.Sprintf("sciget doctor found %d problem(s), such as a stopped download; run sciget doctor", len(problems))}
+	}
 	_, err = tea.NewProgram(m, tea.WithOutput(out)).Run()
 	return err
 }
@@ -149,16 +152,17 @@ type model struct {
 	spin                          spinner.Model
 	spinning, touched             bool
 
-	launches  []launch     // this session's, newest first
-	earlier   []stateEntry // restored from earlier sessions
-	notice    *callout     // shown instead of the selection's status until the selection changes
-	locations map[string]string
-	locGen    int      // bumped when the catalogues are re-read; older location replies are dropped
-	waiting   *pending // a launch held until its container's location is known
-	nextID    int
-	btnRows   int      // the button viewport's height when last laid out
-	btnFor    string   // the container btn belongs to
-	start     tuiState // the state restored at start, kept while the catalogues cannot be read
+	launches []launch     // this session's, newest first
+	earlier  []stateEntry // restored from earlier sessions
+	notice   *callout     // shown instead of the selection's status until the selection changes
+	location string       // LOCATION for locFor, looked up afresh each time it is selected
+	locFor   string       // the container location belongs to
+	locID    int          // the latest lookup; replies from older ones are dropped
+	waiting  *pending     // a launch held until its container's location is known
+	nextID   int
+	btnRows  int      // the button viewport's height when last laid out
+	btnFor   string   // the container btn belongs to
+	start    tuiState // the state restored at start, kept while the catalogues cannot be read
 
 	refreshing, checking bool
 	updateText           string // the update check's result
@@ -167,10 +171,14 @@ type model struct {
 	desktopLog           string // display_start_command's log
 	queue                []int  // GUI launches waiting for the desktop
 	saveReported         bool
+
+	asking   string     // the container whose pull question the buttons show
+	pulls    []*pullRun // running, oldest first
+	quitting bool       // Quit was confirmed; quit once the pulls have stopped
 }
 
 func newModel(s tuiSettings, containers []container, loadErr error, st tuiState) model {
-	m := model{s: s, counts: map[string]int{}, byTool: map[string][]container{}, locations: map[string]string{},
+	m := model{s: s, counts: map[string]int{}, byTool: map[string][]container{},
 		dark: true, th: newTheme(true), spin: spinner.New(spinner.WithSpinner(breathe)),
 		focus: searchControl, hoverX: -1, hoverY: -1, earlier: st.Log, start: st}
 	m.search = textinput.New()
@@ -274,13 +282,7 @@ func (m model) selected() (container, bool) {
 
 // buttonCount is the selected container's buttons: the terminal first,
 // then one per entry.
-func (m model) buttonCount() int {
-	c, ok := m.selected()
-	if !ok {
-		return 0
-	}
-	return 1 + len(c.entries)
-}
+func (m model) buttonCount() int { return len(m.buttons()) }
 
 // emptyControl is where focus starts in an empty state: Refresh when it
 // can help, otherwise Quit.
@@ -300,11 +302,15 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmd := m.handle(msg)
 	m.keepButton()
-	if c, _ := m.selected(); m.waiting != nil && c.name() != m.waiting.name {
+	c, _ := m.selected()
+	if m.waiting != nil && c.name() != m.waiting.name {
 		m.waiting = nil // the selection moved on
 	}
+	if m.asking != "" && c.name() != m.asking {
+		m.asking = "" // so did the question
+	}
 	cmds := []tea.Cmd{cmd, m.lookUpLocation()}
-	if busy := m.refreshing || m.checking || m.desktopBusy || m.waiting != nil ||
+	if busy := m.refreshing || m.checking || m.desktopBusy || m.waiting != nil || len(m.pulls) > 0 ||
 		slices.ContainsFunc(m.launches, func(l launch) bool { return l.state == "starting" }); busy && !m.spinning {
 		m.spinning = true
 		cmds = append(cmds, m.spin.Tick)
@@ -323,6 +329,7 @@ func (m *model) keepButton() {
 	if c, _ := m.selected(); c.name() != m.btnFor {
 		m.btn, m.btnTop, m.btnFor = 0, 0, c.name()
 	}
+	m.btn = clamp(m.btn, 0, max(0, m.buttonCount()-1)) // the buttons change with a question or a pull
 }
 
 func (m *model) handle(msg tea.Msg) tea.Cmd {
@@ -379,11 +386,11 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 			m.actTop += step / 3
 		}
 	case locationMsg:
-		if msg.gen != m.locGen {
+		if msg.id != m.locID {
 			return nil
 		}
-		m.locations[msg.name] = msg.text
-		if w := m.waiting; w != nil && w.name == msg.name {
+		m.location = msg.text
+		if w := m.waiting; w != nil && w.name == m.locFor {
 			m.waiting = nil
 			if c, _ := m.selected(); c.name() == w.name {
 				return m.launch(w.btn)
@@ -400,8 +407,8 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		m.setContainers(msg.containers, msg.readErr)
-		clear(m.locations)
-		m.locGen++
+		m.locFor = "" // looked up again, from the new catalogues
+		m.locID++
 		m.waiting = nil // its button may now be another entry
 		if m.loadErr != nil {
 			m.focus = m.emptyControl()
@@ -412,7 +419,7 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 		if m.loadErr == nil {
 			cmd = m.updateSearch(msg)
 		}
-		return tea.Batch(cmd, m.handleLaunch(msg))
+		return tea.Batch(cmd, m.handleLaunch(msg), m.handlePull(msg))
 	}
 	return nil
 }
@@ -436,7 +443,7 @@ func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 	m.touched = true
 	switch key := msg.String(); key {
 	case "esc", "ctrl+c":
-		return m.quit()
+		return m.quitOrWarn()
 	case "tab", "shift+tab":
 		ring := m.ring()
 		i := slices.Index(ring, m.focus)
@@ -604,7 +611,7 @@ func (m *model) activate(c control, index int) tea.Cmd {
 			return checkForUpdate(m.s.cfg)
 		}
 	case quitControl:
-		return m.quit()
+		return m.quitOrWarn()
 	case clearControl:
 		m.search.SetValue("")
 		m.filter()
@@ -622,7 +629,7 @@ func (m *model) activate(c control, index int) tea.Cmd {
 			m.setFocus(next)
 		}
 	case buttonsControl:
-		return m.launch(index)
+		return m.press(index)
 	case activityControl:
 		m.jump(m.act)
 	}
@@ -721,36 +728,47 @@ func refreshOutcome(results []refreshResult, err error) callout {
 	return callout{state: "refreshed", detail: fmt.Sprintf("Updated %d catalogues", updated)}
 }
 
-// locationMsg is LOCATION for the container called name, looked up in
-// generation gen of the catalogues.
+// locationMsg is LOCATION from lookup id.
 type locationMsg struct {
-	gen        int
-	name, text string
+	id   int
+	text string
 }
 
 // lookUpLocation returns a command finding the selected container's
-// location, unless it is known or being found. locate reads the disk,
-// which may be a slow share, so it never runs in Update.
+// location afresh, once each time it is selected: nothing is cached, so
+// LOCATION shows the machine as it is now (a share that has gone away, a
+// container just pulled). locate reads the disk, which may be a slow
+// share, so it never runs in Update.
 func (m *model) lookUpLocation() tea.Cmd {
 	c, ok := m.selected()
-	if _, known := m.locations[c.name()]; !ok || known {
+	if !ok || c.name() == m.locFor {
 		return nil
 	}
-	m.locations[c.name()] = checking
-	cfg, gen := m.s.cfg, m.locGen
-	return func() tea.Msg {
-		loc, err := locate(cfg, c)
-		var missing notOnMachineError
-		switch {
-		case errors.As(err, &missing):
-			return locationMsg{gen, c.name(), notHere}
-		case err != nil:
-			return locationMsg{gen, c.name(), "couldn't check: " + err.Error()}
-		case loc.place == "store":
-			return locationMsg{gen, c.name(), onHere + " (store)"}
+	m.locFor, m.location = c.name(), checking
+	m.locID++
+	cfg, id := m.s.cfg, m.locID
+	return func() tea.Msg { return locationMsg{id, locationText(cfg, c)} }
+}
+
+// locationText describes where c is: on this machine, missing (and why, if
+// its share is not mounted), or why it could not be checked.
+func locationText(cfg config, c container) string {
+	loc, err := locate(cfg, c)
+	var missing notOnMachineError
+	switch {
+	case errors.As(err, &missing):
+		if _, _, catalogues, err := readCatalogues(); err == nil {
+			if cat, mounted := containerShare(catalogues, c); cat.Dir != "" && !mounted {
+				return fmt.Sprintf("%s: the %s share (%s) is not mounted", notHere, cat.Name, cat.Dir)
+			}
 		}
-		return locationMsg{gen, c.name(), onHere + " (" + loc.place + " share)"}
+		return notHere
+	case err != nil:
+		return "couldn't check: " + err.Error()
+	case loc.place == "store":
+		return onHere + " (downloaded)"
 	}
+	return onHere + " (" + loc.place + " share)"
 }
 
 // refreshMsg is the outcome of Refresh catalogues and the re-read after it.

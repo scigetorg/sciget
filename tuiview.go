@@ -545,10 +545,16 @@ func (m model) viewDetails(put draw, l layout) {
 		put(l.fields.x, l.fields.y, m.th.muted.Render("No containers match."))
 		return
 	}
-	location := m.locations[c.name()]
-	locStyle := m.th.ok
-	if !strings.HasPrefix(location, onHere) {
-		locStyle = m.th.muted
+	location, locStyle := m.location, m.th.muted
+	switch {
+	case strings.HasPrefix(location, onHere):
+		location, locStyle = "√ "+location, m.th.ok
+	case location == notHere:
+		location, locStyle = "▼ Not downloaded", m.th.accent.Bold(true)
+	case strings.HasPrefix(location, notHere+": "):
+		location, locStyle = "× "+strings.TrimPrefix(location, notHere+": the "), m.th.err
+	case strings.HasPrefix(location, "couldn't check"):
+		location, locStyle = "× Couldn't check: "+strings.TrimPrefix(location, "couldn't check: "), m.th.err
 	}
 	for i, f := range []struct {
 		label, value string
@@ -572,18 +578,12 @@ func (m model) viewDetails(put draw, l layout) {
 		put(l.buttons.x, y, m.th.muted.Render(fmt.Sprintf("▲ %d more", first)))
 		y++
 	}
+	bs := m.buttons()
 	for i := first; i < first+n; i++ {
-		label, caption, col := "›_ Open a terminal", "a shell here · type exit to return", m.th.term
-		if i > 0 {
-			label, caption, col = "►  Open "+strings.TrimSuffix(printable(c.entries[i-1].label), "GUI"),
-				"opens a window on the desktop", m.th.gui
-		}
-		if location == notHere {
-			col = m.th.muted.GetForeground()
-		}
-		put(l.buttons.x, y, m.th.pill(label, col, buttonWidth, i == m.btn && m.focus == buttonsControl, nil))
+		b := bs[i]
+		put(l.buttons.x, y, m.th.pill(b.label, b.col, buttonWidth, i == m.btn && m.focus == buttonsControl, nil))
 		if room := l.buttons.w - buttonWidth - 2; room >= 12 {
-			put(l.buttons.x+buttonWidth+2, y+1, m.th.muted.Render(fit(caption, room)))
+			put(l.buttons.x+buttonWidth+2, y+1, m.th.muted.Render(fit(b.caption, room)))
 		}
 		y += buttonPitch
 	}
@@ -639,9 +639,10 @@ func (m model) viewActivity(put draw, l layout) {
 func (m model) calloutText(width, rows int) []string {
 	st := m.statusFor()
 	head := map[string]string{"": "• Ready", "starting": "… Starting", "refreshing": "… Refreshing",
-		"running": "√ Running", "finished": "√ Finished", "refreshed": "√ Refreshed", "failed": "× Failed"}[st.state]
+		"running": "√ Running", "finished": "√ Finished", "refreshed": "√ Refreshed", "failed": "× Failed",
+		"downloading": "… Downloading", "asking": "› Download it?", "quit": "! Quit?"}[st.state]
 	w := width - 4 // the bar and an indent
-	if st.state != "failed" {
+	if st.state != "failed" && st.state != "asking" && st.state != "quit" {
 		return []string{head, fit(printable(st.detail), w)}
 	}
 	n := max(1, min(rows, maxCallout)-1)
@@ -687,9 +688,9 @@ func (m model) viewCallout(put draw, r rect) {
 	switch m.statusFor().state {
 	case "":
 		col = m.th.muted
-	case "starting", "refreshing":
+	case "starting", "refreshing", "downloading", "asking":
 		col = m.th.accent
-	case "failed":
+	case "failed", "quit":
 		col = m.th.err
 	}
 	bar := col.Render("│ ")

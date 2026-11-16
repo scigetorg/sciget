@@ -17,21 +17,23 @@ import (
 func launchModel(t *testing.T) model {
 	m := testModel(t, 160, 45, tuiContainers)
 	m.selectName("itksnap", "4.4.0")
-	m.locations["itksnap/4.4.0"] = "On this machine (store)"
+	m.locFor, m.location = "itksnap/4.4.0", "On this machine (downloaded)"
 	return m
 }
 
 func TestLaunch(t *testing.T) {
-	t.Run("not on this machine starts nothing", func(t *testing.T) {
+	t.Run("not on this machine asks first", func(t *testing.T) {
+		t.Setenv("SCIGET_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 		m := launchModel(t)
-		m.locations["itksnap/4.4.0"] = notHere
-		if cmd := m.launch(1); cmd != nil || len(m.launches) != 0 || m.statusFor().detail != "itksnap/4.4.0 is not on this machine yet" {
-			t.Errorf("command %v, launches %v, status %+v", cmd != nil, m.launches, m.statusFor())
+		m.location = notHere
+		if cmd := m.launch(1); cmd != nil || len(m.launches) != 0 || m.asking != "itksnap/4.4.0" ||
+			m.statusFor().state != "asking" || !slices.Equal(buttonKinds(m), []string{"always", "yes", "no"}) {
+			t.Errorf("command %v, launches %v, asking %q, status %+v, buttons %v", cmd != nil, m.launches, m.asking, m.statusFor(), buttonKinds(m))
 		}
 	})
 	t.Run("a failed check starts nothing", func(t *testing.T) {
 		m := launchModel(t)
-		m.locations["itksnap/4.4.0"] = "couldn't check: permission denied"
+		m.location = "couldn't check: permission denied"
 		if cmd := m.launch(0); cmd != nil || len(m.launches) != 0 ||
 			m.statusFor().detail != "Couldn't check itksnap/4.4.0 is on this machine: permission denied" {
 			t.Errorf("command %v, launches %v, status %+v", cmd != nil, m.launches, m.statusFor())
@@ -39,22 +41,22 @@ func TestLaunch(t *testing.T) {
 	})
 	t.Run("held while checking, then started", func(t *testing.T) {
 		m := launchModel(t)
-		m.locations["itksnap/4.4.0"] = checking
+		m.location = checking
 		if cmd := m.launch(0); cmd != nil || len(m.launches) != 0 || m.waiting == nil {
 			t.Fatalf("while checking: command %v, launches %v, waiting %v", cmd != nil, m.launches, m.waiting)
 		}
-		if cmd := m.handle(locationMsg{name: "itksnap/4.4.0", text: onHere + " (store)"}); cmd == nil ||
+		if cmd := m.handle(locationMsg{id: m.locID, text: onHere + " (downloaded)"}); cmd == nil ||
 			len(m.launches) != 1 || m.launches[0].action != "Terminal" || m.waiting != nil {
 			t.Errorf("once found: command %v, launches %v, waiting %v", cmd != nil, m.launches, m.waiting)
 		}
 	})
 	t.Run("held while checking, then not here", func(t *testing.T) {
 		m := launchModel(t)
-		m.locations["itksnap/4.4.0"] = checking
+		m.location = checking
+		t.Setenv("SCIGET_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 		m.launch(0)
-		if cmd := m.handle(locationMsg{name: "itksnap/4.4.0", text: notHere}); cmd != nil || len(m.launches) != 0 ||
-			m.statusFor().detail != "itksnap/4.4.0 is not on this machine yet" {
-			t.Errorf("command %v, launches %v, status %+v", cmd != nil, m.launches, m.statusFor())
+		if cmd := m.handle(locationMsg{id: m.locID, text: notHere}); cmd != nil || len(m.launches) != 0 || m.asking != "itksnap/4.4.0" {
+			t.Errorf("command %v, launches %v, asking %q", cmd != nil, m.launches, m.asking)
 		}
 	})
 	t.Run("DISPLAY unset fails at once", func(t *testing.T) {
@@ -201,4 +203,13 @@ func TestHandleLaunch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// buttonKinds returns the kinds of the selected container's buttons.
+func buttonKinds(m model) []string {
+	var kinds []string
+	for _, b := range m.buttons() {
+		kinds = append(kinds, b.kind)
+	}
+	return kinds
 }

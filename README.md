@@ -45,7 +45,7 @@ such as a port forwarded through an SSH tunnel
 | `sciget refresh` | Download the latest catalogues in use |
 | `sciget find [words...]` | List the containers in the catalogues in use (`--all` includes hidden ones) |
 | `sciget info <tool/version>` | Show a container's details and where it is |
-| `sciget pull <tool/version>` | Download a container into the store |
+| `sciget pull <tool/version>...` | Download containers into `container_dir`, `parallel_pulls` (3) at a time |
 | `sciget doctor` | Report problems, such as stopped downloads, and the commands that fix them |
 | `sciget config [get\|set\|unset\|list]` | Show and change settings |
 | `sciget completion <shell>` | Print a shell completion script |
@@ -54,17 +54,25 @@ such as a port forwarded through an SSH tunnel
 ## Pulling containers
 
 `sciget pull fsl/6.0.7.8` downloads a container that is not already on
-the machine (on its catalogue's share, or in the store) into the store,
-`container_dir`. It tries each of `download_urls` in turn, Nectar then S3
+the machine (on its catalogue's share, or downloaded before) into
+`container_dir` (default `~/.local/share/sciget/containers`). It tries each of `download_urls` in turn, Nectar then S3
 by default. A download counts only when its size matches what the server
 reported, its SHA-256 matches the catalogue's (when the catalogue gives
 one), and Apptainer can open it. Set `warn_missing_checksum` to true to be
 told when no SHA-256 was published. Before downloading, sciget checks the
 disk has room (quotas are not seen).
 
+Running a container that is not on the machine (`sciget apptainer exec`,
+`shell`, or a launch in the interface) asks first, since the cause may be
+a share that is not mounted: `[y]es, [n]o, [A]lways (yes, saved as the
+default)`. Always sets `auto_pull`, after which sciget downloads without
+asking. Outside a terminal, with `auto_pull` off, it stops and says how
+to get the container. In the interface, downloads show in Activity with a
+Cancel button; quitting while one runs asks first, then stops it.
+
 A stopped download starts again from the beginning; a killed one leaves a
 `*.incomplete` file, which `sciget doctor` lists. sciget does not delete
-containers: to remove one, delete its folder in the store.
+containers: to remove one, delete its folder in `container_dir`.
 
 Keep `container_dir` separate from neurocommand's container folder: an
 image sciget puts there makes neurocommand skip setting it up.
