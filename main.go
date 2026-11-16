@@ -88,6 +88,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newRefreshCommand())
 	root.AddCommand(newCatalogueCommand())
 	root.AddCommand(newInfoCommand())
+	root.AddCommand(newPullCommand())
 	root.AddCommand(newApptainerCommand())
 	root.AddCommand(newUICommand())
 	return root

@@ -25,7 +25,11 @@ type location struct {
 // notOnMachineError identifies a known container missing from local storage.
 type notOnMachineError struct{ name string }
 
-func (e notOnMachineError) Error() string { return e.name + " is not on this machine" }
+func (e notOnMachineError) Error() string {
+	// Quoted, because the name comes from a catalogue and the line is
+	// meant to be pasted into a shell.
+	return e.name + " is not on this machine; to download it, run: " + shellJoin([]string{"sciget", "pull", e.name})
+}
 
 // unsafeLayoutValue reports whether v cannot fill a layout: it is empty, or
 // could name another directory.

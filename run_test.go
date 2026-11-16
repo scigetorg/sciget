@@ -250,7 +250,7 @@ func TestLocate(t *testing.T) {
 			}
 			if tt.wantPlace == "" {
 				var missing notOnMachineError
-				if !errors.As(err, &missing) || err.Error() != c.name()+" is not on this machine" {
+				if !errors.As(err, &missing) || err.Error() != c.name()+" is not on this machine; to download it, run: sciget pull "+c.name() {
 					t.Fatalf("error = %v, want missing container", err)
 				}
 				return
@@ -439,5 +439,20 @@ func TestExecApptainer(t *testing.T) {
 				t.Errorf("error = %v, want wrapped missing executable", err)
 			}
 		})
+	}
+}
+
+func TestNotOnMachineError(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "fsl/6.0.3", want: "fsl/6.0.3 is not on this machine; to download it, run: sciget pull fsl/6.0.3"},
+		{name: "fsl/1; touch x", want: "fsl/1; touch x is not on this machine; to download it, run: sciget pull 'fsl/1; touch x'"},
+	}
+	for _, tt := range tests {
+		if got := (notOnMachineError{name: tt.name}).Error(); got != tt.want {
+			t.Errorf("Error() = %q, want %q", got, tt.want)
+		}
 	}
 }
