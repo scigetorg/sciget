@@ -2,6 +2,8 @@
   "cache_dir": "{user_cache_dir}/sciget",
   "container_dir": "{user_data_dir}/sciget/containers",
   "container_layout": "{tool}_{version}_{date}/{tool}_{version}_{date}.simg",
+  "commands_layout": "{tool}_{version}_{date}/commands.txt",
+  "env_layout": "{tool}_{version}_{date}/env.txt",
   "apptainer_path": "apptainer",
   "apptainer_global_args": ["--silent"],
   "apptainer_exec_args": ["--cleanenv", "{env}", "{xauthority}", "{tmp}", "{pwd}"],

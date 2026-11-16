@@ -109,7 +109,7 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 		if c.published.sha256 == "" && warnMissing && warn != nil {
 			warn(fmt.Sprintf("no checksum published for %s; checked its size and that Apptainer can open it", c.name()))
 		}
-		return location{path: dest, place: "store"}, true, nil
+		return location{path: dest}, true, nil
 	}
 	return location{}, false, fmt.Errorf("could not download %s:\n  %s", c.name(), strings.Join(failures, "\n  "))
 }

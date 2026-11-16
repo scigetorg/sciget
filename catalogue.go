@@ -175,7 +175,7 @@ func parseCatalogue(data []byte) ([]container, error) {
 			case app.BuildDate == "":
 				return nil, fmt.Errorf("catalogue entry %q has no build date", key)
 			case unsafeLayoutValue(tool) || unsafeLayoutValue(toolVersion) || unsafeLayoutValue(app.BuildDate):
-				return nil, fmt.Errorf("catalogue entry %q has a tool, version or build date with \"/\" or \"..\"", key)
+				return nil, fmt.Errorf("catalogue entry %q has a tool, version or build date with \"/\" or \"..\", or that is \".\"", key)
 			case app.SHA256 != "" && !sha256Hex.MatchString(app.SHA256):
 				return nil, fmt.Errorf("catalogue entry %q has a sha256 that is not 64 lowercase hex digits", key)
 			case app.Size < 0:

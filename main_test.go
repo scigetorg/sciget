@@ -56,6 +56,8 @@ func TestRun(t *testing.T) {
 	// with XDG_DATA_HOME=/data.
 	const otherDefaults = "container_dir\t/data/sciget/containers\tdefault\n" +
 		"container_layout\t{tool}_{version}_{date}/{tool}_{version}_{date}.simg\tdefault\n" +
+		"commands_layout\t{tool}_{version}_{date}/commands.txt\tdefault\n" +
+		"env_layout\t{tool}_{version}_{date}/env.txt\tdefault\n" +
 		"apptainer_path\tapptainer\tdefault\n" +
 		"apptainer_global_args\t[\"--silent\"]\tdefault\n" +
 		"apptainer_exec_args\t[\"--cleanenv\",\"{env}\",\"{xauthority}\",\"{tmp}\",\"{pwd}\"]\tdefault\n" +
@@ -499,7 +501,7 @@ func TestRun(t *testing.T) {
 		{name: "config unset", args: []string{"config", "unset", "cache_dir"},
 			config: `{"cache_dir": "/c"}`, wantConfig: "{}\n"},
 		{name: "config completes keys", args: []string{"__complete", "config", "get", "c"},
-			wantStdout: "cache_dir\ncontainer_dir\ncontainer_layout\n:4\n", wantStderrHas: "Completion ended with directive"},
+			wantStdout: "cache_dir\ncontainer_dir\ncontainer_layout\ncommands_layout\n:4\n", wantStderrHas: "Completion ended with directive"},
 	}
 
 	for _, tt := range tests {

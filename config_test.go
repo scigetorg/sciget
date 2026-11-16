@@ -339,6 +339,8 @@ func TestWriteConfigList(t *testing.T) {
 	rest := [][2]string{
 		{"container_dir", filepath.Join("/data", "sciget", "containers")},
 		{"container_layout", layout},
+		{"commands_layout", "{tool}_{version}_{date}/commands.txt"},
+		{"env_layout", "{tool}_{version}_{date}/env.txt"},
 		{"apptainer_path", "apptainer"},
 		{"apptainer_global_args", `["--silent"]`},
 		{"apptainer_exec_args", verbArgs},

@@ -80,6 +80,8 @@ func TestLoadCatalogue(t *testing.T) {
 			wantErr: `with "/" or ".."`},
 		{name: "dots in a version", json: `{"fsl": {"apps": {"fsl ..": {"version": "1"}}}}`,
 			wantErr: `with "/" or ".."`},
+		{name: "dot as a version", json: `{"fsl": {"apps": {"fsl .": {"version": "1"}}}}`,
+			wantErr: `or that is "."`},
 		{name: "path as a build date", json: `{"fsl": {"apps": {"fsl 1": {"version": "../.."}}}}`,
 			wantErr: `with "/" or ".."`},
 		{name: "empty apptainer args element", json: `{"fsl":{"apps":{"fsl 1":{"version":"1","apptainer_args":[""]}}}}`,

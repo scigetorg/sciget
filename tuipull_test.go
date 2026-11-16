@@ -47,7 +47,7 @@ func TestTUIPull(t *testing.T) {
 		if auto, _ := m.s.cfg.getBool("auto_pull"); auto {
 			t.Error("yes saved auto_pull")
 		}
-		m.handle(pullDoneMsg{id: m.pulls[0].id, loc: location{path: "/store/x.simg", place: "store"}})
+		m.handle(pullDoneMsg{id: m.pulls[0].id, loc: location{path: "/store/x.simg"}})
 		if len(m.pulls) != 0 || m.launches[0].state != "finished" || m.waiting != nil || m.locFor != "" {
 			t.Errorf("pulls %d, launch %+v, waiting %+v, locFor %q", len(m.pulls), m.launches[0], m.waiting, m.locFor)
 		}
@@ -68,7 +68,7 @@ func TestTUIPull(t *testing.T) {
 		m.s.cfg.overrides["auto_pull"] = "true"
 		m.launch(0)
 		m.pressed = target{ctl: buttonsControl, index: 0} // pressed on Cancel
-		m.handle(pullDoneMsg{id: m.pulls[0].id, loc: location{path: "/x", place: "store"}})
+		m.handle(pullDoneMsg{id: m.pulls[0].id, loc: location{path: "/x"}})
 		if m.pressed != (target{}) {
 			t.Errorf("pressed %+v, want it forgotten", m.pressed)
 		}

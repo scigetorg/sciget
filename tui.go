@@ -765,10 +765,10 @@ func locationText(cfg config, c container) string {
 		return notHere
 	case err != nil:
 		return "couldn't check: " + err.Error()
-	case loc.place == "store":
+	case loc.share == "":
 		return onHere + " (downloaded)"
 	}
-	return onHere + " (" + loc.place + " share)"
+	return onHere + " (" + loc.share + " share)"
 }
 
 // refreshMsg is the outcome of Refresh catalogues and the re-read after it.

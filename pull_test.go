@@ -120,7 +120,7 @@ func TestPullContainer(t *testing.T) {
 				}
 			case tt.want != "":
 				got, err := os.ReadFile(loc.path)
-				if err != nil || string(got) != tt.want || !downloaded || loc.place != "store" {
+				if err != nil || string(got) != tt.want || !downloaded || loc.share != "" {
 					t.Errorf("pulled %q (%v) at %+v, downloaded %v; want %q in the store", got, err, loc, downloaded, tt.want)
 				}
 				if found, err := locate(cfg, c); err != nil || found.path != loc.path {
@@ -246,7 +246,7 @@ func TestPullOnRun(t *testing.T) {
 			var stderr strings.Builder
 			loc, err := pullOnRun(cfg, c, tt.in, &stderr, tt.interactive)
 			var missing notOnMachineError
-			if tt.wantPull && (err != nil || loc.place != "store") || !tt.wantPull && !errors.As(err, &missing) {
+			if tt.wantPull && (err != nil || loc.share != "") || !tt.wantPull && !errors.As(err, &missing) {
 				t.Errorf("got %+v, %v; want pulled: %v", loc, err, tt.wantPull)
 			}
 			if (gets > 0) != tt.wantPull {

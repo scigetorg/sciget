@@ -16,10 +16,11 @@ import (
 // runApptainer hands over to Apptainer and can be replaced by tests.
 var runApptainer = execApptainer
 
-// location identifies a container path and its catalogue share or the store.
+// location is where a container was found: its path, and the catalogue
+// whose share holds it, or "" when it is in the store.
 type location struct {
 	path  string
-	place string
+	share string
 }
 
 // notOnMachineError identifies a known container missing from local storage.
@@ -33,9 +34,9 @@ func (e notOnMachineError) Error() string {
 }
 
 // unsafeLayoutValue reports whether v cannot fill a layout: it is empty, or
-// could name another directory.
+// could name another directory or vanish from a path (".").
 func unsafeLayoutValue(v string) bool {
-	return v == "" || strings.Contains(v, "..") || strings.ContainsAny(v, "/\x00"+string(filepath.Separator))
+	return v == "" || v == "." || strings.Contains(v, "..") || strings.ContainsAny(v, "/\x00"+string(filepath.Separator))
 }
 
 // layoutPath fills a validated layout with safe container values.
@@ -76,7 +77,7 @@ func locate(cfg config, c container) (location, error) {
 			return location{}, err
 		}
 		if path != "" {
-			return location{path: path, place: cat.Name}, nil
+			return location{path: path, share: cat.Name}, nil
 		}
 	}
 	// The store is resolved only after the share misses, so a share hit
@@ -96,7 +97,7 @@ func locate(cfg config, c container) (location, error) {
 	if path == "" {
 		return location{}, notOnMachineError{name: c.name()}
 	}
-	return location{path: path, place: "store"}, nil
+	return location{path: path}, nil
 }
 
 // findContainer returns c's path in dir, or "" if no regular file or

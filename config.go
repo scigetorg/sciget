@@ -40,6 +40,8 @@ var configKeys = []configKey{
 	{name: "cache_dir", check: checkAbsolute, path: true},
 	{name: "container_dir", check: checkAbsolute, path: true},
 	{name: "container_layout", check: checkLayout},
+	{name: "commands_layout", check: checkLayout},
+	{name: "env_layout", check: checkLayout},
 	{name: "apptainer_path", check: checkApptainerPath},
 	{name: "apptainer_global_args", kind: listKind, check: eachElement(checkArg)},
 	{name: "apptainer_exec_args", kind: listKind, check: eachElement(checkVerbArg)},

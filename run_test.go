@@ -42,6 +42,7 @@ func TestLayoutPath(t *testing.T) {
 		{name: "parent in tool", layout: layout, c: container{tool: "../x", version: "1", buildDate: "1"}, bad: true},
 		{name: "slash in version", layout: layout, c: container{tool: "fsl", version: "a/b", buildDate: "1"}, bad: true},
 		{name: "parent in date", layout: layout, c: container{tool: "fsl", version: "1", buildDate: ".."}, bad: true},
+		{name: "dot as tool", layout: layout, c: container{tool: ".", version: "1", buildDate: "1"}, bad: true},
 		{name: "embedded parent", layout: layout, c: container{tool: "fsl", version: "1..2", buildDate: "1"}, bad: true},
 		{name: "NUL in date", layout: layout, c: container{tool: "fsl", version: "1", buildDate: "1\x00"}, bad: true},
 	}
@@ -258,7 +259,11 @@ func TestLocate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.path != wantPath || got.place != tt.wantPlace {
+			place := got.share
+			if place == "" {
+				place = "store"
+			}
+			if got.path != wantPath || place != tt.wantPlace {
 				t.Errorf("location = %+v, want %s from %s", got, wantPath, tt.wantPlace)
 			}
 		})
