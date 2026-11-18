@@ -46,6 +46,7 @@ such as a port forwarded through an SSH tunnel
 | `sciget find [words...]` | List the containers in the catalogues in use (`--all` includes hidden ones) |
 | `sciget info <tool/version>` | Show a container's details and where it is |
 | `sciget pull <tool/version>...` | Download containers into `container_dir`, `parallel_pulls` (3) at a time |
+| `sciget install <tool/version>...` | Download containers, then make a module for each, so `module load` works |
 | `sciget doctor` | Report problems, such as stopped downloads, and the commands that fix them |
 | `sciget config [get\|set\|unset\|list]` | Show and change settings |
 | `sciget completion <shell>` | Print a shell completion script |
@@ -76,6 +77,31 @@ containers: to remove one, delete its folder in `container_dir`.
 
 Keep `container_dir` separate from neurocommand's container folder: an
 image sciget puts there makes neurocommand skip setting it up.
+
+## Using modules
+
+`sciget install fsl/6.0.7.8` downloads the container if needed, then writes
+a Lmod module for it: `<module_dir>/<catalogue>/fsl/6.0.7.8.lua`
+(`module_dir` defaults to `~/.local/share/sciget/modules`). Each command in
+the container gets a small wrapper that runs it through sciget, so it gets
+the same Apptainer settings as `sciget apptainer exec`. A container on a
+share, such as CVMFS, gets no module from sciget: use the share's own
+modules.
+
+sciget never edits your shell files. If the module folder is not on your
+`MODULEPATH`, `install` prints the line to add to `~/.bashrc`, once per
+catalogue:
+
+```sh
+module use ~/.local/share/sciget/modules/neuroimaging
+```
+
+Then `module load fsl/6.0.7.8` puts its commands on your PATH. sciget finds
+the commands by looking inside the container once, and caches what it
+finds. Names in `finder_excludes`, such as `bash` and `sudo`, are never
+wrapped from a container's own folders. Wrappers call sciget by the name in
+`module_sciget` (default `sciget`, found on PATH). Run `sciget install`
+again to rebuild a module.
 
 ## Licence
 

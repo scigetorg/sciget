@@ -113,7 +113,7 @@ func (m model) layout() layout {
 	l.refresh = rect{2, l.cats.y + l.cats.h + 1, refreshWidth, 3}
 
 	cx, cw, bottom := l.details.x+3, l.details.w-6, h-1 // bottom: the frames' last row
-	l.fields = rect{cx, y + 1, cw, 6}
+	l.fields = rect{cx, y + 1, cw, 7}
 	l.buttons = rect{cx, y + 9, cw, bottom - y - 9} // after the fields, a blank row and the rule
 	if l.activ.w > 0 {
 		ax, aw := l.activ.x+3, l.activ.w-6
@@ -566,6 +566,7 @@ func (m model) viewDetails(put draw, l layout) {
 		{"CATALOGUE", c.catalogue, m.th.text},
 		{"CATEGORIES", strings.Join(c.categories, " · "), m.th.text},
 		{"LOCATION", location, locStyle},
+		{"MODULE", m.module, m.th.text},
 	} {
 		put(l.fields.x, l.fields.y+i, m.th.accent.Render("│ ")+m.th.label.Render(fmt.Sprintf("%-12s", f.label))+
 			f.style.Render(fit(printable(f.value), l.fields.w-14)))

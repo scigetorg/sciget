@@ -351,3 +351,55 @@ func TestRestoreState(t *testing.T) {
 		t.Errorf("saved from an empty state: %+v", got)
 	}
 }
+
+func TestModuleText(t *testing.T) {
+	tests := []struct {
+		name       string
+		onShare    bool
+		buildDate  string // the module's build; no module when empty
+		modulePath bool   // module_dir/neuro is in MODULEPATH
+		want       string // {modules} is module_dir
+	}{
+		{name: "share", onShare: true, want: "the neuro share's own modules"},
+		{name: "no module", want: "none · Install makes one"},
+		{name: "module", buildDate: "20200905", modulePath: true, want: "module load fsl/6.0.3"},
+		{name: "module folder not in MODULEPATH", buildDate: "20200905",
+			want: "module load fsl/6.0.3 · first: module use {modules}/neuro"},
+		{name: "module of an older build", buildDate: "20190101", modulePath: true,
+			want: "module load fsl/6.0.3 (from an older build · Install updates it)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, cat, store := localCatalogue(t)
+			base := filepath.Dir(store)
+			moduleDir := filepath.Join(base, "modules")
+			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
+				"cache_dir": filepath.Join(base, "cache"), "container_dir": store, "module_dir": moduleDir,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := readConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.onShare {
+				layout, _ := defaultValue("container_layout")
+				makeContainerPath(t, cat.Dir, layout, c, false)
+			}
+			if tt.buildDate != "" {
+				built := c
+				built.buildDate = tt.buildDate
+				if _, err := writeModule(cfg, built, commandList{Found: []string{"bet"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("MODULEPATH", "")
+			if tt.modulePath {
+				t.Setenv("MODULEPATH", filepath.Join(moduleDir, "neuro"))
+			}
+			if got, want := moduleText(cfg, c), strings.ReplaceAll(tt.want, "{modules}", moduleDir); got != want {
+				t.Errorf("moduleText = %q, want %q", got, want)
+			}
+		})
+	}
+}

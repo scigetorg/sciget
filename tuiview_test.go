@@ -44,7 +44,7 @@ func TestLayout(t *testing.T) {
 			"software": {0, 6, 68, 39}, "details": {69, 6, 45, 39}, "activ": {115, 6, 45, 39},
 			"search": {69, 3, 45, 3}, "clear": {115, 3, 12, 3},
 			"cats": {1, 8, 28, 32}, "apps": {30, 8, 24, 36}, "versions": {55, 8, 12, 36},
-			"refresh": {2, 41, 26, 3}, "fields": {72, 8, 39, 6}, "buttons": {72, 16, 39, 28},
+			"refresh": {2, 41, 26, 3}, "fields": {72, 8, 39, 7}, "buttons": {72, 16, 39, 28},
 			"callout": {118, 8, 39, 2}, "entries": {118, 11, 39, 33}}},
 		{name: "medium: side by side, Activity hidden", width: 120, height: 40, want: map[string]rect{
 			"software": {0, 6, 68, 34}, "details": {69, 6, 51, 34},
@@ -54,7 +54,7 @@ func TestLayout(t *testing.T) {
 			"software": {0, 6, 36, 18}, "details": {37, 6, 43, 18},
 			"search": {37, 3, 30, 3}, "clear": {68, 3, 12, 3},
 			"cats": {1, 8, 34, 2}, "refresh": {2, 11, 26, 3}, "apps": {1, 15, 34, 5}, "versions": {1, 21, 34, 2},
-			"fields": {40, 8, 37, 6}, "buttons": {40, 16, 37, 4}, "callout": {40, 21, 37, 2}}},
+			"fields": {40, 8, 37, 7}, "buttons": {40, 16, 37, 4}, "callout": {40, 21, 37, 2}}},
 		{name: "undersized", width: 79, height: 24, tooSmall: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

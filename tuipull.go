@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,15 +12,16 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// The TUI's pulls: asking first, downloading with progress in Activity,
-// cancelling, and quitting only once they have stopped. Pulls run in the
-// TUI's own process, so quitting stops them.
+// The TUI's installs: asking first when a download is needed, downloading
+// with progress in Activity, then writing the module, cancelling, and
+// quitting only once they have stopped. Installs run in the TUI's own
+// process, so quitting stops them.
 
 // button is one of the details panel's buttons. Normally they launch the
 // selected container; while a question is asked, or the container is
 // downloading, they answer it or cancel.
 type button struct {
-	kind           string // "terminal", "gui", "pull", "always", "yes", "no" or "cancel"
+	kind           string // "terminal", "gui", "install", "always", "yes", "no" or "cancel"
 	label, caption string
 	col            color.Color
 }
@@ -38,9 +40,11 @@ func (m model) buttons() []button {
 		}
 	}
 	if m.pullOf(c.name()) != nil {
-		return []button{{kind: "cancel", label: "×  Cancel download", caption: "stop and delete the partial file", col: m.th.err.GetForeground()}}
+		return []button{{kind: "cancel", label: "×  Cancel install", caption: "stop, and delete any partial download", col: m.th.err.GetForeground()}}
 	}
 	missing := strings.HasPrefix(m.location, notHere)
+	older := strings.Contains(m.location, "older build")
+	noModule := strings.HasPrefix(m.module, "none") || strings.Contains(m.module, "older build")
 	bs := []button{{kind: "terminal", label: "›_ Open a terminal", caption: "a shell here · type exit to return", col: m.th.term}}
 	for _, e := range c.entries {
 		bs = append(bs, button{kind: "gui", label: "►  Open " + strings.TrimSuffix(printable(e.label), "GUI"),
@@ -50,7 +54,9 @@ func (m model) buttons() []button {
 		for i := range bs {
 			bs[i].col = m.th.muted.GetForeground()
 		}
-		bs = append(bs, button{kind: "pull", label: "▼  Download", caption: "into the store, without opening it", col: m.th.accent.GetForeground()})
+	}
+	if missing || older || noModule {
+		bs = append(bs, button{kind: "install", label: "▼  Install", caption: "download if needed, and make its module", col: m.th.accent.GetForeground()})
 	}
 	return bs
 }
@@ -63,8 +69,12 @@ func (m *model) press(i int) tea.Cmd {
 		return nil
 	}
 	switch bs[i].kind {
-	case "pull":
-		return m.requestPull(c)
+	case "install":
+		// A download is asked about first, as when opening a container.
+		if strings.HasPrefix(m.location, notHere) || strings.Contains(m.location, "older build") {
+			return m.requestPull(c)
+		}
+		return m.startPull(c)
 	case "always", "yes", "no":
 		return m.answer(c, bs[i].kind)
 	case "cancel":
@@ -93,10 +103,11 @@ type (
 		done, total int64
 	}
 	pullDoneMsg struct {
-		id       int
-		loc      location
-		err      error
-		warnings []string
+		id        int
+		loc       location
+		err       error
+		warnings  []string
+		installed string // install's report, when it wrote a module
 	}
 )
 
@@ -151,7 +162,8 @@ func (m *model) answer(c container, reply string) tea.Cmd {
 	return m.startPull(c)
 }
 
-// startPull starts pulling c in the background, as an Activity entry.
+// startPull starts installing c in the background, as an Activity entry:
+// downloading it if needed, then writing its module.
 func (m *model) startPull(c container) tea.Cmd {
 	limit, err := m.s.cfg.getNumber("parallel_pulls")
 	if err != nil {
@@ -166,7 +178,7 @@ func (m *model) startPull(c container) tea.Cmd {
 	store, _, _ := m.s.cfg.get("container_dir")
 	m.nextID++
 	id := m.nextID
-	m.launches = append([]launch{{id: id, name: c.name(), action: "Download", state: "downloading",
+	m.launches = append([]launch{{id: id, name: c.name(), action: "Install", state: "downloading",
 		detail: "Downloading " + c.name() + " to " + store + "…", at: time.Now()}}, m.launches...)
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &pullRun{id: id, name: c.name(), cancel: cancel, ch: make(chan pullProgressMsg, 1)}
@@ -193,8 +205,18 @@ func (m *model) startPull(c container) tea.Cmd {
 				}
 			}
 		}, func(s string) { warnings = append(warnings, s) })
+		var installed string
+		if err == nil {
+			var out, skipped bytes.Buffer
+			_, err = installContainer(ctx, &out, &skipped, cfg, c, loc)
+			installed = strings.TrimSpace(out.String())
+			if line, lineErr := moduleUseLine(cfg, c.catalogue); err == nil && lineErr == nil && line != "" {
+				installed += " · to use it, first run: " + line
+			}
+			warnings = append(warnings, lines(skipped.String())...)
+		}
 		cancel()
-		return pullDoneMsg{id, loc, err, warnings}
+		return pullDoneMsg{id, loc, err, warnings, installed}
 	}
 	return tea.Batch(run, waitProgress(ch))
 }
@@ -243,11 +265,14 @@ func (m *model) handlePull(msg tea.Msg) tea.Cmd {
 		m.pressed = target{}
 		switch {
 		case errors.Is(msg.err, context.Canceled):
-			m.finish(p.id, "failed", "Download cancelled")
+			m.finish(p.id, "failed", "Install cancelled")
 		case msg.err != nil:
-			m.finish(p.id, "failed", "Couldn't download: "+msg.err.Error())
+			m.finish(p.id, "failed", "Couldn't install: "+msg.err.Error())
 		default:
 			detail := "Downloaded to " + msg.loc.path
+			if msg.installed != "" {
+				detail = msg.installed + " · " + msg.loc.path
+			}
 			for _, w := range msg.warnings {
 				detail += " · warning: " + w
 			}
@@ -277,15 +302,15 @@ func (m *model) quitOrWarn() tea.Cmd {
 		return nil
 	}
 	if m.notice == nil || m.notice.state != "quit" {
-		what := "A download is"
+		what := "An install is"
 		if len(m.pulls) > 1 {
-			what = fmt.Sprintf("%d downloads are", len(m.pulls))
+			what = fmt.Sprintf("%d installs are", len(m.pulls))
 		}
 		m.notice = &callout{state: "quit", detail: what + " in progress. Quitting stops it; press Quit again to stop and quit."}
 		return nil
 	}
 	m.quitting = true
-	m.notice = &callout{state: "quit", detail: "Stopping downloads…"}
+	m.notice = &callout{state: "quit", detail: "Stopping installs…"}
 	for _, p := range m.pulls {
 		p.cancel()
 	}

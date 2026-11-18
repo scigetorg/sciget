@@ -130,6 +130,7 @@ func TestLocate(t *testing.T) {
 		custom     bool
 		badValue   bool
 		noHome     bool
+		olderOnly  bool // only an older build, in the store
 		wantPlace  string
 		wantErr    bool
 	}{
@@ -146,6 +147,7 @@ func TestLocate(t *testing.T) {
 		{name: "custom store", store: true, custom: true, wantPlace: "store"},
 		{name: "unsafe catalogue value", badValue: true, wantErr: true},
 		{name: "share hit without a home directory", share: true, noHome: true, wantPlace: "neuro"},
+		{name: "older build", olderOnly: true, wantPlace: "store"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -228,6 +230,11 @@ func TestLocate(t *testing.T) {
 			if tt.badValue {
 				c.buildDate = "../x"
 			}
+			if tt.olderOnly {
+				older := c
+				older.buildDate = "20190101"
+				wantPath = makeContainerPath(t, store, layout, older, false)
+			}
 			if tt.noHome {
 				// Only cache_dir is set, so container_dir's default would fail.
 				cache := filepath.Join(filepath.Dir(store), "cache")
@@ -263,8 +270,64 @@ func TestLocate(t *testing.T) {
 			if place == "" {
 				place = "store"
 			}
-			if got.path != wantPath || place != tt.wantPlace {
+			if got.path != wantPath || place != tt.wantPlace || got.older != tt.olderOnly {
 				t.Errorf("location = %+v, want %s from %s", got, wantPath, tt.wantPlace)
+			}
+		})
+	}
+}
+
+func TestOtherBuild(t *testing.T) {
+	tests := []struct {
+		name    string
+		layout  string
+		version string
+		files   []string // created in the folder, relative
+		want    string   // relative; "" for none
+	}{
+		{name: "none", layout: "{tool}_{version}_{date}.simg"},
+		{name: "newest other build", layout: "{tool}_{version}_{date}.simg",
+			files: []string{"fsl_6.0.3_20190101.simg", "fsl_6.0.3_20200101.simg"}, want: "fsl_6.0.3_20200101.simg"},
+		{name: "date must be eight digits", layout: "{tool}_{version}_{date}.simg",
+			files: []string{"fsl_6.0.3_2019.simg", "fsl_6.0.3_2019010x.simg"}},
+		{name: "date named twice must agree", layout: "{tool}_{date}/{tool}_{version}_{date}.simg",
+			files: []string{"fsl_20190101/fsl_6.0.3_20200101.simg"}},
+		{name: "date named twice", layout: "{tool}_{date}/{tool}_{version}_{date}.simg",
+			files: []string{"fsl_20190101/fsl_6.0.3_20190101.simg"}, want: "fsl_20190101/fsl_6.0.3_20190101.simg"},
+		{name: "another version does not count", layout: "{tool}_{version}_{date}.simg",
+			files: []string{"fsl_6.0.4_20190101.simg"}},
+		{name: "glob characters in the layout are literal", layout: "images[1]/{tool}_{version}_{date}.simg",
+			files: []string{"images[1]/fsl_6.0.3_20190101.simg", "images1/fsl_6.0.3_20200101.simg"},
+			want:  "images[1]/fsl_6.0.3_20190101.simg"},
+		{name: "glob characters in the version are literal", layout: "{tool}_{version}_{date}.simg", version: "6.0.*",
+			files: []string{"fsl_6.0.3_20190101.simg"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "a [b]")
+			for _, f := range tt.files {
+				path := filepath.Join(dir, filepath.FromSlash(f))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := container{tool: "fsl", version: "6.0.3", buildDate: "20250101"}
+			if tt.version != "" {
+				c.version = tt.version
+			}
+			got, err := otherBuild(dir, tt.layout, c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			if tt.want != "" {
+				want = filepath.Join(dir, filepath.FromSlash(tt.want))
+			}
+			if got != want {
+				t.Errorf("otherBuild = %q, want %q", got, want)
 			}
 		})
 	}

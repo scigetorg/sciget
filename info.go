@@ -61,6 +61,8 @@ func readContainerInfo(name string) (containerInfo, error) {
 		info.location = "not on this machine"
 	case err != nil:
 		return containerInfo{}, err
+	case loc.older:
+		info.location = loc.path + " (an older build)"
 	default:
 		info.location = loc.path
 	}

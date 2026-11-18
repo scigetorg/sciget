@@ -40,28 +40,19 @@ func TestParseFinder(t *testing.T) {
 func TestListCommands(t *testing.T) {
 	tests := []struct {
 		name      string
-		onShare   bool   // the container is in the catalogue's share
-		commands  string // the share's commands.txt; none when empty
-		env       string // the share's env.txt; none when empty
-		cached    bool   // run the finder once before the call
-		failing   bool   // the fake Apptainer fails
+		cached    bool // run the finder once before the call
+		failing   bool // the fake Apptainer fails
 		want      commandList
 		wantRuns  int // finder runs, including any for cached
 		wantErrIn string
 	}{
-		{name: "share files", onShare: true, commands: "bet\nconda\n", env: "DEPLOY_ENV_FSLDIR=BASEPATH/opt/fsl\n",
-			want: commandList{Kept: []string{"bet", "conda"}, Env: []string{"FSLDIR=BASEPATH/opt/fsl"}}},
-		{name: "share without env.txt", onShare: true, commands: "bet\n",
-			want: commandList{Kept: []string{"bet"}}},
-		{name: "share without commands.txt runs the finder", onShare: true, env: "DEPLOY_ENV_X=y\n",
-			want: finderWant, wantRuns: 1},
-		{name: "store runs the finder", want: finderWant, wantRuns: 1},
+		{name: "runs the finder", want: finderWant, wantRuns: 1},
 		{name: "cached", cached: true, want: finderWant, wantRuns: 1},
 		{name: "finder fails", failing: true, wantRuns: 1, wantErrIn: "listing the commands of fsl/6.0.3"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, cat, store := localCatalogue(t)
+			c, _, store := localCatalogue(t)
 			base := filepath.Dir(store)
 			apptainer, runs := fakeFinderApptainer(t, tt.failing)
 			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
@@ -74,21 +65,6 @@ func TestListCommands(t *testing.T) {
 				t.Fatal(err)
 			}
 			loc := location{path: filepath.Join(store, "fsl.simg")}
-			if tt.onShare {
-				loc = location{path: filepath.Join(cat.Dir, "fsl.simg"), share: cat.Name}
-			}
-			for file, content := range map[string]string{"commands.txt": tt.commands, "env.txt": tt.env} {
-				if content == "" {
-					continue
-				}
-				path := filepath.Join(cat.Dir, "fsl_6.0.3_20200905", file)
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
 			if tt.cached {
 				if _, err := listCommands(context.Background(), cfg, c, loc); err != nil {
 					t.Fatal(err)

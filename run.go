@@ -16,11 +16,13 @@ import (
 // runApptainer hands over to Apptainer and can be replaced by tests.
 var runApptainer = execApptainer
 
-// location is where a container was found: its path, and the catalogue
-// whose share holds it, or "" when it is in the store.
+// location is where a container was found: its path, the catalogue whose
+// share holds it ("" when it is in the store), and whether it is another
+// build than the catalogue's, usually an older one.
 type location struct {
 	path  string
 	share string
+	older bool
 }
 
 // notOnMachineError identifies a known container missing from local storage.
@@ -56,28 +58,33 @@ func layoutPath(layout string, c container) (string, error) {
 	return filepath.FromSlash(path), nil
 }
 
-// locate searches the winner's catalogue share, then the store cfg names.
+// locate searches the winner's catalogue share, then the store cfg names,
+// for c's build. Failing that, it searches both for another build of c's
+// tool and version, so a catalogue refresh never stops a container on the
+// machine from running.
 func locate(cfg config, c container) (location, error) {
 	_, _, catalogues, err := readCatalogues()
 	if err != nil {
 		return location{}, err
 	}
+	var share catalogue
+	var shareLayout string
 	if i := findCatalogue(catalogues, c.catalogue); i >= 0 && catalogues[i].Dir != "" {
-		cat := catalogues[i]
-		layout := cat.Layout
-		if layout == "" {
+		share = catalogues[i]
+		shareLayout = share.Layout
+		if shareLayout == "" {
 			// A share is laid out by its publisher, so the user's
 			// container_layout does not apply.
-			if layout, err = defaultValue("container_layout"); err != nil {
+			if shareLayout, err = defaultValue("container_layout"); err != nil {
 				return location{}, err
 			}
 		}
-		path, err := findContainer(cat.Dir, layout, c)
+		path, err := findContainer(share.Dir, shareLayout, c)
 		if err != nil {
 			return location{}, err
 		}
 		if path != "" {
-			return location{path: path, share: cat.Name}, nil
+			return location{path: path, share: share.Name}, nil
 		}
 	}
 	// The store is resolved only after the share misses, so a share hit
@@ -94,10 +101,69 @@ func locate(cfg config, c container) (location, error) {
 	if err != nil {
 		return location{}, err
 	}
-	if path == "" {
-		return location{}, notOnMachineError{name: c.name()}
+	if path != "" {
+		return location{path: path}, nil
 	}
-	return location{path: path}, nil
+	if share.Dir != "" {
+		path, err := otherBuild(share.Dir, shareLayout, c)
+		if err != nil {
+			return location{}, err
+		}
+		if path != "" {
+			return location{path: path, share: share.Name, older: true}, nil
+		}
+	}
+	path, err = otherBuild(dir, layout, c)
+	if err != nil {
+		return location{}, err
+	}
+	if path != "" {
+		return location{path: path, older: true}, nil
+	}
+	return location{}, notOnMachineError{name: c.name()}
+}
+
+// otherBuild returns the path of the newest build of c's tool and version in
+// dir other than c's own, or "" if there is none. A build date is eight
+// digits.
+func otherBuild(dir, layout string, c container) (string, error) {
+	if _, err := layoutPath(layout, c); err != nil {
+		return "", err
+	}
+	// The layout is escaped first: its own characters are literal too.
+	pattern := strings.NewReplacer("{tool}", globEscape(c.tool), "{version}", globEscape(c.version),
+		"{date}", strings.Repeat("[0-9]", 8)).Replace(globEscape(layout))
+	matches, err := filepath.Glob(filepath.Join(globEscape(dir), filepath.FromSlash(pattern)))
+	if err != nil {
+		return "", fmt.Errorf("locating %s: %w", c.name(), err)
+	}
+	best, bestDate := "", ""
+	for _, match := range matches {
+		// Each eight characters of the match is tried as the date, and kept
+		// only if the layout gives back the match, so a layout that names
+		// the date twice must have the same date in both places.
+		for i := 0; i+8 <= len(match); i++ {
+			other := c
+			other.buildDate = match[i : i+8]
+			relative, err := layoutPath(layout, other)
+			if err != nil || filepath.Join(dir, relative) != match || other.buildDate <= bestDate {
+				continue
+			}
+			path, err := findContainer(dir, layout, other)
+			if err != nil {
+				return "", err
+			}
+			if path != "" {
+				best, bestDate = path, other.buildDate
+			}
+		}
+	}
+	return best, nil
+}
+
+// globEscape escapes the characters filepath.Glob treats as special.
+func globEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`).Replace(s)
 }
 
 // findContainer returns c's path in dir, or "" if no regular file or

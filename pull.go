@@ -20,8 +20,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// pullContainer downloads c into the store unless it is already on the
-// machine, and returns where it is and whether it was downloaded. It tries
+// pullContainer downloads c into the store unless its build is already on
+// the machine, and returns where it is and whether it was downloaded. It tries
 // each of download_urls in turn until one gives a file of the right size
 // (and SHA-256, if the catalogue has one) that Apptainer can open.
 // progress, if not nil, receives the source's host and the bytes so far;
@@ -30,7 +30,7 @@ import (
 func pullContainer(ctx context.Context, cfg config, c container, progress func(host string, done, total int64), warn func(string)) (location, bool, error) {
 	loc, err := locate(cfg, c)
 	var missing notOnMachineError
-	if !errors.As(err, &missing) {
+	if !errors.As(err, &missing) && !(err == nil && loc.older) {
 		return loc, false, err
 	}
 
@@ -378,20 +378,9 @@ func newPullCommand() *cobra.Command {
 			return completeContainerNames(cmd, nil, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			containers, err := readContainers()
+			cs, err := lookupContainers(args)
 			if err != nil {
 				return err
-			}
-			// Every name is checked before anything downloads.
-			var cs []container
-			for _, name := range args {
-				c, err := lookupContainer(containers, name)
-				if err != nil {
-					return err
-				}
-				if !slices.ContainsFunc(cs, func(x container) bool { return x.name() == c.name() }) {
-					cs = append(cs, c)
-				}
 			}
 			cfg, err := readConfig()
 			if err != nil {
@@ -402,4 +391,24 @@ func newPullCommand() *cobra.Command {
 			return pullAll(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), cfg, cs)
 		},
 	}
+}
+
+// lookupContainers returns the winning container for each name, once each,
+// so every name is checked before anything is downloaded.
+func lookupContainers(names []string) ([]container, error) {
+	containers, err := readContainers()
+	if err != nil {
+		return nil, err
+	}
+	var cs []container
+	for _, name := range names {
+		c, err := lookupContainer(containers, name)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.ContainsFunc(cs, func(x container) bool { return x.name() == c.name() }) {
+			cs = append(cs, c)
+		}
+	}
+	return cs, nil
 }

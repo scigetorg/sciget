@@ -156,6 +156,7 @@ type model struct {
 	earlier  []stateEntry // restored from earlier sessions
 	notice   *callout     // shown instead of the selection's status until the selection changes
 	location string       // LOCATION for locFor, looked up afresh each time it is selected
+	module   string       // MODULE for locFor, looked up with location
 	locFor   string       // the container location belongs to
 	locID    int          // the latest lookup; replies from older ones are dropped
 	waiting  *pending     // a launch held until its container's location is known
@@ -389,7 +390,7 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 		if msg.id != m.locID {
 			return nil
 		}
-		m.location = msg.text
+		m.location, m.module = msg.text, msg.module
 		if w := m.waiting; w != nil && w.name == m.locFor {
 			m.waiting = nil
 			if c, _ := m.selected(); c.name() == w.name {
@@ -728,10 +729,11 @@ func refreshOutcome(results []refreshResult, err error) callout {
 	return callout{state: "refreshed", detail: fmt.Sprintf("Updated %d catalogues", updated)}
 }
 
-// locationMsg is LOCATION from lookup id.
+// locationMsg is LOCATION and MODULE from lookup id.
 type locationMsg struct {
-	id   int
-	text string
+	id     int
+	text   string
+	module string
 }
 
 // lookUpLocation returns a command finding the selected container's
@@ -744,10 +746,35 @@ func (m *model) lookUpLocation() tea.Cmd {
 	if !ok || c.name() == m.locFor {
 		return nil
 	}
-	m.locFor, m.location = c.name(), checking
+	m.locFor, m.location, m.module = c.name(), checking, ""
 	m.locID++
 	cfg, id := m.s.cfg, m.locID
-	return func() tea.Msg { return locationMsg{id, locationText(cfg, c)} }
+	return func() tea.Msg {
+		return locationMsg{id: id, text: locationText(cfg, c), module: moduleText(cfg, c)}
+	}
+}
+
+// moduleText describes c's module: how to load it, or why it has none.
+func moduleText(cfg config, c container) string {
+	if loc, err := locate(cfg, c); err == nil && loc.share != "" {
+		return "the " + loc.share + " share's own modules"
+	}
+	moduleDir, _, err := cfg.get("module_dir")
+	if err != nil || slices.ContainsFunc([]string{c.catalogue, c.tool, c.version, c.buildDate}, unsafeLayoutValue) {
+		return "none"
+	}
+	file, wrappers := modulePaths(moduleDir, c)
+	if _, err := os.Stat(file); err != nil {
+		return "none · Install makes one"
+	}
+	text := shellJoin([]string{"module", "load", c.name()})
+	if _, err := os.Stat(wrappers); err != nil {
+		text += " (from an older build · Install updates it)"
+	}
+	if line, err := moduleUseLine(cfg, c.catalogue); err == nil && line != "" {
+		text += " · first: " + line
+	}
+	return text
 }
 
 // locationText describes where c is: on this machine, missing (and why, if
@@ -765,6 +792,8 @@ func locationText(cfg config, c container) string {
 		return notHere
 	case err != nil:
 		return "couldn't check: " + err.Error()
+	case loc.older:
+		return onHere + " (an older build)"
 	case loc.share == "":
 		return onHere + " (downloaded)"
 	}

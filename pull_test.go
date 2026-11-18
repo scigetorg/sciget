@@ -26,6 +26,7 @@ func TestPullContainer(t *testing.T) {
 		name        string
 		sources     []source
 		inStore     bool   // the container is already in the store
+		olderBuild  bool   // an older build of it is in the store
 		apptainer   string // apptainer_path; the fake script when empty
 		warnMissing bool
 		want        string // the pulled file's content; nothing pulled when empty
@@ -37,6 +38,7 @@ func TestPullContainer(t *testing.T) {
 		{name: "first source missing", sources: []source{{status: http.StatusNotFound}, {body: good}}, want: good, wantGets: 1},
 		{name: "Apptainer cannot open the first", sources: []source{{body: bad}, {body: good}}, want: good, wantGets: 2},
 		{name: "already in the store", sources: []source{{body: good}}, inStore: true},
+		{name: "an older build is still pulled", sources: []source{{body: good}}, olderBuild: true, want: good, wantGets: 1},
 		{name: "warning when asked", sources: []source{{body: good}}, warnMissing: true, want: good, wantWarn: true, wantGets: 1},
 		{name: "every source fails", sources: []source{{status: http.StatusNotFound}, {body: bad}},
 			wantErr: []string{"could not download fsl/6.0.3:", "404", "apptainer cannot open the download", "not a SIF"}, wantGets: 1},
@@ -91,6 +93,11 @@ func TestPullContainer(t *testing.T) {
 			var existing string
 			if tt.inStore {
 				existing = makeContainerPath(t, store, layout, c, false)
+			}
+			if tt.olderBuild {
+				older := c
+				older.buildDate = "20190101"
+				makeContainerPath(t, store, layout, older, false)
 			}
 
 			var warnings []string

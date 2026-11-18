@@ -24,10 +24,27 @@ func pullModel(t *testing.T) model {
 }
 
 func TestTUIPull(t *testing.T) {
-	t.Run("Download button when not here", func(t *testing.T) {
+	t.Run("Install button", func(t *testing.T) {
+		for _, tt := range []struct{ location, module, want string }{
+			{location: notHere, want: "install"},
+			{location: onHere + " (downloaded)", module: "none · Install makes one", want: "install"},
+			{location: onHere + " (an older build)", module: "module load itksnap/4.4.0", want: "install"},
+			{location: onHere + " (downloaded)", module: "module load itksnap/4.4.0 (from an older build · Install updates it)", want: "install"},
+			{location: onHere + " (downloaded)", module: "module load itksnap/4.4.0", want: "gui"},
+			{location: onHere + " (neuro share)", module: "the neuro share's own modules", want: "gui"},
+		} {
+			m := pullModel(t)
+			m.location, m.module = tt.location, tt.module
+			if kinds := buttonKinds(m); kinds[len(kinds)-1] != tt.want {
+				t.Errorf("%s, %s: buttons %v, want %s last", tt.location, tt.module, kinds, tt.want)
+			}
+		}
+	})
+	t.Run("Install of an older build asks first", func(t *testing.T) {
 		m := pullModel(t)
-		if kinds := buttonKinds(m); kinds[len(kinds)-1] != "pull" {
-			t.Errorf("buttons %v, want Download last", kinds)
+		m.location, m.module = onHere+" (an older build)", "module load itksnap/4.4.0"
+		if m.press(len(m.buttons()) - 1); m.asking != "itksnap/4.4.0" || len(m.pulls) != 0 {
+			t.Errorf("asking %q, pulls %d", m.asking, len(m.pulls))
 		}
 	})
 	t.Run("no", func(t *testing.T) {
@@ -40,7 +57,7 @@ func TestTUIPull(t *testing.T) {
 	t.Run("yes starts a download, and nothing launches after", func(t *testing.T) {
 		m := pullModel(t)
 		m.launch(1)
-		if cmd := m.press(1); cmd == nil || len(m.pulls) != 1 || m.launches[0].action != "Download" ||
+		if cmd := m.press(1); cmd == nil || len(m.pulls) != 1 || m.launches[0].action != "Install" ||
 			!slices.Equal(buttonKinds(m), []string{"cancel"}) {
 			t.Fatalf("command %v, pulls %d, launches %v, buttons %v", cmd != nil, len(m.pulls), m.launches, buttonKinds(m))
 		}
@@ -114,7 +131,7 @@ func TestTUIPull(t *testing.T) {
 		if cmd == nil {
 			t.Fatal("no quit once the pull stopped")
 		}
-		if _, ok := cmd().(tea.QuitMsg); !ok || m.launches[0].detail != "Download cancelled" {
+		if _, ok := cmd().(tea.QuitMsg); !ok || m.launches[0].detail != "Install cancelled" {
 			t.Errorf("message %T, launch %+v", cmd(), m.launches[0])
 		}
 	})

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -17,7 +16,7 @@ import (
 // the settings to set and the help text.
 type commandList struct {
 	Found []string `json:"found"` // executables the finder saw, before finder_excludes
-	Kept  []string `json:"kept"`  // names never excluded: DEPLOY_BINS, or a share's whole list
+	Kept  []string `json:"kept"`  // names never excluded: DEPLOY_BINS
 	Env   []string `json:"env"`   // DEPLOY_ENV_ settings as NAME=value, without the prefix
 	Help  string   `json:"help"`
 }
@@ -42,13 +41,9 @@ const (
 	readmeMarker = "SCIGET_FINDER_README"
 )
 
-// listCommands returns the command list of c, found at loc: from the files
-// commands_layout and env_layout name in its share, else from the cache,
+// listCommands returns the command list of c, found at loc: from the cache,
 // else by running the finder in the container and caching what it prints.
 func listCommands(ctx context.Context, cfg config, c container, loc location) (commandList, error) {
-	if list, ok, err := shareList(cfg, c, loc); ok || err != nil {
-		return list, err
-	}
 	cachePath, err := commandCachePath(cfg, c)
 	if err != nil {
 		return commandList{}, err
@@ -67,60 +62,6 @@ func listCommands(ctx context.Context, cfg config, c container, loc location) (c
 		return commandList{}, fmt.Errorf("caching the commands of %s: %w", c.name(), err)
 	}
 	return list, nil
-}
-
-// shareList reads c's command list from the files its share publishes
-// beside the container, if loc is in a share and the commands file exists.
-// A share's list is final, so every name goes in Kept.
-func shareList(cfg config, c container, loc location) (commandList, bool, error) {
-	if loc.share == "" {
-		return commandList{}, false, nil
-	}
-	_, _, catalogues, err := readCatalogues()
-	if err != nil {
-		return commandList{}, false, err
-	}
-	i := findCatalogue(catalogues, loc.share)
-	if i < 0 || catalogues[i].Dir == "" {
-		return commandList{}, false, nil
-	}
-	dir := catalogues[i].Dir
-	commands, ok, err := readShareFile(cfg, "commands_layout", dir, c)
-	if !ok || err != nil {
-		return commandList{}, false, err
-	}
-	env, _, err := readShareFile(cfg, "env_layout", dir, c)
-	if err != nil {
-		return commandList{}, false, err
-	}
-	list := commandList{Kept: lines(commands)}
-	for _, line := range lines(env) {
-		if setting, ok := strings.CutPrefix(line, "DEPLOY_ENV_"); ok {
-			list.Env = append(list.Env, setting)
-		}
-	}
-	return list, true, nil
-}
-
-// readShareFile reads the file the layout key names in dir for c, and
-// reports whether it exists.
-func readShareFile(cfg config, key, dir string, c container) (string, bool, error) {
-	layout, _, err := cfg.get(key)
-	if err != nil {
-		return "", false, err
-	}
-	relative, err := layoutPath(layout, c)
-	if err != nil {
-		return "", false, err
-	}
-	data, err := os.ReadFile(filepath.Join(dir, relative))
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("reading the commands of %s: %w", c.name(), err)
-	}
-	return string(data), true, nil
 }
 
 // commandCachePath returns where the finder's output for c is cached: one

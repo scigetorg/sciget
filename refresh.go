@@ -37,7 +37,24 @@ func newRefreshCommand() *cobra.Command {
 					return err
 				}
 			}
-			return errors.Join(failures...)
+			if len(failures) > 0 {
+				return errors.Join(failures...)
+			}
+			cfg, err := readConfig()
+			if err != nil {
+				return err
+			}
+			outdated, err := outdatedModules(cfg)
+			if err != nil {
+				return err
+			}
+			for _, name := range outdated {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Module %s is from an older build; to update it, run: %s\n",
+					printable(name), shellJoin([]string{"sciget", "install", name})); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
 }
