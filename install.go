@@ -42,14 +42,14 @@ func installContainer(ctx context.Context, stdout, stderr io.Writer, cfg config,
 	return true, err
 }
 
-// moduleUseLine returns the module use command for catalogue's module
+// moduleUseLine returns the module use command for catalog's module
 // folder, or "" when that folder is already in MODULEPATH.
-func moduleUseLine(cfg config, catalogue string) (string, error) {
+func moduleUseLine(cfg config, catalog string) (string, error) {
 	moduleDir, _, err := cfg.get("module_dir")
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(moduleDir, catalogue)
+	dir := filepath.Join(moduleDir, catalog)
 	for _, p := range filepath.SplitList(os.Getenv("MODULEPATH")) {
 		if p != "" && filepath.Clean(p) == dir {
 			return "", nil
@@ -87,7 +87,7 @@ func newInstallCommand() *cobra.Command {
 			if err := pullAll(ctx, stdout, stderr, cfg, cs); err != nil {
 				return err
 			}
-			var failures, installed []string // installed: catalogues given a module
+			var failures, installed []string // installed: catalogs given a module
 			for _, c := range cs {
 				loc, err := locate(cfg, c)
 				written := false
@@ -97,12 +97,12 @@ func newInstallCommand() *cobra.Command {
 				if err != nil {
 					failures = append(failures, err.Error())
 				}
-				if written && !slices.Contains(installed, c.catalogue) {
-					installed = append(installed, c.catalogue)
+				if written && !slices.Contains(installed, c.catalog) {
+					installed = append(installed, c.catalog)
 				}
 			}
-			for _, catalogue := range installed {
-				line, err := moduleUseLine(cfg, catalogue)
+			for _, catalog := range installed {
+				line, err := moduleUseLine(cfg, catalog)
 				if err != nil {
 					return err
 				}

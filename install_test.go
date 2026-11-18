@@ -36,7 +36,7 @@ func TestInstall(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, cat, store := localCatalogue(t)
+			c, cat, store := localCatalog(t)
 			base := filepath.Dir(store)
 			moduleDir := filepath.Join(base, "modules")
 			apptainer, _ := fakeFinderApptainer(t, false)

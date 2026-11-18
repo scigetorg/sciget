@@ -70,7 +70,7 @@ func TestWriteModule(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, _, store := localCatalogue(t)
+			c, _, store := localCatalog(t)
 			base := filepath.Dir(store)
 			moduleDir := filepath.Join(base, "modules")
 			// The fake sciget prints each argument it gets on its own line.
@@ -161,12 +161,12 @@ func TestOutdatedModules(t *testing.T) {
 		want      []string
 	}{
 		{name: "no module"},
-		{name: "module of the catalogue's build", buildDate: "20200905"},
+		{name: "module of the catalog's build", buildDate: "20200905"},
 		{name: "module of another build", buildDate: "20190101", want: []string{"fsl/6.0.3"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, _, store := localCatalogue(t)
+			c, _, store := localCatalog(t)
 			base := filepath.Dir(store)
 			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
 				"cache_dir": filepath.Join(base, "cache"), "container_dir": store, "module_dir": filepath.Join(base, "modules"),

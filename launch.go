@@ -61,7 +61,7 @@ func displayLive(display string) bool {
 }
 
 // logFile creates a new log file for one launch in dir, named after tool
-// and version reduced to letters, digits, ".", "_" and "-", so a catalogue
+// and version reduced to letters, digits, ".", "_" and "-", so a catalog
 // value cannot leave dir and concurrent launches never share a file.
 func logFile(dir, tool, version string) (*os.File, error) {
 	safe := func(s string) string {

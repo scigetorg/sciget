@@ -13,11 +13,11 @@ import (
 	"time"
 )
 
-// maxSize is the catalogue size limit the refresh tests pass.
+// maxSize is the catalog size limit the refresh tests pass.
 const maxSize = 1024
 
-func TestRefreshCatalogue(t *testing.T) {
-	const catalogue = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905"}}}}`
+func TestRefreshCatalog(t *testing.T) {
+	const catalog = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905"}}}}`
 	const other = `{"fsl": {"apps": {"fsl 6.0.4": {"version": "20210101"}}}}`
 	tests := []struct {
 		name        string
@@ -34,32 +34,32 @@ func TestRefreshCatalogue(t *testing.T) {
 		want        string // apps.json afterwards
 		wantErr     string
 	}{
-		{name: "first refresh", body: catalogue, wantChanged: true, want: catalogue},
-		{name: "same catalogue, so only url is written", existing: catalogue, body: catalogue, want: catalogue},
-		{name: "different catalogue", existing: catalogue, body: other, wantChanged: true, want: other},
-		{name: "damaged local copy is replaced", existing: "{}", body: catalogue, wantChanged: true,
-			want: catalogue},
-		{name: "compressed", body: catalogue, gzip: true, wantChanged: true, want: catalogue},
-		{name: "not found", existing: catalogue, status: http.StatusNotFound, want: catalogue,
+		{name: "first refresh", body: catalog, wantChanged: true, want: catalog},
+		{name: "same catalog, so only url is written", existing: catalog, body: catalog, want: catalog},
+		{name: "different catalog", existing: catalog, body: other, wantChanged: true, want: other},
+		{name: "damaged local copy is replaced", existing: "{}", body: catalog, wantChanged: true,
+			want: catalog},
+		{name: "compressed", body: catalog, gzip: true, wantChanged: true, want: catalog},
+		{name: "not found", existing: catalog, status: http.StatusNotFound, want: catalog,
 			wantErr: "returned 404 Not Found"},
-		{name: "server error", existing: catalogue, status: http.StatusInternalServerError, want: catalogue,
+		{name: "server error", existing: catalog, status: http.StatusInternalServerError, want: catalog,
 			wantErr: "returned 500 Internal Server Error"},
-		{name: "not modified", existing: catalogue, status: http.StatusNotModified, want: catalogue,
+		{name: "not modified", existing: catalog, status: http.StatusNotModified, want: catalog,
 			wantErr: "returned 304 Not Modified"},
-		{name: "invalid JSON", existing: catalogue, body: "{", want: catalogue,
-			wantErr: "downloaded catalogue is invalid: unexpected end of JSON input"},
-		{name: "no containers", existing: catalogue, body: "{}", want: catalogue,
-			wantErr: "downloaded catalogue is invalid: no containers"},
-		{name: "write fails", existing: catalogue, body: other, blocked: true, want: catalogue,
-			wantErr: "writing catalogue: "},
-		{name: "url write fails", existing: catalogue, body: other, urlBlocked: true, want: catalogue,
-			wantErr: "writing catalogue: "},
-		{name: "larger than the cap", existing: catalogue, large: true, want: catalogue,
-			wantErr: "is larger than max_catalogue_size (1024 bytes)"},
-		{name: "body cut short", existing: catalogue, body: catalogue, short: true, want: catalogue,
-			wantErr: "downloading catalogue: unexpected EOF"},
-		{name: "server gone", existing: catalogue, closed: true, want: catalogue,
-			wantErr: "downloading catalogue: Get "},
+		{name: "invalid JSON", existing: catalog, body: "{", want: catalog,
+			wantErr: "downloaded catalog is invalid: unexpected end of JSON input"},
+		{name: "no containers", existing: catalog, body: "{}", want: catalog,
+			wantErr: "downloaded catalog is invalid: no containers"},
+		{name: "write fails", existing: catalog, body: other, blocked: true, want: catalog,
+			wantErr: "writing catalog: "},
+		{name: "url write fails", existing: catalog, body: other, urlBlocked: true, want: catalog,
+			wantErr: "writing catalog: "},
+		{name: "larger than the cap", existing: catalog, large: true, want: catalog,
+			wantErr: "is larger than max_catalog_size (1024 bytes)"},
+		{name: "body cut short", existing: catalog, body: catalog, short: true, want: catalog,
+			wantErr: "downloading catalog: unexpected EOF"},
+		{name: "server gone", existing: catalog, closed: true, want: catalog,
+			wantErr: "downloading catalog: Get "},
 	}
 
 	for _, tt := range tests {
@@ -120,14 +120,14 @@ func TestRefreshCatalogue(t *testing.T) {
 				}
 			}
 
-			catalogueURL := srv.URL + "/apps.json"
-			changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir, maxSize)
+			catalogURL := srv.URL + "/apps.json"
+			changed, err := refreshCatalog(srv.Client(), catalogURL, dir, maxSize)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
 				}
-				if tt.status != 0 && (err == nil || !strings.Contains(err.Error(), catalogueURL)) {
-					t.Errorf("error = %v, want it to name %s", err, catalogueURL)
+				if tt.status != 0 && (err == nil || !strings.Contains(err.Error(), catalogURL)) {
+					t.Errorf("error = %v, want it to name %s", err, catalogURL)
 				}
 			} else if err != nil {
 				t.Fatal(err)
@@ -140,8 +140,8 @@ func TestRefreshCatalogue(t *testing.T) {
 			switch {
 			case tt.urlBlocked:
 			case tt.wantErr == "" || tt.blocked:
-				if string(urlData) != catalogueURL+"\n" {
-					t.Errorf("url = %q, %v, want %q", urlData, urlErr, catalogueURL+"\n")
+				if string(urlData) != catalogURL+"\n" {
+					t.Errorf("url = %q, %v, want %q", urlData, urlErr, catalogURL+"\n")
 				}
 			case !errors.Is(urlErr, os.ErrNotExist):
 				t.Errorf("url written after a failed download: %q, %v", urlData, urlErr)
@@ -164,11 +164,11 @@ func TestRefreshCatalogue(t *testing.T) {
 			}
 			if tt.wantChanged {
 
-				// A second refresh must see what the first wrote as the same catalogue.
+				// A second refresh must see what the first wrote as the same catalog.
 				if err := os.Chtimes(path, old, old); err != nil {
 					t.Fatal(err)
 				}
-				changed, err := refreshCatalogue(srv.Client(), catalogueURL, dir, maxSize)
+				changed, err := refreshCatalog(srv.Client(), catalogURL, dir, maxSize)
 				if err != nil || changed {
 					t.Errorf("second refresh: changed = %v, error = %v, want no change", changed, err)
 				}

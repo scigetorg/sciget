@@ -33,7 +33,7 @@ func downloadFile(ctx context.Context, client *http.Client, url, dest string, wa
 		return "", err
 	}
 	if want.size != 0 && size != want.size {
-		return "", fmt.Errorf("%s is %d bytes, but the catalogue says %d", url, size, want.size)
+		return "", fmt.Errorf("%s is %d bytes, but the catalog says %d", url, size, want.size)
 	}
 	dir := filepath.Dir(dest)
 	free, err := freeSpace(dir)
@@ -79,7 +79,7 @@ func downloadFile(ctx context.Context, client *http.Client, url, dest string, wa
 	case n != size:
 		err = fmt.Errorf("downloading %s: got %d bytes, expected %d", url, n, size)
 	case want.sha256 != "" && hex.EncodeToString(hash.Sum(nil)) != want.sha256:
-		err = fmt.Errorf("downloading %s: the SHA-256 does not match the catalogue", url)
+		err = fmt.Errorf("downloading %s: the SHA-256 does not match the catalog", url)
 	}
 	if err != nil {
 		os.Remove(f.Name())

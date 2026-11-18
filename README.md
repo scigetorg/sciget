@@ -1,7 +1,7 @@
 # sciget
 
 Install and run containerised scientific software, on a workstation or an HPC
-login node. sciget reads a catalogue of published containers, fetches each
+login node. sciget reads a catalog of published containers, fetches each
 container's image, and runs it through Apptainer. One static binary, no root.
 
 > **Status: not yet released.** sciget runs containers on a CVMFS share or
@@ -17,11 +17,11 @@ go test ./...
 
 ## First run
 
-sciget starts with no catalogues. Add one, saying where its containers are,
+sciget starts with no catalogs. Add one, saying where its containers are,
 then download it:
 
 ```sh
-sciget catalogue add neuroimaging https://apps-json.neurodesk.workers.dev/neuroimaging/apps.json \
+sciget catalog add neuroimaging https://apps-json.neurodesk.workers.dev/neuroimaging/apps.json \
     --dir /cvmfs/neurodesk.ardc.edu.au/containers
 sciget refresh
 sciget
@@ -31,7 +31,7 @@ Run on a terminal with no command, sciget opens a full-screen interface:
 search, pick a container and open a shell in it or launch its applications.
 Mouse and keyboard both work.
 
-Catalogue URLs must use https. Plain http is allowed only to this machine,
+Catalog URLs must use https. Plain http is allowed only to this machine,
 such as a port forwarded through an SSH tunnel
 (`http://localhost:8080/apps.json`). sciget uses the standard `HTTPS_PROXY`,
 `HTTP_PROXY` and `NO_PROXY` variables.
@@ -41,9 +41,9 @@ such as a port forwarded through an SSH tunnel
 | Command | What it does |
 |---|---|
 | `sciget` or `sciget ui` | Browse and launch containers in a full-screen interface |
-| `sciget catalogue [add\|remove\|use\|unuse\|list]` | Manage catalogues; of those in use, the first listing a name wins |
-| `sciget refresh` | Download the latest catalogues in use |
-| `sciget find [words...]` | List the containers in the catalogues in use (`--all` includes hidden ones) |
+| `sciget catalog [add\|remove\|use\|unuse\|list]` | Manage catalogs; of those in use, the first listing a name wins |
+| `sciget refresh` | Download the latest catalogs in use |
+| `sciget find [words...]` | List the containers in the catalogs in use (`--all` includes hidden ones) |
 | `sciget info <tool/version>` | Show a container's details and where it is |
 | `sciget pull <tool/version>...` | Download containers into `container_dir`, `parallel_pulls` (3) at a time |
 | `sciget install <tool/version>...` | Download containers, then make a module for each, so `module load` works |
@@ -55,10 +55,10 @@ such as a port forwarded through an SSH tunnel
 ## Pulling containers
 
 `sciget pull fsl/6.0.7.8` downloads a container that is not already on
-the machine (on its catalogue's share, or downloaded before) into
+the machine (on its catalog's share, or downloaded before) into
 `container_dir` (default `~/.local/share/sciget/containers`). It tries each of `download_urls` in turn, Nectar then S3
 by default. A download counts only when its size matches what the server
-reported, its SHA-256 matches the catalogue's (when the catalogue gives
+reported, its SHA-256 matches the catalog's (when the catalog gives
 one), and Apptainer can open it. Set `warn_missing_checksum` to true to be
 told when no SHA-256 was published. Before downloading, sciget checks the
 disk has room (quotas are not seen).
@@ -81,7 +81,7 @@ image sciget puts there makes neurocommand skip setting it up.
 ## Using modules
 
 `sciget install fsl/6.0.7.8` downloads the container if needed, then writes
-a Lmod module for it: `<module_dir>/<catalogue>/fsl/6.0.7.8.lua`
+a Lmod module for it: `<module_dir>/<catalog>/fsl/6.0.7.8.lua`
 (`module_dir` defaults to `~/.local/share/sciget/modules`). Each command in
 the container gets a small wrapper that runs it through sciget, so it gets
 the same Apptainer settings as `sciget apptainer exec`. A container on a
@@ -90,7 +90,7 @@ modules.
 
 sciget never edits your shell files. If the module folder is not on your
 `MODULEPATH`, `install` prints the line to add to `~/.bashrc`, once per
-catalogue:
+catalog:
 
 ```sh
 module use ~/.local/share/sciget/modules/neuroimaging

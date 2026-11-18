@@ -26,7 +26,7 @@ func newUICommand() *cobra.Command {
 	}
 }
 
-// runTUI opens the TUI. Stdin and out must both be terminals. Catalogue
+// runTUI opens the TUI. Stdin and out must both be terminals. Catalog
 // problems do not stop it; they become its empty and error states.
 func runTUI(out io.Writer) error {
 	if !isTerminal(os.Stdin) || !isTerminal(out) {
@@ -132,7 +132,7 @@ const (
 // apps, a version list (byTool, newest first) and the buttons.
 type model struct {
 	s          tuiSettings
-	loadErr    error // the catalogues could not be read: an empty state
+	loadErr    error // the catalogs could not be read: an empty state
 	visible    []container
 	categories []string       // "" first, meaning All
 	counts     map[string]int // apps per category; "" is All
@@ -163,7 +163,7 @@ type model struct {
 	nextID   int
 	btnRows  int      // the button viewport's height when last laid out
 	btnFor   string   // the container btn belongs to
-	start    tuiState // the state restored at start, kept while the catalogues cannot be read
+	start    tuiState // the state restored at start, kept while the catalogs cannot be read
 
 	refreshing, checking bool
 	updateText           string // the update check's result
@@ -238,8 +238,8 @@ func (m *model) setContainers(containers []container, err error) {
 	m.selectName(tool, version)
 }
 
-// errNoContainers is the empty state for catalogues with nothing to show.
-var errNoContainers = errors.New("the catalogues in use have no containers to show")
+// errNoContainers is the empty state for catalogs with nothing to show.
+var errNoContainers = errors.New("the catalogs in use have no containers to show")
 
 // filter recomputes the apps and their versions from the search and the
 // category, keeping the selected app if it still matches. Counts are apps.
@@ -288,7 +288,7 @@ func (m model) buttonCount() int { return len(m.buttons()) }
 // emptyControl is where focus starts in an empty state: Refresh when it
 // can help, otherwise Quit.
 func (m model) emptyControl() control {
-	if errors.Is(m.loadErr, errNoCatalogues) || errors.Is(m.loadErr, errNoneInUse) {
+	if errors.Is(m.loadErr, errNoCatalogs) || errors.Is(m.loadErr, errNoneInUse) {
 		return quitControl
 	}
 	return refreshControl
@@ -404,11 +404,11 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 		outcome := refreshOutcome(msg.results, msg.err)
 		m.notice = &outcome
 		if msg.readErr != nil && m.loadErr == nil {
-			m.notice = &callout{state: "failed", detail: "Couldn't read the catalogues: " + msg.readErr.Error()}
+			m.notice = &callout{state: "failed", detail: "Couldn't read the catalogs: " + msg.readErr.Error()}
 			return nil
 		}
 		m.setContainers(msg.containers, msg.readErr)
-		m.locFor = "" // looked up again, from the new catalogues
+		m.locFor = "" // looked up again, from the new catalogs
 		m.locID++
 		m.waiting = nil // its button may now be another entry
 		if m.loadErr != nil {
@@ -620,7 +620,7 @@ func (m *model) activate(c control, index int) tea.Cmd {
 	case refreshControl:
 		if !m.refreshing {
 			m.refreshing = true
-			m.notice = &callout{state: "refreshing", detail: "Downloading the latest catalogues"}
+			m.notice = &callout{state: "refreshing", detail: "Downloading the latest catalogs"}
 			return refreshCmd
 		}
 	case searchControl, catsControl, appsControl, versionsControl:
@@ -722,11 +722,11 @@ func refreshOutcome(results []refreshResult, err error) callout {
 		return callout{state: "failed", detail: fmt.Sprintf("Refreshed %d, but %s: %v",
 			len(results)-len(failed), failed[0].name, failed[0].err)}
 	case updated == 0:
-		return callout{state: "refreshed", detail: "Catalogues up to date"}
+		return callout{state: "refreshed", detail: "Catalogs up to date"}
 	case updated == 1:
-		return callout{state: "refreshed", detail: "Updated 1 catalogue"}
+		return callout{state: "refreshed", detail: "Updated 1 catalog"}
 	}
-	return callout{state: "refreshed", detail: fmt.Sprintf("Updated %d catalogues", updated)}
+	return callout{state: "refreshed", detail: fmt.Sprintf("Updated %d catalogs", updated)}
 }
 
 // locationMsg is LOCATION and MODULE from lookup id.
@@ -760,7 +760,7 @@ func moduleText(cfg config, c container) string {
 		return "the " + loc.share + " share's own modules"
 	}
 	moduleDir, _, err := cfg.get("module_dir")
-	if err != nil || slices.ContainsFunc([]string{c.catalogue, c.tool, c.version, c.buildDate}, unsafeLayoutValue) {
+	if err != nil || slices.ContainsFunc([]string{c.catalog, c.tool, c.version, c.buildDate}, unsafeLayoutValue) {
 		return "none"
 	}
 	file, wrappers := modulePaths(moduleDir, c)
@@ -771,7 +771,7 @@ func moduleText(cfg config, c container) string {
 	if _, err := os.Stat(wrappers); err != nil {
 		text += " (from an older build · Install updates it)"
 	}
-	if line, err := moduleUseLine(cfg, c.catalogue); err == nil && line != "" {
+	if line, err := moduleUseLine(cfg, c.catalog); err == nil && line != "" {
 		text += " · first: " + line
 	}
 	return text
@@ -784,8 +784,8 @@ func locationText(cfg config, c container) string {
 	var missing notOnMachineError
 	switch {
 	case errors.As(err, &missing):
-		if _, _, catalogues, err := readCatalogues(); err == nil {
-			if cat, mounted := containerShare(catalogues, c); cat.Dir != "" && !mounted {
+		if _, _, catalogs, err := readCatalogs(); err == nil {
+			if cat, mounted := containerShare(catalogs, c); cat.Dir != "" && !mounted {
 				return fmt.Sprintf("%s: the %s share (%s) is not mounted", notHere, cat.Name, cat.Dir)
 			}
 		}
@@ -800,7 +800,7 @@ func locationText(cfg config, c container) string {
 	return onHere + " (" + loc.share + " share)"
 }
 
-// refreshMsg is the outcome of Refresh catalogues and the re-read after it.
+// refreshMsg is the outcome of Refresh catalogs and the re-read after it.
 type refreshMsg struct {
 	results    []refreshResult
 	err        error
@@ -809,7 +809,7 @@ type refreshMsg struct {
 }
 
 func refreshCmd() tea.Msg {
-	results, err := refreshCatalogues()
+	results, err := refreshCatalogs()
 	containers, readErr := readContainers()
 	return refreshMsg{results, err, containers, readErr}
 }

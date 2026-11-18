@@ -65,18 +65,18 @@ func listCommands(ctx context.Context, cfg config, c container, loc location) (c
 }
 
 // commandCachePath returns where the finder's output for c is cached: one
-// file per catalogue, tool, version and build.
+// file per catalog, tool, version and build.
 func commandCachePath(cfg config, c container) (string, error) {
 	cacheDir, _, err := cfg.get("cache_dir")
 	if err != nil {
 		return "", err
 	}
-	for _, value := range []string{c.catalogue, c.tool, c.version, c.buildDate} {
+	for _, value := range []string{c.catalog, c.tool, c.version, c.buildDate} {
 		if unsafeLayoutValue(value) {
-			return "", fmt.Errorf("catalogue entry %q has an unsafe cache path value %q", c.name(), value)
+			return "", fmt.Errorf("catalog entry %q has an unsafe cache path value %q", c.name(), value)
 		}
 	}
-	return filepath.Join(cacheDir, "commands", c.catalogue, c.tool, c.version, c.buildDate+".json"), nil
+	return filepath.Join(cacheDir, "commands", c.catalog, c.tool, c.version, c.buildDate+".json"), nil
 }
 
 // runFinder runs finderScript in the image at image and parses what it

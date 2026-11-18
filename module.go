@@ -52,9 +52,9 @@ type moduleInfo struct {
 	skipped  []string // command names and settings left out, each described
 }
 
-// writeModule writes c's module, <module_dir>/<catalogue>/<tool>/<version>.lua,
+// writeModule writes c's module, <module_dir>/<catalog>/<tool>/<version>.lua,
 // and a wrapper for each command in the build's own folder,
-// <module_dir>/.wrappers/<catalogue>/<tool>/<version>/<date>/. It first
+// <module_dir>/.wrappers/<catalog>/<tool>/<version>/<date>/. It first
 // deletes the folders of every build of that version, so no earlier wrapper
 // is left.
 func writeModule(cfg config, c container, list commandList) (moduleInfo, error) {
@@ -70,9 +70,9 @@ func writeModule(cfg config, c container, list commandList) (moduleInfo, error) 
 	if err != nil {
 		return moduleInfo{}, err
 	}
-	for _, value := range []string{c.catalogue, c.tool, c.version, c.buildDate} {
+	for _, value := range []string{c.catalog, c.tool, c.version, c.buildDate} {
 		if unsafeLayoutValue(value) {
-			return moduleInfo{}, fmt.Errorf("catalogue entry %q has an unsafe module path value %q", c.name(), value)
+			return moduleInfo{}, fmt.Errorf("catalog entry %q has an unsafe module path value %q", c.name(), value)
 		}
 	}
 	var info moduleInfo
@@ -123,12 +123,12 @@ func writeModule(cfg config, c container, list commandList) (moduleInfo, error) 
 // modulePaths returns c's modulefile and its build's wrapper folder in
 // moduleDir. c's values must be safe path elements.
 func modulePaths(moduleDir string, c container) (file, wrappers string) {
-	return filepath.Join(moduleDir, c.catalogue, c.tool, c.version+".lua"),
-		filepath.Join(moduleDir, ".wrappers", c.catalogue, c.tool, c.version, c.buildDate)
+	return filepath.Join(moduleDir, c.catalog, c.tool, c.version+".lua"),
+		filepath.Join(moduleDir, ".wrappers", c.catalog, c.tool, c.version, c.buildDate)
 }
 
 // outdatedModules returns the names of the containers whose module sciget
-// wrote from another build than the catalogue's.
+// wrote from another build than the catalog's.
 func outdatedModules(cfg config) ([]string, error) {
 	moduleDir, _, err := cfg.get("module_dir")
 	if err != nil {
@@ -140,7 +140,7 @@ func outdatedModules(cfg config) ([]string, error) {
 	}
 	var names []string
 	for _, c := range containers {
-		if c.shadowed || slices.ContainsFunc([]string{c.catalogue, c.tool, c.version, c.buildDate}, unsafeLayoutValue) {
+		if c.shadowed || slices.ContainsFunc([]string{c.catalog, c.tool, c.version, c.buildDate}, unsafeLayoutValue) {
 			continue
 		}
 		file, wrappers := modulePaths(moduleDir, c)

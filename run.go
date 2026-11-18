@@ -16,9 +16,9 @@ import (
 // runApptainer hands over to Apptainer and can be replaced by tests.
 var runApptainer = execApptainer
 
-// location is where a container was found: its path, the catalogue whose
+// location is where a container was found: its path, the catalog whose
 // share holds it ("" when it is in the store), and whether it is another
-// build than the catalogue's, usually an older one.
+// build than the catalog's, usually an older one.
 type location struct {
 	path  string
 	share string
@@ -29,7 +29,7 @@ type location struct {
 type notOnMachineError struct{ name string }
 
 func (e notOnMachineError) Error() string {
-	// Quoted, because the name comes from a catalogue and the line is
+	// Quoted, because the name comes from a catalog and the line is
 	// meant to be pasted into a shell.
 	return e.name + " is not on this machine; to download it, run: " + shellJoin([]string{"sciget", "pull", e.name}) +
 		", or let sciget download when needed: sciget config set auto_pull true"
@@ -48,29 +48,29 @@ func layoutPath(layout string, c container) (string, error) {
 	}
 	for _, value := range []string{c.tool, c.version, c.buildDate} {
 		if unsafeLayoutValue(value) {
-			return "", fmt.Errorf("catalogue entry %q has an unsafe layout value %q", c.name(), value)
+			return "", fmt.Errorf("catalog entry %q has an unsafe layout value %q", c.name(), value)
 		}
 	}
 	path := strings.NewReplacer("{tool}", c.tool, "{version}", c.version, "{date}", c.buildDate).Replace(layout)
 	if !filepath.IsLocal(path) {
-		return "", fmt.Errorf("catalogue entry %q has an unsafe container path", c.name())
+		return "", fmt.Errorf("catalog entry %q has an unsafe container path", c.name())
 	}
 	return filepath.FromSlash(path), nil
 }
 
-// locate searches the winner's catalogue share, then the store cfg names,
+// locate searches the winner's catalog share, then the store cfg names,
 // for c's build. Failing that, it searches both for another build of c's
-// tool and version, so a catalogue refresh never stops a container on the
+// tool and version, so a catalog refresh never stops a container on the
 // machine from running.
 func locate(cfg config, c container) (location, error) {
-	_, _, catalogues, err := readCatalogues()
+	_, _, catalogs, err := readCatalogs()
 	if err != nil {
 		return location{}, err
 	}
-	var share catalogue
+	var share catalog
 	var shareLayout string
-	if i := findCatalogue(catalogues, c.catalogue); i >= 0 && catalogues[i].Dir != "" {
-		share = catalogues[i]
+	if i := findCatalog(catalogs, c.catalog); i >= 0 && catalogs[i].Dir != "" {
+		share = catalogs[i]
 		shareLayout = share.Layout
 		if shareLayout == "" {
 			// A share is laid out by its publisher, so the user's
@@ -203,7 +203,7 @@ type launchSettings struct {
 	global        []string // apptainer_global_args
 	verbArgs      []string // apptainer_exec_args or apptainer_shell_args
 	extra         []string // apptainer_extra_args
-	catalogue     []string // the container's apptainer_args, if use_catalogue_args
+	catalog       []string // the container's apptainer_args, if use_catalog_args
 	passEnv       []string // apptainer_pass_env
 	xauthorityVar string
 	tmpVars       []string
@@ -234,19 +234,19 @@ func readLaunchSettings(cfg config, verb string, c container) (launchSettings, e
 	if s.tmpTarget, _, err = cfg.get("tmp_target"); err != nil {
 		return s, err
 	}
-	useCatalogue, err := cfg.getBool("use_catalogue_args")
+	useCatalog, err := cfg.getBool("use_catalog_args")
 	if err != nil {
 		return s, err
 	}
-	if useCatalogue {
-		s.catalogue = c.apptainerArgs
+	if useCatalog {
+		s.catalog = c.apptainerArgs
 	}
 	return s, nil
 }
 
 // apptainerArgs builds argv for running image with verb: the binary as
 // configured, global arguments, the verb, its arguments with placeholders
-// expanded, extra and catalogue arguments, the image and, for exec, the
+// expanded, extra and catalog arguments, the image and, for exec, the
 // command.
 func apptainerArgs(s launchSettings, verb, image string, command []string) ([]string, error) {
 	args := append([]string{s.apptainer}, s.global...)
@@ -263,7 +263,7 @@ func apptainerArgs(s launchSettings, verb, image string, command []string) ([]st
 		args = append(args, arg)
 	}
 	args = append(args, s.extra...)
-	args = append(args, s.catalogue...)
+	args = append(args, s.catalog...)
 	args = append(args, image)
 	if verb == "exec" {
 		args = append(args, command...)

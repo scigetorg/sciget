@@ -22,7 +22,7 @@ func TestReadContainerInfo(t *testing.T) {
 		{name: "no categories", noCats: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			c, cat, _ := localCatalogue(t)
+			c, cat, _ := localCatalog(t)
 			layout, err := defaultValue("container_layout")
 			if err != nil {
 				t.Fatal(err)
@@ -56,14 +56,14 @@ func TestReadContainerInfo(t *testing.T) {
 				}
 				wantCategories = "(none)"
 			}
-			wantCatalogue := "neuro"
+			wantCatalog := "neuro"
 			if tt.shadowed {
-				other := catalogue{Name: "lab", URL: exampleURL("lab"), Use: true}
-				path, err := catalogueListPath()
+				other := catalog{Name: "lab", URL: exampleURL("lab"), Use: true}
+				path, err := catalogListPath()
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := writeCatalogueList(path, []catalogue{cat, other}); err != nil {
+				if err := writeCatalogList(path, []catalog{cat, other}); err != nil {
 					t.Fatal(err)
 				}
 				cfg, err := readConfig()
@@ -81,7 +81,7 @@ func TestReadContainerInfo(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(`{"fsl":{"apps":{"fsl 6.0.3":{"version":"1","license":["other"],"doi":"other"}}}}`), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				wantCatalogue += " (also in: lab, shadowed)"
+				wantCatalog += " (also in: lab, shadowed)"
 			}
 			got, err := readContainerInfo(c.name())
 			if tt.statErr {
@@ -93,7 +93,7 @@ func TestReadContainerInfo(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := containerInfo{name: c.name(), catalogue: wantCatalogue,
+			want := containerInfo{name: c.name(), catalog: wantCatalog,
 				build: "20200905 (fsl_6.0.3_20200905)", categories: wantCategories,
 				licence: "Apache-2.0, MIT", doi: "https://doi.org/1, https://doi.org/2", gui: "yes", location: wantLocation}
 			if got != want {

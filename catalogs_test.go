@@ -10,34 +10,34 @@ import (
 	"testing"
 )
 
-func TestLoadCatalogueList(t *testing.T) {
+func TestLoadCatalogList(t *testing.T) {
 	const a = `{"name": "neuroimaging", "url": "https://example.org/neuroimaging/apps.json", "use": true}`
 	const b = `{"name": "mylab", "url": "https://lab.example/neuroimaging/apps.json", "use": false}`
 	tests := []struct {
 		name    string
-		json    string // written to catalogues.json; no file when empty
-		dir     bool   // create catalogues.json as a directory to force a read fail
-		want    []catalogue
+		json    string // written to catalogs.json; no file when empty
+		dir     bool   // create catalogs.json as a directory to force a read fail
+		want    []catalog
 		wantErr string
 	}{
 		{name: "missing file"},
-		{name: "empty list", json: "[]", want: []catalogue{}},
-		{name: "in order", json: "[" + a + ", " + b + "]", want: []catalogue{
+		{name: "empty list", json: "[]", want: []catalog{}},
+		{name: "in order", json: "[" + a + ", " + b + "]", want: []catalog{
 			{Name: "neuroimaging", URL: "https://example.org/neuroimaging/apps.json", Use: true},
 			{Name: "mylab", URL: "https://lab.example/neuroimaging/apps.json"}}},
 		{name: "same URL under two names",
 			json: "[" + a + `, {"name": "neuro", "url": "https://example.org/neuroimaging/apps.json", "use": true}]`,
-			want: []catalogue{
+			want: []catalog{
 				{Name: "neuroimaging", URL: "https://example.org/neuroimaging/apps.json", Use: true},
 				{Name: "neuro", URL: "https://example.org/neuroimaging/apps.json", Use: true}}},
 		{name: "share", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"dir":"/share","layout":"{tool}/{version}/{date}"}]`,
-			want: []catalogue{{Name: "a", URL: "https://e.org/a.json", Use: true, Dir: "/share", Layout: "{tool}/{version}/{date}"}}},
+			want: []catalog{{Name: "a", URL: "https://e.org/a.json", Use: true, Dir: "/share", Layout: "{tool}/{version}/{date}"}}},
 		{name: "relative share", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"dir":"share"}]`, wantErr: "invalid dir"},
 		{name: "bad layout", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"dir":"/share","layout":"{name}"}]`, wantErr: "invalid layout"},
 		{name: "layout without dir", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"layout":"{tool}/{version}/{date}"}]`, wantErr: "layout without a dir"},
 		{name: "dir case", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"Dir":"/share"}]`, wantErr: `unknown field "Dir"`},
 		{name: "layout case", json: `[{"name":"a","url":"https://e.org/a.json","use":true,"Layout":"{tool}/{version}/{date}"}]`, wantErr: `unknown field "Layout"`},
-		{name: "path is a directory", dir: true, wantErr: "reading catalogues: "},
+		{name: "path is a directory", dir: true, wantErr: "reading catalogs: "},
 		{name: "invalid JSON", json: "[", wantErr: "unexpected EOF"},
 		{name: "anything after the list", json: "[] []", wantErr: "unexpected data after the list"},
 		{name: "top-level null", json: "null", wantErr: "not a JSON array"},
@@ -47,26 +47,26 @@ func TestLoadCatalogueList(t *testing.T) {
 		{name: "field names match exactly", json: `[{"Name": "a", "url": "https://e.org/a.json", "USE": true}]`,
 			wantErr: `unknown field "Name"`},
 		{name: "use missing", json: `[{"name": "a", "url": "https://e.org/a.json"}]`,
-			wantErr: `catalogue "a" has no "use"`},
+			wantErr: `catalog "a" has no "use"`},
 		{name: "use null", json: `[{"name": "a", "url": "https://e.org/a.json", "use": null}]`,
-			wantErr: `catalogue "a" has no "use"`},
+			wantErr: `catalog "a" has no "use"`},
 		{name: "use as a string", json: `[{"name": "a", "url": "https://e.org/a.json", "use": "true"}]`,
 			wantErr: "cannot unmarshal string"},
 		{name: "name missing", json: `[{"url": "https://e.org/a.json", "use": true}]`,
-			wantErr: `invalid catalogue name ""`},
+			wantErr: `invalid catalog name ""`},
 		{name: "url null", json: `[{"name": "a", "url": null, "use": true}]`,
-			wantErr: `catalogue "a" has an invalid URL: must start with https:// or http://`},
+			wantErr: `catalog "a" has an invalid URL: must start with https:// or http://`},
 		{name: "bad name", json: `[{"name": "My Lab", "url": "https://e.org/a.json", "use": true}]`,
-			wantErr: `invalid catalogue name "My Lab"`},
+			wantErr: `invalid catalog name "My Lab"`},
 		{name: "credentials in the URL", json: `[{"name": "a", "url": "https://u:p@e.org/a.json", "use": true}]`,
-			wantErr: `catalogue "a" has an invalid URL: must not contain credentials`},
+			wantErr: `catalog "a" has an invalid URL: must not contain credentials`},
 		{name: "name listed twice", json: "[" + a + ", " + a + "]",
-			wantErr: `catalogue "neuroimaging" is listed twice`},
+			wantErr: `catalog "neuroimaging" is listed twice`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "catalogues.json")
+			path := filepath.Join(t.TempDir(), "catalogs.json")
 			if tt.json != "" {
 				if err := os.WriteFile(path, []byte(tt.json), 0o600); err != nil {
 					t.Fatal(err)
@@ -77,15 +77,15 @@ func TestLoadCatalogueList(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, err := loadCatalogueList(path)
+			got, err := loadCatalogList(path)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
 				}
 				// os errors are *fs.PathError, which already include the path.
-				prefix := "reading catalogues " + path + ": "
+				prefix := "reading catalogs " + path + ": "
 				if tt.dir {
-					prefix = "reading catalogues: "
+					prefix = "reading catalogs: "
 				}
 				if !strings.HasPrefix(err.Error(), prefix) || !strings.Contains(err.Error(), path) {
 					t.Errorf("error = %q, want it to start with %q and name the file", err, prefix)
@@ -96,27 +96,27 @@ func TestLoadCatalogueList(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !slices.Equal(got, tt.want) {
-				t.Errorf("catalogues = %v, want %v", got, tt.want)
+				t.Errorf("catalogs = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestWriteCatalogueList(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sciget", "catalogues.json")
+func TestWriteCatalogList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sciget", "catalogs.json")
 	tests := []struct {
-		name       string
-		catalogues []catalogue
-		want       string
+		name     string
+		catalogs []catalog
+		want     string
 	}{
 		{name: "none is an empty list", want: "[]\n"},
-		{name: "one", catalogues: []catalogue{{Name: "a", URL: "https://e.org/a.json", Use: true}},
+		{name: "one", catalogs: []catalog{{Name: "a", URL: "https://e.org/a.json", Use: true}},
 			want: "[\n  {\n    \"name\": \"a\",\n    \"url\": \"https://e.org/a.json\",\n    \"use\": true\n  }\n]\n"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := writeCatalogueList(path, tt.catalogues); err != nil {
+			if err := writeCatalogList(path, tt.catalogs); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(path)
@@ -126,14 +126,14 @@ func TestWriteCatalogueList(t *testing.T) {
 			if string(data) != tt.want {
 				t.Errorf("file = %q, want %q", data, tt.want)
 			}
-			if _, err := loadCatalogueList(path); err != nil {
+			if _, err := loadCatalogList(path); err != nil {
 				t.Errorf("written file does not load: %v", err)
 			}
 		})
 	}
 }
 
-func TestCheckCatalogueName(t *testing.T) {
+func TestCheckCatalogName(t *testing.T) {
 	tests := []struct {
 		name    string
 		value   string
@@ -153,14 +153,14 @@ func TestCheckCatalogueName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := checkCatalogueName(tt.value); (err != nil) != tt.wantErr {
-				t.Errorf("checkCatalogueName(%q) = %v, want error: %v", tt.value, err, tt.wantErr)
+			if err := checkCatalogName(tt.value); (err != nil) != tt.wantErr {
+				t.Errorf("checkCatalogName(%q) = %v, want error: %v", tt.value, err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestCheckCatalogueURL(t *testing.T) {
+func TestCheckCatalogURL(t *testing.T) {
 	tests := []struct {
 		name    string
 		value   string
@@ -184,7 +184,7 @@ func TestCheckCatalogueURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := checkCatalogueURL(tt.value)
+			err := checkCatalogURL(tt.value)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Errorf("error = %v, want none", err)
@@ -196,18 +196,18 @@ func TestCheckCatalogueURL(t *testing.T) {
 	}
 }
 
-func TestCatalogueDir(t *testing.T) {
+func TestCatalogDir(t *testing.T) {
 	tests := []struct {
 		name string
-		c    catalogue
+		c    catalog
 		want string
 	}{
-		{name: "name and URL hash", c: catalogue{Name: "neuroimaging", URL: "https://example.org/neuroimaging/apps.json"},
-			want: "/c/catalogues/neuroimaging-77a7c3e239d9"},
-		{name: "same name, another URL", c: catalogue{Name: "neuroimaging", URL: "https://mirror.example.org/neuroimaging/apps.json"},
-			want: "/c/catalogues/neuroimaging-b5791028df25"},
-		{name: "same URL, another name", c: catalogue{Name: "neuro", URL: "https://example.org/neuroimaging/apps.json"},
-			want: "/c/catalogues/neuro-77a7c3e239d9"},
+		{name: "name and URL hash", c: catalog{Name: "neuroimaging", URL: "https://example.org/neuroimaging/apps.json"},
+			want: "/c/catalogs/neuroimaging-77a7c3e239d9"},
+		{name: "same name, another URL", c: catalog{Name: "neuroimaging", URL: "https://mirror.example.org/neuroimaging/apps.json"},
+			want: "/c/catalogs/neuroimaging-b5791028df25"},
+		{name: "same URL, another name", c: catalog{Name: "neuro", URL: "https://example.org/neuroimaging/apps.json"},
+			want: "/c/catalogs/neuro-77a7c3e239d9"},
 	}
 
 	for _, tt := range tests {
@@ -219,8 +219,8 @@ func TestCatalogueDir(t *testing.T) {
 	}
 }
 
-func TestWriteCatalogueTable(t *testing.T) {
-	catalogues := []catalogue{
+func TestWriteCatalogTable(t *testing.T) {
+	catalogs := []catalog{
 		{Name: "mylab", URL: "https://lab.example/a.json", Use: true, Dir: "/share"},
 		{Name: "old", URL: "https://old.example/a.json"},
 		{Name: "neuroimaging", URL: "https://example.org/a.json", Use: true},
@@ -243,7 +243,7 @@ func TestWriteCatalogueTable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out bytes.Buffer
-			if err := writeCatalogueTable(&out, catalogues, tt.terminal); err != nil {
+			if err := writeCatalogTable(&out, catalogs, tt.terminal); err != nil {
 				t.Fatal(err)
 			}
 			if got := out.String(); got != tt.want {

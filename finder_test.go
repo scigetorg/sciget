@@ -52,7 +52,7 @@ func TestListCommands(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, _, store := localCatalogue(t)
+			c, _, store := localCatalog(t)
 			base := filepath.Dir(store)
 			apptainer, runs := fakeFinderApptainer(t, tt.failing)
 			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{

@@ -9,14 +9,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// testContainers is a small catalogue, sorted as readContainers sorts.
+// testContainers is a small catalog, sorted as readContainers sorts.
 var testContainers = []container{
 	{tool: "afni", version: "21.2.00", buildDate: "20210714", categories: []string{"functional imaging"},
-		catalogue: "neuro"},
-	{tool: "freesurfer", version: "7.4.1", buildDate: "20230101", catalogue: "neuro"},
+		catalog: "neuro"},
+	{tool: "freesurfer", version: "7.4.1", buildDate: "20230101", catalog: "neuro"},
 	{tool: "fsl", version: "6.0.3", buildDate: "20200905", graphical: true,
-		categories: []string{"image registration", "functional imaging"}, catalogue: "neuro"},
-	{tool: "fsl", version: "6.0.3", buildDate: "20240101", catalogue: "mylab", shadowed: true},
+		categories: []string{"image registration", "functional imaging"}, catalog: "neuro"},
+	{tool: "fsl", version: "6.0.3", buildDate: "20240101", catalog: "mylab", shadowed: true},
 	{tool: "fsl", version: "6.0.4", buildDate: "20210105", graphical: true},
 	{tool: "fsl", version: "6.0.4_arm64", buildDate: "20260101", hidden: true},
 }
@@ -67,11 +67,11 @@ func TestWriteContainers(t *testing.T) {
 				"fsl/6.0.3\tneuro\timage registration, functional imaging\tyes\t\n" +
 				"fsl/6.0.3\tmylab\t\t\t(shadowed)\n"},
 		{name: "aligned with a header on a terminal", terminal: true,
-			want: fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "NAME", "CATALOGUE", "CATEGORIES", "GUI", "NOTE") +
-				fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "afni/21.2.00", "neuro", "functional imaging", "", "") +
-				fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "freesurfer/7.4.1", "neuro", "", "", "") +
-				fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "fsl/6.0.3", "neuro", "image registration, functional imaging", "yes", "") +
-				fmt.Sprintf("%-18s%-11s%-40s%-5s%s\n", "fsl/6.0.3", "mylab", "", "", "(shadowed)")},
+			want: fmt.Sprintf("%-18s%-9s%-40s%-5s%s\n", "NAME", "CATALOG", "CATEGORIES", "GUI", "NOTE") +
+				fmt.Sprintf("%-18s%-9s%-40s%-5s%s\n", "afni/21.2.00", "neuro", "functional imaging", "", "") +
+				fmt.Sprintf("%-18s%-9s%-40s%-5s%s\n", "freesurfer/7.4.1", "neuro", "", "", "") +
+				fmt.Sprintf("%-18s%-9s%-40s%-5s%s\n", "fsl/6.0.3", "neuro", "image registration, functional imaging", "yes", "") +
+				fmt.Sprintf("%-18s%-9s%-40s%-5s%s\n", "fsl/6.0.3", "mylab", "", "", "(shadowed)")},
 	}
 
 	for _, tt := range tests {
@@ -90,10 +90,10 @@ func TestWriteContainers(t *testing.T) {
 func TestCompleteNames(t *testing.T) {
 	const toolDirective = cobra.ShellCompDirectiveNoSpace | cobra.ShellCompDirectiveNoFileComp
 
-	// A hidden container in the first catalogue shadows a visible copy.
+	// A hidden container in the first catalog shadows a visible copy.
 	hiddenWinner := []container{
-		{tool: "x", version: "1", buildDate: "1", catalogue: "a", hidden: true},
-		{tool: "x", version: "1", buildDate: "2", catalogue: "b", shadowed: true},
+		{tool: "x", version: "1", buildDate: "1", catalog: "a", hidden: true},
+		{tool: "x", version: "1", buildDate: "2", catalog: "b", shadowed: true},
 	}
 	tests := []struct {
 		name          string

@@ -86,7 +86,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newFindCommand())
 	root.AddCommand(newConfigCommand())
 	root.AddCommand(newRefreshCommand())
-	root.AddCommand(newCatalogueCommand())
+	root.AddCommand(newCatalogCommand())
 	root.AddCommand(newInfoCommand())
 	root.AddCommand(newPullCommand())
 	root.AddCommand(newInstallCommand())

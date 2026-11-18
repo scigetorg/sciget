@@ -23,7 +23,7 @@ import (
 // pullContainer downloads c into the store unless its build is already on
 // the machine, and returns where it is and whether it was downloaded. It tries
 // each of download_urls in turn until one gives a file of the right size
-// (and SHA-256, if the catalogue has one) that Apptainer can open.
+// (and SHA-256, if the catalog has one) that Apptainer can open.
 // progress, if not nil, receives the source's host and the bytes so far;
 // warn receives a warning to show. Cancelling ctx stops the pull and
 // deletes its temporary file.
@@ -228,12 +228,12 @@ func pullQuestion(cfg config, c container) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, _, catalogues, err := readCatalogues()
+	_, _, catalogs, err := readCatalogs()
 	if err != nil {
 		return "", err
 	}
 	var where string
-	switch cat, mounted := containerShare(catalogues, c); {
+	switch cat, mounted := containerShare(catalogs, c); {
 	case cat.Dir == "":
 		where = c.name() + " hasn't been downloaded.\n"
 	case !mounted:
@@ -251,15 +251,15 @@ func pullQuestion(cfg config, c container) (string, error) {
 		"[y]es, [n]o, [A]lways (yes, saved as the default): ", nil
 }
 
-// containerShare returns the catalogue c comes from, whose Dir is its share
+// containerShare returns the catalog c comes from, whose Dir is its share
 // ("" for none), and whether that share's folder exists.
-func containerShare(catalogues []catalogue, c container) (catalogue, bool) {
-	i := findCatalogue(catalogues, c.catalogue)
-	if i < 0 || catalogues[i].Dir == "" {
-		return catalogue{}, false
+func containerShare(catalogs []catalog, c container) (catalog, bool) {
+	i := findCatalog(catalogs, c.catalog)
+	if i < 0 || catalogs[i].Dir == "" {
+		return catalog{}, false
 	}
-	_, err := os.Stat(catalogues[i].Dir)
-	return catalogues[i], !errors.Is(err, fs.ErrNotExist)
+	_, err := os.Stat(catalogs[i].Dir)
+	return catalogs[i], !errors.Is(err, fs.ErrNotExist)
 }
 
 // answerPull reads an answer to pullQuestion: an empty line or "a" means

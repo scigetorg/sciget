@@ -12,7 +12,7 @@ func newFindCommand() *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
 		Use:   "find [words...]",
-		Short: "List the containers in the catalogues in use",
+		Short: "List the containers in the catalogs in use",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			containers, err := readContainers()
 			if err != nil {
@@ -77,9 +77,9 @@ func writeContainers(w io.Writer, containers []container, terminal bool) error {
 			note = "(shadowed)"
 		}
 		fmt.Fprintf(&rows, "%s\t%s\t%s\t%s\t%s\n",
-			c.name(), c.catalogue, strings.Join(c.categories, ", "), gui, note)
+			c.name(), c.catalog, strings.Join(c.categories, ", "), gui, note)
 	}
-	return writeTable(w, terminal, "NAME\tCATALOGUE\tCATEGORIES\tGUI\tNOTE\n", rows.String())
+	return writeTable(w, terminal, "NAME\tCATALOG\tCATEGORIES\tGUI\tNOTE\n", rows.String())
 }
 
 // completeNames suggests container names in two stages: without a "/", tool

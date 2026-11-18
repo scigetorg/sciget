@@ -385,25 +385,25 @@ func (m model) View() tea.View {
 }
 
 // emptyMessage is the empty state's message for err, without control
-// characters: an error can quote a catalogue's text.
+// characters: an error can quote a catalog's text.
 func emptyMessage(err error) string {
 	return printable(emptyText(err))
 }
 
 func emptyText(err error) string {
-	var catErr *catalogueError
+	var catErr *catalogError
 	var missing *notDownloadedError
 	switch {
-	case errors.Is(err, errNoCatalogues):
-		return "No catalogues yet. Add one with 'sciget catalogue add <name> <url>'."
+	case errors.Is(err, errNoCatalogs):
+		return "No catalogs yet. Add one with 'sciget catalog add <name> <url>'."
 	case errors.Is(err, errNoneInUse):
-		return "No catalogues are in use. Turn one on with 'sciget catalogue use <name>'."
+		return "No catalogs are in use. Turn one on with 'sciget catalog use <name>'."
 	case errors.As(err, &catErr) && errors.As(err, &missing):
-		return "The catalogue " + catErr.name + " hasn't been downloaded yet."
+		return "The catalog " + catErr.name + " hasn't been downloaded yet."
 	case errors.As(err, &catErr):
-		return "The catalogue " + catErr.name + " couldn't be read: " + catErr.err.Error() + "."
+		return "The catalog " + catErr.name + " couldn't be read: " + catErr.err.Error() + "."
 	case errors.Is(err, errNoContainers):
-		return "The catalogues in use have no containers to show."
+		return "The catalogs in use have no containers to show."
 	}
 	return err.Error()
 }
@@ -511,7 +511,7 @@ func (m model) viewSoftware(put draw, l layout) {
 }
 
 func (m model) refreshPill() string {
-	label := "  Refresh catalogues" // as Check for updates
+	label := "  Refresh catalogs" // as Check for updates
 	if m.refreshing {
 		label = m.spin.View() + " Refreshing…"
 	}
@@ -563,7 +563,7 @@ func (m model) viewDetails(put draw, l layout) {
 		{"NAME", c.tool, m.th.accent.Bold(true)},
 		{"VERSION", c.version, m.th.accent.Bold(true)},
 		{"BUILT", c.buildDate, m.th.text},
-		{"CATALOGUE", c.catalogue, m.th.text},
+		{"CATALOG", c.catalog, m.th.text},
 		{"CATEGORIES", strings.Join(c.categories, " · "), m.th.text},
 		{"LOCATION", location, locStyle},
 		{"MODULE", m.module, m.th.text},

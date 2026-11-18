@@ -52,8 +52,8 @@ var configKeys = []configKey{
 	{name: "xauthority_var", check: checkEnvName},
 	{name: "tmp_vars", kind: listKind, check: eachElement(checkEnvName)},
 	{name: "tmp_target", check: checkBindTarget},
-	{name: "use_catalogue_args", kind: boolKind},
-	{name: "max_catalogue_size", kind: numberKind, check: checkCatalogueSize},
+	{name: "use_catalog_args", kind: boolKind},
+	{name: "max_catalog_size", kind: numberKind, check: checkCatalogSize},
 	{name: "display_start_command", kind: listKind, check: eachElement(checkArg)},
 	{name: "display_start_seconds", kind: numberKind, check: checkSeconds},
 	{name: "launch_check_seconds", kind: numberKind, check: checkSeconds},
@@ -512,14 +512,14 @@ func checkBindTarget(value string) error {
 	return nil
 }
 
-// maxCatalogueLimit bounds max_catalogue_size, so that limit+1 cannot
+// maxCatalogLimit bounds max_catalog_size, so that limit+1 cannot
 // overflow when a download reads one byte past it.
-const maxCatalogueLimit = 1 << 40
+const maxCatalogLimit = 1 << 40
 
-func checkCatalogueSize(value string) error {
+func checkCatalogSize(value string) error {
 	n, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || n < 1 || n > maxCatalogueLimit {
-		return fmt.Errorf("must be from 1 to %d (1 TiB)", int64(maxCatalogueLimit))
+	if err != nil || n < 1 || n > maxCatalogLimit {
+		return fmt.Errorf("must be from 1 to %d (1 TiB)", int64(maxCatalogLimit))
 	}
 	return nil
 }
@@ -553,13 +553,13 @@ func checkHTTPSURL(value string) error {
 	return nil
 }
 
-// checkDownloadURL checks a download URL template: a catalogue URL (see
-// checkCatalogueURL) with {file} exactly once.
+// checkDownloadURL checks a download URL template: a catalog URL (see
+// checkCatalogURL) with {file} exactly once.
 func checkDownloadURL(value string) error {
 	if strings.Count(value, "{file}") != 1 {
 		return errors.New("must contain {file} exactly once")
 	}
-	return checkCatalogueURL(value)
+	return checkCatalogURL(value)
 }
 
 func checkAbsolute(value string) error {

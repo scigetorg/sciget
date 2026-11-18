@@ -62,8 +62,8 @@ func TestLayoutPath(t *testing.T) {
 	}
 }
 
-// localCatalogue configures an isolated share, store and cached catalogue.
-func localCatalogue(t *testing.T) (container, catalogue, string) {
+// localCatalog configures an isolated share, store and cached catalog.
+func localCatalog(t *testing.T) (container, catalog, string) {
 	t.Helper()
 	base := t.TempDir()
 	t.Setenv("SCIGET_CONFIG", filepath.Join(base, "config.json"))
@@ -73,12 +73,12 @@ func localCatalogue(t *testing.T) (container, catalogue, string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	cat := catalogue{Name: "neuro", URL: exampleURL("neuro"), Use: true, Dir: filepath.Join(base, "share")}
-	path, err := catalogueListPath()
+	cat := catalog{Name: "neuro", URL: exampleURL("neuro"), Use: true, Dir: filepath.Join(base, "share")}
+	path, err := catalogListPath()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCatalogueList(path, []catalogue{cat}); err != nil {
+	if err := writeCatalogList(path, []catalog{cat}); err != nil {
 		t.Fatal(err)
 	}
 	cache := cat.dir(filepath.Join(base, "cache"))
@@ -91,7 +91,7 @@ func localCatalogue(t *testing.T) (container, catalogue, string) {
 	if err := os.WriteFile(filepath.Join(cache, "apps.json"), []byte(apps), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return container{tool: "fsl", version: "6.0.3", image: "fsl_6.0.3", buildDate: "20200905", catalogue: cat.Name}, cat, store
+	return container{tool: "fsl", version: "6.0.3", image: "fsl_6.0.3", buildDate: "20200905", catalog: cat.Name}, cat, store
 }
 
 // makeContainerPath creates a regular container file or sandbox directory.
@@ -145,13 +145,13 @@ func TestLocate(t *testing.T) {
 		{name: "stat error", share: true, brokenLink: true, wantErr: true},
 		{name: "share uses default despite store override", share: true, custom: true, wantPlace: "neuro"},
 		{name: "custom store", store: true, custom: true, wantPlace: "store"},
-		{name: "unsafe catalogue value", badValue: true, wantErr: true},
+		{name: "unsafe catalog value", badValue: true, wantErr: true},
 		{name: "share hit without a home directory", share: true, noHome: true, wantPlace: "neuro"},
 		{name: "older build", olderOnly: true, wantPlace: "store"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, cat, store := localCatalogue(t)
+			c, cat, store := localCatalog(t)
 			layout, err := defaultValue("container_layout")
 			if err != nil {
 				t.Fatal(err)
@@ -217,12 +217,12 @@ func TestLocate(t *testing.T) {
 				}
 			}
 			if tt.shadowed {
-				other := catalogue{Name: "lab", URL: exampleURL("lab"), Use: true, Dir: t.TempDir()}
-				path, err := catalogueListPath()
+				other := catalog{Name: "lab", URL: exampleURL("lab"), Use: true, Dir: t.TempDir()}
+				path, err := catalogListPath()
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := writeCatalogueList(path, []catalogue{cat, other}); err != nil {
+				if err := writeCatalogList(path, []catalog{cat, other}); err != nil {
 					t.Fatal(err)
 				}
 				makeContainerPath(t, other.Dir, layout, c, false)
@@ -339,7 +339,7 @@ func TestApptainerArgs(t *testing.T) {
 		global:        []string{"--silent"},
 		verbArgs:      []string{"--cleanenv", "{env}", "{xauthority}", "{tmp}", "{pwd}"},
 		extra:         []string{"--nv"},
-		catalogue:     []string{"--bind", "/dev/fuse"},
+		catalog:       []string{"--bind", "/dev/fuse"},
 		passEnv:       []string{"DISPLAY"},
 		xauthorityVar: "XAUTHORITY",
 		tmpVars:       []string{"TMP", "TMPDIR", "TEMP", "TEMPDIR"},

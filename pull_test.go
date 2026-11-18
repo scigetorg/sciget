@@ -47,7 +47,7 @@ func TestPullContainer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, _, store := localCatalogue(t)
+			c, _, store := localCatalog(t)
 			gets := 0
 			var urls []string
 			for _, s := range tt.sources {
@@ -211,7 +211,7 @@ func TestPullOnRun(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, cat, store := localCatalogue(t)
+			c, cat, store := localCatalog(t)
 			switch tt.share {
 			case "present":
 				if err := os.MkdirAll(cat.Dir, 0o755); err != nil {
@@ -219,8 +219,8 @@ func TestPullOnRun(t *testing.T) {
 				}
 			case "none":
 				cat.Dir = ""
-				path, _ := catalogueListPath()
-				if err := writeCatalogueList(path, []catalogue{cat}); err != nil {
+				path, _ := catalogListPath()
+				if err := writeCatalogList(path, []catalog{cat}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -276,7 +276,7 @@ func TestPullOnRun(t *testing.T) {
 }
 
 func TestPullContainerCancel(t *testing.T) {
-	c, _, store := localCatalogue(t)
+	c, _, store := localCatalog(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -308,14 +308,14 @@ func TestPullContainerCancel(t *testing.T) {
 }
 
 func TestPullAll(t *testing.T) {
-	c, cat, store := localCatalogue(t)
+	c, cat, store := localCatalog(t)
 	// Four containers: fsl/1 to fsl/4.
 	var apps []string
 	var cs []container
 	for i := 1; i <= 4; i++ {
 		v := strconv.Itoa(i)
 		apps = append(apps, `"fsl `+v+`":{"version":"20200905"}`)
-		cs = append(cs, container{tool: "fsl", version: v, image: "fsl_" + v, buildDate: "20200905", catalogue: c.catalogue})
+		cs = append(cs, container{tool: "fsl", version: v, image: "fsl_" + v, buildDate: "20200905", catalog: c.catalog})
 	}
 	cache := cat.dir(filepath.Join(filepath.Dir(store), "cache"))
 	if err := os.WriteFile(filepath.Join(cache, "apps.json"), []byte(`{"fsl":{"apps":{`+strings.Join(apps, ",")+`}}}`), 0o600); err != nil {

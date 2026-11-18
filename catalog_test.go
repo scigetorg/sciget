@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestLoadCatalogue(t *testing.T) {
+func TestLoadCatalog(t *testing.T) {
 	tests := []struct {
 		name           string
 		json           string // written to apps.json; no file when empty
@@ -22,8 +22,8 @@ func TestLoadCatalogue(t *testing.T) {
 		published      download
 		wantErr        string
 	}{
-		{name: "missing file", wantErr: "no catalogue at "},
-		{name: "path is a directory", dir: true, wantErr: "reading catalogue: "},
+		{name: "missing file", wantErr: "no catalog at "},
+		{name: "path is a directory", dir: true, wantErr: "reading catalog: "},
 		{name: "invalid JSON", json: "{", wantErr: "unexpected end of JSON input"},
 		{name: "null", json: "null", wantErr: "no containers"},
 		{name: "no entries", json: `{"fsl": {"apps": {}}}`, wantErr: "no containers"},
@@ -63,7 +63,7 @@ func TestLoadCatalogue(t *testing.T) {
 		{name: "escape in a tool name", json: "{\"fsl\\u001b[2J\": {\"apps\": {\"fsl 1\": {\"version\": \"1\"}}}}",
 			wantErr: "has a control character"},
 		{name: "bidi override in an entry key", json: `{"fsl": {"apps": {"GUI\u202e-fsl 1": {"version": "1"}}}}`,
-			wantErr: `catalogue entry "GUI\u202e-fsl 1" of "fsl" has a control character`},
+			wantErr: `catalog entry "GUI\u202e-fsl 1" of "fsl" has a control character`},
 		{name: "newline in a version", json: `{"fsl": {"apps": {"fsl 1\n": {"version": "1"}}}}`,
 			wantErr: "has a control character"},
 		{name: "escape in a category", json: `{"fsl": {"categories": ["a\u001b]0;x\u0007"], "apps": {"fsl 1": {"version": "1"}}}}`,
@@ -132,17 +132,17 @@ func TestLoadCatalogue(t *testing.T) {
 			want: []string{"afni/21.2.00 afni_21.2.00_3 []", "fsl/6.0.9 fsl_6.0.9_1 []", "fsl/6.0.10 fsl_6.0.10_2 []"}},
 		{name: "conflicting build dates",
 			json:    `{"fsl": {"apps": {"fsl 6.0.3": {"version": "1"}, "fsleyesGUI-fsl 6.0.3": {"version": "2"}}}}`,
-			wantErr: "catalogue lists fsl/6.0.3 with build dates "},
+			wantErr: "catalog lists fsl/6.0.3 with build dates "},
 		{name: "key without a version", json: `{"fsl": {"apps": {"fsl": {"version": "1"}}}}`,
-			wantErr: `catalogue entry "fsl" has no version`},
+			wantErr: `catalog entry "fsl" has no version`},
 		{name: "key ending in a space", json: `{"fsl": {"apps": {"fsl ": {"version": "1"}}}}`,
-			wantErr: `catalogue entry "fsl " has no version`},
+			wantErr: `catalog entry "fsl " has no version`},
 		{name: "image without a version", json: `{"fsl": {"apps": {"fsl x": {"version": "1", "image": "fsl_"}}}}`,
-			wantErr: `catalogue entry "fsl x" has no version`},
+			wantErr: `catalog entry "fsl x" has no version`},
 		{name: "image for another tool", json: `{"fsl": {"apps": {"fsl 1.0": {"version": "1", "image": "notfsl_1.0"}}}}`,
-			wantErr: `catalogue entry "fsl 1.0" has image "notfsl_1.0", which does not start with "fsl_"`},
+			wantErr: `catalog entry "fsl 1.0" has image "notfsl_1.0", which does not start with "fsl_"`},
 		{name: "no build date", json: `{"fsl": {"apps": {"fsl 6.0.3": {"exec": ""}}}}`,
-			wantErr: `catalogue entry "fsl 6.0.3" has no build date`},
+			wantErr: `catalog entry "fsl 6.0.3" has no build date`},
 	}
 
 	for _, tt := range tests {
@@ -158,18 +158,18 @@ func TestLoadCatalogue(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			containers, err := loadCatalogue(path)
+			containers, err := loadCatalog(path)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
 				}
-				prefix := "reading catalogue " + path + ": "
+				prefix := "reading catalog " + path + ": "
 				switch {
 				case tt.dir:
 					// os errors are *fs.PathError, which already include the path.
-					prefix = "reading catalogue: "
+					prefix = "reading catalog: "
 				case tt.json == "":
-					prefix = "no catalogue at " + path + "; run 'sciget refresh'"
+					prefix = "no catalog at " + path + "; run 'sciget refresh'"
 				}
 				if !strings.HasPrefix(err.Error(), prefix) {
 					t.Errorf("error = %q, want it to start with %q", err, prefix)
@@ -216,21 +216,21 @@ func TestLoadCatalogue(t *testing.T) {
 }
 
 func TestReadContainers(t *testing.T) {
-	use := []catalogue{{Name: "neuro", URL: exampleURL("neuro"), Use: true}}
+	use := []catalog{{Name: "neuro", URL: exampleURL("neuro"), Use: true}}
 	for _, tt := range []struct {
-		name       string
-		catalogues []catalogue
-		apps       string // the catalogue's apps.json; not downloaded when empty
-		wantIs     error
-		wantName   string // the catalogueError's name
-		missing    bool   // a notDownloadedError
-		want       int
+		name     string
+		catalogs []catalog
+		apps     string // the catalog's apps.json; not downloaded when empty
+		wantIs   error
+		wantName string // the catalogError's name
+		missing  bool   // a notDownloadedError
+		want     int
 	}{
-		{name: "no catalogues", wantIs: errNoCatalogues},
-		{name: "none in use", catalogues: []catalogue{{Name: "neuro", URL: exampleURL("neuro")}}, wantIs: errNoneInUse},
-		{name: "not downloaded", catalogues: use, wantName: "neuro", missing: true},
-		{name: "broken", catalogues: use, apps: "{", wantName: "neuro"},
-		{name: "read", catalogues: use, apps: `{"fsl": {"apps": {"fsl 1": {"version": "1"}}}}`, want: 1},
+		{name: "no catalogs", wantIs: errNoCatalogs},
+		{name: "none in use", catalogs: []catalog{{Name: "neuro", URL: exampleURL("neuro")}}, wantIs: errNoneInUse},
+		{name: "not downloaded", catalogs: use, wantName: "neuro", missing: true},
+		{name: "broken", catalogs: use, apps: "{", wantName: "neuro"},
+		{name: "read", catalogs: use, apps: `{"fsl": {"apps": {"fsl 1": {"version": "1"}}}}`, want: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			base := t.TempDir()
@@ -239,15 +239,15 @@ func TestReadContainers(t *testing.T) {
 			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{"cache_dir": cacheDir}); err != nil {
 				t.Fatal(err)
 			}
-			path, err := catalogueListPath()
+			path, err := catalogListPath()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := writeCatalogueList(path, tt.catalogues); err != nil {
+			if err := writeCatalogList(path, tt.catalogs); err != nil {
 				t.Fatal(err)
 			}
 			if tt.apps != "" {
-				dir := tt.catalogues[0].dir(cacheDir)
+				dir := tt.catalogs[0].dir(cacheDir)
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -259,9 +259,9 @@ func TestReadContainers(t *testing.T) {
 			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
 				t.Errorf("error = %v, want %v", err, tt.wantIs)
 			}
-			var catErr *catalogueError
+			var catErr *catalogError
 			if errors.As(err, &catErr) != (tt.wantName != "") || tt.wantName != "" && catErr.name != tt.wantName {
-				t.Errorf("error = %v, want a catalogueError named %q", err, tt.wantName)
+				t.Errorf("error = %v, want a catalogError named %q", err, tt.wantName)
 			}
 			var missing *notDownloadedError
 			if errors.As(err, &missing) != tt.missing {
@@ -300,12 +300,12 @@ func TestCompareVersions(t *testing.T) {
 
 func TestLookupContainer(t *testing.T) {
 	for _, tt := range []struct {
-		name          string
-		query         string
-		wantCatalogue string
-		wantErr       string
+		name        string
+		query       string
+		wantCatalog string
+		wantErr     string
 	}{
-		{name: "first wins", query: "fsl/6.0.3", wantCatalogue: "neuro"},
+		{name: "first wins", query: "fsl/6.0.3", wantCatalog: "neuro"},
 		{name: "unknown version", query: "fsl/9", wantErr: "no container named \"fsl/9\"; run 'sciget find fsl'"},
 		{name: "unknown tool", query: "spm", wantErr: "no container named \"spm\"; run 'sciget find spm'"},
 	} {
@@ -320,8 +320,8 @@ func TestLookupContainer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.catalogue != tt.wantCatalogue {
-				t.Errorf("catalogue = %q, want %q", got.catalogue, tt.wantCatalogue)
+			if got.catalog != tt.wantCatalog {
+				t.Errorf("catalog = %q, want %q", got.catalog, tt.wantCatalog)
 			}
 		})
 	}

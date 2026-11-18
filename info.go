@@ -10,7 +10,7 @@ import (
 
 // containerInfo holds the display values for one container.
 type containerInfo struct {
-	name, catalogue, build, categories, licence, doi, gui, location string
+	name, catalog, build, categories, licence, doi, gui, location string
 }
 
 // readContainerInfo returns a winner's metadata and local location.
@@ -24,7 +24,7 @@ func readContainerInfo(name string) (containerInfo, error) {
 		return containerInfo{}, err
 	}
 	info := containerInfo{
-		name: c.name(), catalogue: c.catalogue,
+		name: c.name(), catalog: c.catalog,
 		build:      fmt.Sprintf("%s (%s)", c.buildDate, c.fileName()),
 		categories: strings.Join(c.categories, ", "),
 		licence:    strings.Join(c.licences, ", "), doi: strings.Join(c.dois, ", "), gui: "no",
@@ -32,11 +32,11 @@ func readContainerInfo(name string) (containerInfo, error) {
 	var shadowed []string
 	for _, other := range containers {
 		if other.name() == name && other.shadowed {
-			shadowed = append(shadowed, other.catalogue)
+			shadowed = append(shadowed, other.catalog)
 		}
 	}
 	if len(shadowed) > 0 {
-		info.catalogue += " (also in: " + strings.Join(shadowed, ", ") + ", shadowed)"
+		info.catalog += " (also in: " + strings.Join(shadowed, ", ") + ", shadowed)"
 	}
 	if info.categories == "" {
 		info.categories = "(none)"
@@ -82,7 +82,7 @@ func newInfoCommand() *cobra.Command {
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(),
 				"%-13s%s\n%-13s%s\n%-13s%s\n%-13s%s\n%-13s%s\n%-13s%s\n%-13s%s\n%-13s%s\n",
-				"Name:", info.name, "Catalogue:", info.catalogue, "Build:", info.build,
+				"Name:", info.name, "Catalog:", info.catalog, "Build:", info.build,
 				"Categories:", info.categories, "Licence:", info.licence, "DOI:", info.doi,
 				"GUI:", info.gui, "Location:", info.location)
 			return err

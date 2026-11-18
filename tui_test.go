@@ -210,9 +210,9 @@ func TestRefreshOutcome(t *testing.T) {
 		err     error
 		want    callout
 	}{
-		{name: "up to date", results: []refreshResult{{name: "a"}}, want: callout{state: "refreshed", detail: "Catalogues up to date"}},
+		{name: "up to date", results: []refreshResult{{name: "a"}}, want: callout{state: "refreshed", detail: "Catalogs up to date"}},
 		{name: "updated", results: []refreshResult{{name: "a", changed: true}, {name: "b", changed: true}},
-			want: callout{state: "refreshed", detail: "Updated 2 catalogues"}},
+			want: callout{state: "refreshed", detail: "Updated 2 catalogs"}},
 		{name: "partial", results: []refreshResult{{name: "a", changed: true}, {name: "b", err: failed}},
 			want: callout{state: "failed", detail: "Refreshed 1, but b: timeout"}},
 		{name: "all failed", results: []refreshResult{{name: "a", err: failed}},
@@ -256,12 +256,12 @@ func TestRefreshMsg(t *testing.T) {
 	t.Run("a failed re-read keeps the list", func(t *testing.T) {
 		m := launchModel(t)
 		m.handle(refreshMsg{results: []refreshResult{{name: "neuro"}}, readErr: errors.New("broken")})
-		if len(m.apps) != 2 || m.statusFor().detail != "Couldn't read the catalogues: broken" {
+		if len(m.apps) != 2 || m.statusFor().detail != "Couldn't read the catalogs: broken" {
 			t.Errorf("apps %v, status %+v", m.apps, m.statusFor())
 		}
 	})
 	t.Run("an empty state recovers", func(t *testing.T) {
-		m := newModel(tuiSettings{cacheDir: t.TempDir()}, nil, &catalogueError{name: "neuro", err: &notDownloadedError{}}, tuiState{})
+		m := newModel(tuiSettings{cacheDir: t.TempDir()}, nil, &catalogError{name: "neuro", err: &notDownloadedError{}}, tuiState{})
 		m.handle(tea.WindowSizeMsg{Width: 160, Height: 45})
 		next, _ := m.Update(refreshMsg{results: []refreshResult{{name: "neuro", changed: true}}, containers: tuiContainers})
 		m = next.(model)
@@ -294,12 +294,12 @@ func TestRefreshCmd(t *testing.T) {
 		"cache_dir": filepath.Join(base, "cache"), "network_timeout_seconds": "1"}); err != nil {
 		t.Fatal(err)
 	}
-	path, err := catalogueListPath()
+	path, err := catalogListPath()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cat := catalogue{Name: "neuro", URL: "https://" + ln.Addr().String() + "/apps.json", Use: true}
-	if err := writeCatalogueList(path, []catalogue{cat}); err != nil {
+	cat := catalog{Name: "neuro", URL: "https://" + ln.Addr().String() + "/apps.json", Use: true}
+	if err := writeCatalogList(path, []catalog{cat}); err != nil {
 		t.Fatal(err)
 	}
 	// An earlier copy, so the re-read after the refresh succeeds.
@@ -342,9 +342,9 @@ func TestRestoreState(t *testing.T) {
 		t.Error("Ctrl-V would run a clipboard program")
 	}
 
-	// Quitting while the catalogues cannot be read keeps the selection.
+	// Quitting while the catalogs cannot be read keeps the selection.
 	dir := t.TempDir()
-	empty := newModel(tuiSettings{cacheDir: dir}, nil, &catalogueError{name: "neuro", err: &notDownloadedError{}}, st)
+	empty := newModel(tuiSettings{cacheDir: dir}, nil, &catalogError{name: "neuro", err: &notDownloadedError{}}, st)
 	empty.save()
 	if got := loadState(statePath(dir)); got.App != "itksnap" || got.Version != "4.4.0" ||
 		got.Category != "segmentation" || got.Search != "i" || len(got.Log) != 1 {
@@ -370,7 +370,7 @@ func TestModuleText(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, cat, store := localCatalogue(t)
+			c, cat, store := localCatalog(t)
 			base := filepath.Dir(store)
 			moduleDir := filepath.Join(base, "modules")
 			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{

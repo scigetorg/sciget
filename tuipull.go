@@ -210,7 +210,7 @@ func (m *model) startPull(c container) tea.Cmd {
 			var out, skipped bytes.Buffer
 			_, err = installContainer(ctx, &out, &skipped, cfg, c, loc)
 			installed = strings.TrimSpace(out.String())
-			if line, lineErr := moduleUseLine(cfg, c.catalogue); err == nil && lineErr == nil && line != "" {
+			if line, lineErr := moduleUseLine(cfg, c.catalog); err == nil && lineErr == nil && line != "" {
 				installed += " · to use it, first run: " + line
 			}
 			warnings = append(warnings, lines(skipped.String())...)

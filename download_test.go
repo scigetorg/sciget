@@ -31,7 +31,7 @@ func TestDownloadFile(t *testing.T) {
 		{name: "download", wantCalls: true},
 		{name: "matching SHA-256", want: download{size: int64(len(body)), sha256: goodHash}, wantCalls: true},
 		{name: "wrong SHA-256", want: download{sha256: strings.Repeat("0", 64)}, wantErr: "SHA-256 does not match"},
-		{name: "size differs from the catalogue", want: download{size: 5}, wantErr: "but the catalogue says 5"},
+		{name: "size differs from the catalog", want: download{size: 5}, wantErr: "but the catalog says 5"},
 		{name: "not found", status: http.StatusNotFound, wantErr: "404"},
 		{name: "no size", headless: true, wantErr: "no size given"},
 		{name: "short body", short: true, wantErr: "unexpected EOF"},

@@ -13,8 +13,8 @@ import (
 	"unicode"
 )
 
-// container is one row of the catalogue: a single container file, which may
-// back several catalogue entries (a command-line entry and its graphical
+// container is one row of the catalog: a single container file, which may
+// back several catalog entries (a command-line entry and its graphical
 // ones).
 type container struct {
 	tool          string // "fsl"
@@ -27,13 +27,13 @@ type container struct {
 	categories    []string
 	graphical     bool     // some entry has a graphical command
 	hidden        bool     // every entry is hidden
-	catalogue     string   // the name of the catalogue it comes from
-	shadowed      bool     // an earlier catalogue in use has the same name
+	catalog       string   // the name of the catalog it comes from
+	shadowed      bool     // an earlier catalog in use has the same name
 	entries       []entry  // visible entries with a command, in key order
-	published     download // the image's size and SHA-256, if the catalogue gives them
+	published     download // the image's size and SHA-256, if the catalog gives them
 }
 
-// entry is a visible catalogue entry that runs a command in its container,
+// entry is a visible catalog entry that runs a command in its container,
 // such as a graphical program.
 type entry struct {
 	key   string // "fsleyesGUI-fsl 6.0.3"
@@ -48,15 +48,15 @@ func (c container) name() string { return c.tool + "/" + c.version }
 // "fsl_6.0.3_20200905".
 func (c container) fileName() string { return c.image + "_" + c.buildDate }
 
-// catalogueTool is one tool in apps.json, holding its entries by key.
-type catalogueTool struct {
-	Categories []string                `json:"categories"`
-	Apps       map[string]catalogueApp `json:"apps"`
+// catalogTool is one tool in apps.json, holding its entries by key.
+type catalogTool struct {
+	Categories []string              `json:"categories"`
+	Apps       map[string]catalogApp `json:"apps"`
 }
 
-// catalogueApp is one entry of apps.json. Its "version" field holds the
+// catalogApp is one entry of apps.json. Its "version" field holds the
 // container's build date, not the software version.
-type catalogueApp struct {
+type catalogApp struct {
 	ApptainerArgs []string `json:"apptainer_args"`
 	Licences      []string `json:"license"`
 	DOI           string   `json:"doi"`
@@ -68,76 +68,76 @@ type catalogueApp struct {
 	Size          int64    `json:"size"`
 }
 
-// readContainers returns the containers of every catalogue in use, sorted by
-// tool, then version, then catalogue order. A container whose name an
-// earlier catalogue also has is marked shadowed.
+// readContainers returns the containers of every catalog in use, sorted by
+// tool, then version, then catalog order. A container whose name an
+// earlier catalog also has is marked shadowed.
 func readContainers() ([]container, error) {
-	cacheDir, used, err := usedCatalogues()
+	cacheDir, used, err := usedCatalogs()
 	if err != nil {
 		return nil, err
 	}
 	var all []container
 	seen := map[string]bool{}
 	for _, cat := range used {
-		containers, err := loadCatalogue(filepath.Join(cat.dir(cacheDir), "apps.json"))
+		containers, err := loadCatalog(filepath.Join(cat.dir(cacheDir), "apps.json"))
 		if err != nil {
-			return nil, &catalogueError{name: cat.Name, err: err}
+			return nil, &catalogError{name: cat.Name, err: err}
 		}
 		for _, c := range containers {
-			c.catalogue = cat.Name
+			c.catalog = cat.Name
 			c.shadowed = seen[c.name()]
 			seen[c.name()] = true
 			all = append(all, c)
 		}
 	}
-	// A stable sort keeps copies of a name in catalogue order.
+	// A stable sort keeps copies of a name in catalog order.
 	slices.SortStableFunc(all, compareContainers)
 	return all, nil
 }
 
-// catalogueError is why the catalogue in use called name could not be read.
+// catalogError is why the catalog in use called name could not be read.
 // Its text is err's alone; the TUI uses the name.
-type catalogueError struct {
+type catalogError struct {
 	name string
 	err  error
 }
 
-func (e *catalogueError) Error() string { return e.err.Error() }
-func (e *catalogueError) Unwrap() error { return e.err }
+func (e *catalogError) Error() string { return e.err.Error() }
+func (e *catalogError) Unwrap() error { return e.err }
 
-// notDownloadedError is a catalogue in use whose apps.json, at path, does
+// notDownloadedError is a catalog in use whose apps.json, at path, does
 // not exist yet.
 type notDownloadedError struct{ path string }
 
 func (e *notDownloadedError) Error() string {
-	return fmt.Sprintf("no catalogue at %s; run 'sciget refresh'", e.path)
+	return fmt.Sprintf("no catalog at %s; run 'sciget refresh'", e.path)
 }
 
-// loadCatalogue reads apps.json at path and returns its containers, sorted by
+// loadCatalog reads apps.json at path and returns its containers, sorted by
 // tool and then by version.
-func loadCatalogue(path string) ([]container, error) {
+func loadCatalog(path string) ([]container, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, &notDownloadedError{path: path}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading catalogue: %w", err)
+		return nil, fmt.Errorf("reading catalog: %w", err)
 	}
-	containers, err := parseCatalogue(data)
+	containers, err := parseCatalog(data)
 	if err != nil {
-		return nil, fmt.Errorf("reading catalogue %s: %w", path, err)
+		return nil, fmt.Errorf("reading catalog %s: %w", path, err)
 	}
 	return containers, nil
 }
 
 // valueOptions are the apptainer_args options whose next word is their
-// value. Add one when a catalogue needs it.
+// value. Add one when a catalog needs it.
 var valueOptions = []string{"--bind", "-B"}
 
-// parseCatalogue returns the containers in data, the JSON of apps.json,
+// parseCatalog returns the containers in data, the JSON of apps.json,
 // sorted by tool and then by version.
-func parseCatalogue(data []byte) ([]container, error) {
-	var tools map[string]catalogueTool
+func parseCatalog(data []byte) ([]container, error) {
+	var tools map[string]catalogTool
 	if err := json.Unmarshal(data, &tools); err != nil {
 		return nil, err
 	}
@@ -146,11 +146,11 @@ func parseCatalogue(data []byte) ([]container, error) {
 	for tool, t := range tools {
 		for key, app := range t.Apps {
 			// Every string kept is checked here, once, so no output path
-			// can print a terminal escape from a catalogue.
+			// can print a terminal escape from a catalog.
 			texts := slices.Concat([]string{tool, key, app.Image, app.BuildDate, app.DOI, app.Exec},
 				t.Categories, app.Licences, app.ApptainerArgs)
 			if slices.ContainsFunc(texts, func(s string) bool { return printable(s) != s }) {
-				return nil, fmt.Errorf("catalogue entry %q of %q has a control character", key, tool)
+				return nil, fmt.Errorf("catalog entry %q of %q has a control character", key, tool)
 			}
 			if strings.TrimSpace(app.Exec) == "" {
 				app.Exec = ""
@@ -161,25 +161,25 @@ func parseCatalogue(data []byte) ([]container, error) {
 			if image == "" {
 				i := strings.LastIndex(key, " ")
 				if i < 0 {
-					return nil, fmt.Errorf("catalogue entry %q has no version", key)
+					return nil, fmt.Errorf("catalog entry %q has no version", key)
 				}
 				image = tool + "_" + key[i+1:]
 			}
 			toolVersion, ok := strings.CutPrefix(image, tool+"_")
 			switch {
 			case !ok:
-				return nil, fmt.Errorf("catalogue entry %q has image %q, which does not start with %q",
+				return nil, fmt.Errorf("catalog entry %q has image %q, which does not start with %q",
 					key, image, tool+"_")
 			case toolVersion == "":
-				return nil, fmt.Errorf("catalogue entry %q has no version", key)
+				return nil, fmt.Errorf("catalog entry %q has no version", key)
 			case app.BuildDate == "":
-				return nil, fmt.Errorf("catalogue entry %q has no build date", key)
+				return nil, fmt.Errorf("catalog entry %q has no build date", key)
 			case unsafeLayoutValue(tool) || unsafeLayoutValue(toolVersion) || unsafeLayoutValue(app.BuildDate):
-				return nil, fmt.Errorf("catalogue entry %q has a tool, version or build date with \"/\" or \"..\", or that is \".\"", key)
+				return nil, fmt.Errorf("catalog entry %q has a tool, version or build date with \"/\" or \"..\", or that is \".\"", key)
 			case app.SHA256 != "" && !sha256Hex.MatchString(app.SHA256):
-				return nil, fmt.Errorf("catalogue entry %q has a sha256 that is not 64 lowercase hex digits", key)
+				return nil, fmt.Errorf("catalog entry %q has a sha256 that is not 64 lowercase hex digits", key)
 			case app.Size < 0:
-				return nil, fmt.Errorf("catalogue entry %q has a negative size", key)
+				return nil, fmt.Errorf("catalog entry %q has a negative size", key)
 			}
 			published := download{size: app.Size, sha256: app.SHA256}
 
@@ -189,12 +189,12 @@ func parseCatalogue(data []byte) ([]container, error) {
 			args := app.ApptainerArgs
 			for i := 0; i < len(args); i++ {
 				if len(args[i]) < 2 || args[i][0] != '-' || args[i] == "--" {
-					return nil, fmt.Errorf("catalogue entry %q has apptainer_args element %q, which is not an option or its value", key, args[i])
+					return nil, fmt.Errorf("catalog entry %q has apptainer_args element %q, which is not an option or its value", key, args[i])
 				}
 				if slices.Contains(valueOptions, args[i]) {
 					i++
 					if i == len(args) || args[i] == "" || args[i][0] == '-' {
-						return nil, fmt.Errorf("catalogue entry %q has apptainer_args option %q without a value", key, args[i-1])
+						return nil, fmt.Errorf("catalog entry %q has apptainer_args option %q without a value", key, args[i-1])
 					}
 				}
 			}
@@ -207,15 +207,15 @@ func parseCatalogue(data []byte) ([]container, error) {
 				byName[c.name()] = c
 			}
 			if app.BuildDate != c.buildDate {
-				return nil, fmt.Errorf("catalogue lists %s with build dates %s and %s",
+				return nil, fmt.Errorf("catalog lists %s with build dates %s and %s",
 					c.name(), c.buildDate, app.BuildDate)
 			}
 			if !slices.Equal(app.ApptainerArgs, c.apptainerArgs) {
-				return nil, fmt.Errorf("catalogue lists %s with apptainer_args %q and %q",
+				return nil, fmt.Errorf("catalog lists %s with apptainer_args %q and %q",
 					c.name(), c.apptainerArgs, app.ApptainerArgs)
 			}
 			if published != c.published {
-				return nil, fmt.Errorf("catalogue lists %s with different sizes or SHA-256s", c.name())
+				return nil, fmt.Errorf("catalog lists %s with different sizes or SHA-256s", c.name())
 			}
 			c.licences = append(c.licences, app.Licences...)
 			if app.DOI != "" {
@@ -314,7 +314,7 @@ func lookupContainer(containers []container, name string) (container, error) {
 		}
 	}
 	tool, _, _ := strings.Cut(name, "/")
-	return container{}, fmt.Errorf("no container named %q; run 'sciget find %s' to list versions, or 'sciget refresh' to update the catalogues", name, tool)
+	return container{}, fmt.Errorf("no container named %q; run 'sciget find %s' to list versions, or 'sciget refresh' to update the catalogs", name, tool)
 }
 
 // printable returns s fit to draw: whole terminal escape sequences, control

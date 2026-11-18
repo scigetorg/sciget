@@ -16,24 +16,24 @@ import (
 func newRefreshCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "refresh",
-		Short: "Download the latest catalogues in use",
+		Short: "Download the latest catalogs in use",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			results, err := refreshCatalogues()
+			results, err := refreshCatalogs()
 			if err != nil {
 				return err
 			}
 			var failures []error
 			for _, r := range results {
 				if r.err != nil {
-					failures = append(failures, fmt.Errorf("catalogue %q: %w", r.name, r.err))
+					failures = append(failures, fmt.Errorf("catalog %q: %w", r.name, r.err))
 					continue
 				}
 				result := "is up to date."
 				if r.changed {
 					result = "updated."
 				}
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Catalogue %q %s\n", r.name, result); err != nil {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Catalog %q %s\n", r.name, result); err != nil {
 					return err
 				}
 			}
@@ -59,7 +59,7 @@ func newRefreshCommand() *cobra.Command {
 	}
 }
 
-// refreshResult is one catalogue's refresh: whether its copy changed, or
+// refreshResult is one catalog's refresh: whether its copy changed, or
 // why it failed.
 type refreshResult struct {
 	name    string
@@ -67,11 +67,11 @@ type refreshResult struct {
 	err     error
 }
 
-// refreshCatalogues downloads every catalogue in use, in order, with a
-// client of network_timeout_seconds. One catalogue failing does not stop
+// refreshCatalogs downloads every catalog in use, in order, with a
+// client of network_timeout_seconds. One catalog failing does not stop
 // the others. sciget refresh and the TUI both use it.
-func refreshCatalogues() ([]refreshResult, error) {
-	cacheDir, used, err := usedCatalogues()
+func refreshCatalogs() ([]refreshResult, error) {
+	cacheDir, used, err := usedCatalogs()
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func refreshCatalogues() ([]refreshResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxSize, err := cfg.getNumber("max_catalogue_size")
+	maxSize, err := cfg.getNumber("max_catalog_size")
 	if err != nil {
 		return nil, err
 	}
@@ -87,10 +87,10 @@ func refreshCatalogues() ([]refreshResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	client.CheckRedirect = httpsOnly // as the catalogue URL itself must be
+	client.CheckRedirect = httpsOnly // as the catalog URL itself must be
 	var results []refreshResult
 	for _, cat := range used {
-		changed, err := refreshCatalogue(client, cat.URL, cat.dir(cacheDir), maxSize)
+		changed, err := refreshCatalog(client, cat.URL, cat.dir(cacheDir), maxSize)
 		results = append(results, refreshResult{name: cat.Name, changed: changed, err: err})
 	}
 	return results, nil
@@ -106,68 +106,68 @@ func newHTTPClient(cfg config) (*http.Client, error) {
 	return &http.Client{Timeout: time.Duration(seconds) * time.Second}, nil
 }
 
-// refreshCatalogue downloads the catalogue at catalogueURL and, if it differs
+// refreshCatalog downloads the catalog at catalogURL and, if it differs
 // from apps.json in dir, replaces that file. It reports whether it did. Each
-// success also writes the URL to dir's url file. A catalogue larger than
+// success also writes the URL to dir's url file. A catalog larger than
 // maxSize bytes is an error.
-func refreshCatalogue(client *http.Client, catalogueURL, dir string, maxSize int64) (bool, error) {
-	data, err := downloadCatalogue(client, catalogueURL, maxSize)
+func refreshCatalog(client *http.Client, catalogURL, dir string, maxSize int64) (bool, error) {
+	data, err := downloadCatalog(client, catalogURL, maxSize)
 	if err != nil {
 		return false, err
 	}
-	if _, err := parseCatalogue(data); err != nil {
-		return false, fmt.Errorf("downloaded catalogue is invalid: %w", err)
+	if _, err := parseCatalog(data); err != nil {
+		return false, fmt.Errorf("downloaded catalog is invalid: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false, fmt.Errorf("writing catalogue: %w", err)
+		return false, fmt.Errorf("writing catalog: %w", err)
 	}
-	// 0o600, as catalogues.json: a query string may carry a token.
-	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(catalogueURL+"\n"), 0o600); err != nil {
-		return false, fmt.Errorf("writing catalogue: %w", err)
+	// 0o600, as catalogs.json: a query string may carry a token.
+	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(catalogURL+"\n"), 0o600); err != nil {
+		return false, fmt.Errorf("writing catalog: %w", err)
 	}
 	path := filepath.Join(dir, "apps.json")
 	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
 		return false, nil
 	}
-	if err := writeCatalogue(path, data); err != nil {
-		return false, fmt.Errorf("writing catalogue: %w", err)
+	if err := writeCatalog(path, data); err != nil {
+		return false, fmt.Errorf("writing catalog: %w", err)
 	}
 	return true, nil
 }
 
-// downloadCatalogue returns the body of a GET of catalogueURL, which must
-// answer 200 with at most maxSize bytes, so a catalogue URL that names some
+// downloadCatalog returns the body of a GET of catalogURL, which must
+// answer 200 with at most maxSize bytes, so a catalog URL that names some
 // other, larger file fails before it fills memory.
-func downloadCatalogue(client *http.Client, catalogueURL string, maxSize int64) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, catalogueURL, nil)
+func downloadCatalog(client *http.Client, catalogURL string, maxSize int64) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, catalogURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("downloading catalogue: %w", err)
+		return nil, fmt.Errorf("downloading catalog: %w", err)
 	}
 	req.Header.Set("User-Agent", "sciget/"+version)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("downloading catalogue: %w", err)
+		return nil, fmt.Errorf("downloading catalog: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("downloading catalogue: %s returned %s", catalogueURL, resp.Status)
+		return nil, fmt.Errorf("downloading catalog: %s returned %s", catalogURL, resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("downloading catalogue: %w", err)
+		return nil, fmt.Errorf("downloading catalog: %w", err)
 	}
 	if int64(len(data)) > maxSize {
-		return nil, fmt.Errorf("downloading catalogue: %s is larger than max_catalogue_size (%d bytes)",
-			catalogueURL, maxSize)
+		return nil, fmt.Errorf("downloading catalog: %s is larger than max_catalog_size (%d bytes)",
+			catalogURL, maxSize)
 	}
 	return data, nil
 }
 
-// writeCatalogue writes data to a new temporary file beside path and
+// writeCatalog writes data to a new temporary file beside path and
 // renames it to path, so readers see the old file or the new one, never a
 // partial write, and two refreshes at once never share a file. The
 // directory must exist.
-func writeCatalogue(path string, data []byte) error {
+func writeCatalog(path string, data []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.incomplete")
 	if err != nil {
 		return err

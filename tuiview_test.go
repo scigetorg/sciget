@@ -14,11 +14,11 @@ import (
 // tuiContainers are what the TUI tests browse: fsl in two versions, and
 // itksnap with one GUI entry. Hidden and shadowed containers are not shown.
 var tuiContainers = []container{
-	{tool: "fsl", version: "6.0.3", categories: []string{"imaging"}, catalogue: "neuro"},
-	{tool: "fsl", version: "6.0.7", categories: []string{"imaging"}, catalogue: "neuro"},
-	{tool: "fsl", version: "6.0.7", categories: []string{"imaging"}, catalogue: "other", shadowed: true},
+	{tool: "fsl", version: "6.0.3", categories: []string{"imaging"}, catalog: "neuro"},
+	{tool: "fsl", version: "6.0.7", categories: []string{"imaging"}, catalog: "neuro"},
+	{tool: "fsl", version: "6.0.7", categories: []string{"imaging"}, catalog: "other", shadowed: true},
 	{tool: "hidden", version: "1", hidden: true},
-	{tool: "itksnap", version: "4.4.0", categories: []string{"imaging", "segmentation"}, catalogue: "neuro",
+	{tool: "itksnap", version: "4.4.0", categories: []string{"imaging", "segmentation"}, catalog: "neuro",
 		entries: []entry{{key: "itksnapGUI-itksnap 4.4.0", label: "itksnapGUI", exec: "itksnap"}}},
 }
 
@@ -286,13 +286,13 @@ func TestEmptyMessage(t *testing.T) {
 		want string
 		ctl  control
 	}{
-		{name: "no catalogues", err: errNoCatalogues, want: "No catalogues yet.", ctl: quitControl},
-		{name: "none in use", err: errNoneInUse, want: "No catalogues are in use.", ctl: quitControl},
-		{name: "not downloaded", err: &catalogueError{name: "neuro", err: &notDownloadedError{path: "/x"}},
-			want: "The catalogue neuro hasn't been downloaded yet.", ctl: refreshControl},
-		{name: "broken", err: &catalogueError{name: "neuro", err: errNoContainers},
-			want: "The catalogue neuro couldn't be read: ", ctl: refreshControl},
-		{name: "no containers", err: errNoContainers, want: "The catalogues in use have no containers", ctl: refreshControl},
+		{name: "no catalogs", err: errNoCatalogs, want: "No catalogs yet.", ctl: quitControl},
+		{name: "none in use", err: errNoneInUse, want: "No catalogs are in use.", ctl: quitControl},
+		{name: "not downloaded", err: &catalogError{name: "neuro", err: &notDownloadedError{path: "/x"}},
+			want: "The catalog neuro hasn't been downloaded yet.", ctl: refreshControl},
+		{name: "broken", err: &catalogError{name: "neuro", err: errNoContainers},
+			want: "The catalog neuro couldn't be read: ", ctl: refreshControl},
+		{name: "no containers", err: errNoContainers, want: "The catalogs in use have no containers", ctl: refreshControl},
 		{name: "escape sequences removed", err: errors.New("build dates \x1b[31m2026\x1b[0m and \x1b]8;;https://x\x07y\x1b]8;;\x07 differ"),
 			want: "build dates 2026 and y differ", ctl: refreshControl},
 	} {
@@ -322,8 +322,8 @@ func TestView(t *testing.T) {
 		{name: "compact, buttons scroll", width: 80, height: 24, setup: func(m *model) { m.selectName("itksnap", "4.4.0") },
 			want: []string{"▼ 1 more"}},
 		{name: "undersized", width: 60, height: 20, want: []string{"at least 80 by 24"}},
-		{name: "empty state", width: 100, height: 30, loadErr: &catalogueError{name: "neuro", err: &notDownloadedError{}},
-			want: []string{"hasn't been downloaded yet", "Refresh catalogues"}, lacks: []string{"Details"}},
+		{name: "empty state", width: 100, height: 30, loadErr: &catalogError{name: "neuro", err: &notDownloadedError{}},
+			want: []string{"hasn't been downloaded yet", "Refresh catalogs"}, lacks: []string{"Details"}},
 		{name: "launches and a wrapped failure", width: 160, height: 45, setup: func(m *model) {
 			m.launches = []launch{{id: 1, name: "fsl/6.0.7", action: "Terminal", state: "failed",
 				detail: strings.Repeat("error ", 30), log: "/cache/logs/fsl-6.0.7-1.log"}}
