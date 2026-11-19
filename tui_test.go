@@ -299,7 +299,7 @@ func TestRefreshCmd(t *testing.T) {
 		t.Fatal(err)
 	}
 	cat := catalog{Name: "neuro", URL: "https://" + ln.Addr().String() + "/apps.json", Use: true}
-	if err := writeCatalogList(path, []catalog{cat}); err != nil {
+	if err := writeCatalogList(path, []catalog{cat}, false); err != nil {
 		t.Fatal(err)
 	}
 	// An earlier copy, so the re-read after the refresh succeeds.
@@ -356,12 +356,18 @@ func TestModuleText(t *testing.T) {
 	tests := []struct {
 		name       string
 		onShare    bool
+		shareStore bool   // container_dir is the share's folder, as an admin's is
 		buildDate  string // the module's build; no module when empty
 		modulePath bool   // module_dir/neuro is in MODULEPATH
 		want       string // {modules} is module_dir
 	}{
 		{name: "share", onShare: true, want: "the neuro share's own modules"},
 		{name: "no module", want: "none · Install makes one"},
+		{name: "a share that is also container_dir, no module", onShare: true, shareStore: true,
+			want: "none · Install makes one"},
+		{name: "a share that is also container_dir, older module", onShare: true, shareStore: true,
+			buildDate: "20190101", modulePath: true,
+			want: "module load fsl/6.0.3 (from an older build · Install updates it)"},
 		{name: "module", buildDate: "20200905", modulePath: true, want: "module load fsl/6.0.3"},
 		{name: "module folder not in MODULEPATH", buildDate: "20200905",
 			want: "module load fsl/6.0.3 · first: module use {modules}/neuro"},
@@ -373,6 +379,9 @@ func TestModuleText(t *testing.T) {
 			c, cat, store := localCatalog(t)
 			base := filepath.Dir(store)
 			moduleDir := filepath.Join(base, "modules")
+			if tt.shareStore {
+				store = cat.Dir
+			}
 			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
 				"cache_dir": filepath.Join(base, "cache"), "container_dir": store, "module_dir": moduleDir,
 			}); err != nil {

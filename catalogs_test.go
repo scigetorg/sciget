@@ -54,8 +54,12 @@ func TestLoadCatalogList(t *testing.T) {
 			wantErr: "cannot unmarshal string"},
 		{name: "name missing", json: `[{"url": "https://e.org/a.json", "use": true}]`,
 			wantErr: `invalid catalog name ""`},
-		{name: "url null", json: `[{"name": "a", "url": null, "use": true}]`,
-			wantErr: `catalog "a" has an invalid URL: must start with https:// or http://`},
+		{name: "no url: switches a system catalog", json: `[{"name": "a", "use": false}]`,
+			want: []catalog{{Name: "a"}}},
+		{name: "no url with a dir", json: `[{"name": "a", "use": true, "dir": "/d"}]`,
+			wantErr: `catalog "a" has a dir or layout but no url`},
+		{name: "url empty", json: `[{"name": "a", "url": "", "use": true}]`,
+			want: []catalog{{Name: "a", Use: true}}},
 		{name: "bad name", json: `[{"name": "My Lab", "url": "https://e.org/a.json", "use": true}]`,
 			wantErr: `invalid catalog name "My Lab"`},
 		{name: "credentials in the URL", json: `[{"name": "a", "url": "https://u:p@e.org/a.json", "use": true}]`,
@@ -116,7 +120,7 @@ func TestWriteCatalogList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := writeCatalogList(path, tt.catalogs); err != nil {
+			if err := writeCatalogList(path, tt.catalogs, false); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(path)
@@ -223,7 +227,7 @@ func TestWriteCatalogTable(t *testing.T) {
 	catalogs := []catalog{
 		{Name: "mylab", URL: "https://lab.example/a.json", Use: true, Dir: "/share"},
 		{Name: "old", URL: "https://old.example/a.json"},
-		{Name: "neuroimaging", URL: "https://example.org/a.json", Use: true},
+		{Name: "neuroimaging", URL: "https://example.org/a.json", Use: true, System: true},
 	}
 	tests := []struct {
 		name     string
@@ -231,13 +235,13 @@ func TestWriteCatalogTable(t *testing.T) {
 		want     string
 	}{
 		{name: "tab-separated when piped",
-			want: "mylab\t1\thttps://lab.example/a.json\t/share\nold\t-\thttps://old.example/a.json\t\n" +
-				"neuroimaging\t2\thttps://example.org/a.json\t\n"},
+			want: "mylab\t1\tuser\thttps://lab.example/a.json\t/share\nold\t-\tuser\thttps://old.example/a.json\t\n" +
+				"neuroimaging\t2\tsystem\thttps://example.org/a.json\t\n"},
 		{name: "aligned with a header on a terminal", terminal: true,
-			want: fmt.Sprintf("%-14s%-7s%-28s%s\n", "NAME", "ORDER", "URL", "DIR") +
-				fmt.Sprintf("%-14s%-7s%-28s%s\n", "mylab", "1", "https://lab.example/a.json", "/share") +
-				fmt.Sprintf("%-14s%-7s%-28s%s\n", "old", "-", "https://old.example/a.json", "") +
-				fmt.Sprintf("%-14s%-7s%-28s%s\n", "neuroimaging", "2", "https://example.org/a.json", "")},
+			want: fmt.Sprintf("%-14s%-7s%-8s%-28s%s\n", "NAME", "ORDER", "SOURCE", "URL", "DIR") +
+				fmt.Sprintf("%-14s%-7s%-8s%-28s%s\n", "mylab", "1", "user", "https://lab.example/a.json", "/share") +
+				fmt.Sprintf("%-14s%-7s%-8s%-28s%s\n", "old", "-", "user", "https://old.example/a.json", "") +
+				fmt.Sprintf("%-14s%-7s%-8s%-28s%s\n", "neuroimaging", "2", "system", "https://example.org/a.json", "")},
 	}
 
 	for _, tt := range tests {
@@ -248,6 +252,44 @@ func TestWriteCatalogTable(t *testing.T) {
 			}
 			if got := out.String(); got != tt.want {
 				t.Errorf("output =\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadSystemCatalogs(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string // the system catalogs.json; none when empty
+		want    []catalog
+		wantErr string
+	}{
+		{name: "none"},
+		{name: "marked as system", json: `[{"name": "a", "url": "https://e.org/a.json", "use": true}]`,
+			want: []catalog{{Name: "a", URL: "https://e.org/a.json", Use: true, System: true}}},
+		{name: "an entry without a url", json: `[{"name": "a", "use": true}]`, wantErr: `catalog "a" has no url`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			setSystemDir(t, dir)
+			if tt.json != "" {
+				if err := os.WriteFile(filepath.Join(dir, "catalogs.json"), []byte(tt.json), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, got, err := readSystemCatalogs()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("catalogs = %v, want %v", got, tt.want)
 			}
 		})
 	}

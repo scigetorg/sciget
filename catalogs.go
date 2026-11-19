@@ -20,13 +20,15 @@ import (
 )
 
 // catalog is one entry of catalogs.json: a named apps.json and whether it
-// is in use.
+// is in use. In the user's file, an entry with no URL only switches the
+// system catalog of that name on or off.
 type catalog struct {
 	Name   string `json:"name"`
-	URL    string `json:"url"`
+	URL    string `json:"url,omitempty"`
 	Use    bool   `json:"use"`
 	Dir    string `json:"dir,omitempty"`
 	Layout string `json:"layout,omitempty"`
+	System bool   `json:"-"` // from the system file
 }
 
 // catalogEntry is how loadCatalogList decodes an entry. Use is a pointer
@@ -46,26 +48,88 @@ func (c catalog) dir(cacheDir string) string {
 	return filepath.Join(cacheDir, "catalogs", c.Name+"-"+hex.EncodeToString(sum[:])[:12])
 }
 
-// readCatalogs reads the config and catalogs.json. It returns cache_dir,
-// the path of catalogs.json and every catalog, in order.
-func readCatalogs() (cacheDir, path string, catalogs []catalog, err error) {
+// catalogLayers is the user's and the system's catalogs.json.
+type catalogLayers struct {
+	cacheDir   string
+	userPath   string
+	user       []catalog // as the user's file lists them
+	systemPath string    // "" when there is no system layer
+	system     []catalog
+}
+
+// readCatalogLayers reads the config and both catalogs.json files.
+func readCatalogLayers() (catalogLayers, error) {
 	c, err := readConfig()
 	if err != nil {
-		return "", "", nil, err
+		return catalogLayers{}, err
 	}
-	cacheDir, _, err = c.get("cache_dir")
+	var l catalogLayers
+	if l.cacheDir, _, err = c.get("cache_dir"); err != nil {
+		return catalogLayers{}, err
+	}
+	if l.userPath, err = catalogListPath(); err != nil {
+		return catalogLayers{}, err
+	}
+	if l.user, err = loadCatalogList(l.userPath); err != nil {
+		return catalogLayers{}, err
+	}
+	if l.systemPath, l.system, err = readSystemCatalogs(); err != nil {
+		return catalogLayers{}, err
+	}
+	return l, nil
+}
+
+// readSystemCatalogs returns the path of the system catalogs.json and its
+// catalogs, or "" and none when there is no system layer. Every entry
+// needs a URL.
+func readSystemCatalogs() (string, []catalog, error) {
+	path := systemPath("catalogs.json")
+	if path == "" {
+		return "", nil, nil
+	}
+	catalogs, err := loadCatalogList(path)
 	if err != nil {
-		return "", "", nil, err
+		return "", nil, err
 	}
-	path, err = catalogListPath()
+	for i := range catalogs {
+		if catalogs[i].URL == "" {
+			return "", nil, fmt.Errorf("reading catalogs %s: catalog %q has no url", path, catalogs[i].Name)
+		}
+		catalogs[i].System = true
+	}
+	return path, catalogs, nil
+}
+
+// combined returns every catalog in order: the user's, then the system's.
+// A user entry with no URL sets only whether the system catalog of that
+// name is in use; a full one hides it.
+func (l catalogLayers) combined() []catalog {
+	var all []catalog
+	for _, c := range l.user {
+		if c.URL != "" {
+			all = append(all, c)
+		}
+	}
+	for _, c := range l.system {
+		if i := findCatalog(l.user, c.Name); i >= 0 {
+			if l.user[i].URL != "" {
+				continue
+			}
+			c.Use = l.user[i].Use
+		}
+		all = append(all, c)
+	}
+	return all
+}
+
+// readCatalogs reads the config and both catalogs.json files. It returns
+// cache_dir and every catalog, in order.
+func readCatalogs() (cacheDir string, catalogs []catalog, err error) {
+	l, err := readCatalogLayers()
 	if err != nil {
-		return "", "", nil, err
+		return "", nil, err
 	}
-	catalogs, err = loadCatalogList(path)
-	if err != nil {
-		return "", "", nil, err
-	}
-	return cacheDir, path, catalogs, nil
+	return l.cacheDir, l.combined(), nil
 }
 
 // Errors from usedCatalogs, which the TUI tells apart.
@@ -77,7 +141,7 @@ var (
 // usedCatalogs returns cache_dir and the catalogs in use, in order. Having
 // none is an error.
 func usedCatalogs() (cacheDir string, used []catalog, err error) {
-	cacheDir, _, catalogs, err := readCatalogs()
+	cacheDir, catalogs, err := readCatalogs()
 	if err != nil {
 		return "", nil, err
 	}
@@ -157,8 +221,13 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 		if err := checkCatalogName(e.Name); err != nil {
 			return nil, fmt.Errorf("invalid catalog name %q: %w", e.Name, err)
 		}
-		if err := checkCatalogURL(e.URL); err != nil {
-			return nil, fmt.Errorf("catalog %q has an invalid URL: %w", e.Name, err)
+		if e.URL == "" && (e.Dir != "" || e.Layout != "") {
+			return nil, fmt.Errorf("catalog %q has a dir or layout but no url", e.Name)
+		}
+		if e.URL != "" {
+			if err := checkCatalogURL(e.URL); err != nil {
+				return nil, fmt.Errorf("catalog %q has an invalid URL: %w", e.Name, err)
+			}
 		}
 		if e.Use == nil {
 			return nil, fmt.Errorf("catalog %q has no \"use\"", e.Name)
@@ -184,12 +253,17 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 	return catalogs, nil
 }
 
-// writeCatalogList writes catalogs to catalogs.json at path, in place.
-func writeCatalogList(path string, catalogs []catalog) error {
+// writeCatalogList writes catalogs to catalogs.json at path, in place, or
+// with system set as writeSystemFile does.
+func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	if catalogs == nil {
 		catalogs = []catalog{} // written as [], not null
 	}
-	if err := writeJSONFile(path, catalogs); err != nil {
+	write := writeJSONFile
+	if system {
+		write = writeSystemFile
+	}
+	if err := write(path, catalogs); err != nil {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
 	return nil
@@ -215,8 +289,8 @@ func placeCatalog(catalogs []catalog, c catalog, last bool) []catalog {
 }
 
 // writeCatalogTable prints one line per catalog with its position among
-// those in use, or "-". For a terminal it adds a header and aligns the
-// columns.
+// those in use, or "-", and its source, user or system. For a terminal it
+// adds a header and aligns the columns.
 func writeCatalogTable(w io.Writer, catalogs []catalog, terminal bool) error {
 	var rows strings.Builder
 	order := 0
@@ -226,9 +300,13 @@ func writeCatalogTable(w io.Writer, catalogs []catalog, terminal bool) error {
 			order++
 			position = strconv.Itoa(order)
 		}
-		fmt.Fprintf(&rows, "%s\t%s\t%s\t%s\n", c.Name, position, c.URL, c.Dir)
+		source := "user"
+		if c.System {
+			source = "system"
+		}
+		fmt.Fprintf(&rows, "%s\t%s\t%s\t%s\t%s\n", c.Name, position, source, c.URL, c.Dir)
 	}
-	return writeTable(w, terminal, "NAME\tORDER\tURL\tDIR\n", rows.String())
+	return writeTable(w, terminal, "NAME\tORDER\tSOURCE\tURL\tDIR\n", rows.String())
 }
 
 func checkCatalogName(name string) error {

@@ -63,7 +63,7 @@ func TestReadContainerInfo(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := writeCatalogList(path, []catalog{cat, other}); err != nil {
+				if err := writeCatalogList(path, []catalog{cat, other}, false); err != nil {
 					t.Fatal(err)
 				}
 				cfg, err := readConfig()

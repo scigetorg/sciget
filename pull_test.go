@@ -220,7 +220,7 @@ func TestPullOnRun(t *testing.T) {
 			case "none":
 				cat.Dir = ""
 				path, _ := catalogListPath()
-				if err := writeCatalogList(path, []catalog{cat}); err != nil {
+				if err := writeCatalogList(path, []catalog{cat}, false); err != nil {
 					t.Fatal(err)
 				}
 			}

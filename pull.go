@@ -228,7 +228,7 @@ func pullQuestion(cfg config, c container) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, _, catalogs, err := readCatalogs()
+	_, catalogs, err := readCatalogs()
 	if err != nil {
 		return "", err
 	}

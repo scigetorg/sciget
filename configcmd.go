@@ -16,6 +16,44 @@ func newConfigCommand() *cobra.Command {
 		Args:  noArgs,
 		RunE:  runConfigList,
 	}
+
+	var setSystem bool
+	set := &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Change a setting",
+		Args:  exactArgs(2),
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			if len(args) == 1 {
+				return nil, cobra.ShellCompDirectiveDefault // the value: file names
+			}
+			return completeConfigKeys(cmd, args, toComplete)
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := readConfigFor(setSystem)
+			if err != nil {
+				return err
+			}
+			return c.set(args[0], args[1])
+		},
+	}
+	set.Flags().BoolVar(&setSystem, "system", false, systemFlagUsage)
+
+	var unsetSystem bool
+	unset := &cobra.Command{
+		Use:               "unset <key>",
+		Short:             "Remove a setting from your config",
+		Args:              exactArgs(1),
+		ValidArgsFunction: completeConfigKeys,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := readConfigFor(unsetSystem)
+			if err != nil {
+				return err
+			}
+			return c.unset(args[0])
+		},
+	}
+	unset.Flags().BoolVar(&unsetSystem, "system", false, systemFlagUsage)
+
 	cmd.AddCommand(
 		&cobra.Command{
 			Use:               "get <key>",
@@ -38,37 +76,8 @@ func newConfigCommand() *cobra.Command {
 				return err
 			},
 		},
-		&cobra.Command{
-			Use:   "set <key> <value>",
-			Short: "Change a setting",
-			Args:  exactArgs(2),
-			ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-				if len(args) == 1 {
-					return nil, cobra.ShellCompDirectiveDefault // the value: file names
-				}
-				return completeConfigKeys(cmd, args, toComplete)
-			},
-			RunE: func(cmd *cobra.Command, args []string) error {
-				c, err := readConfig()
-				if err != nil {
-					return err
-				}
-				return c.set(args[0], args[1])
-			},
-		},
-		&cobra.Command{
-			Use:               "unset <key>",
-			Short:             "Return a setting to its default",
-			Args:              exactArgs(1),
-			ValidArgsFunction: completeConfigKeys,
-			RunE: func(cmd *cobra.Command, args []string) error {
-				c, err := readConfig()
-				if err != nil {
-					return err
-				}
-				return c.unset(args[0])
-			},
-		},
+		set,
+		unset,
 		&cobra.Command{
 			Use:   "list",
 			Short: "List every setting with its value and source",
@@ -77,6 +86,15 @@ func newConfigCommand() *cobra.Command {
 		},
 	)
 	return cmd
+}
+
+// readConfigFor reads the user's config, or with system set the system
+// file alone.
+func readConfigFor(system bool) (config, error) {
+	if system {
+		return readSystemConfig()
+	}
+	return readConfig()
 }
 
 func runConfigList(cmd *cobra.Command, args []string) error {

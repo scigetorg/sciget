@@ -16,12 +16,21 @@ import (
 
 // installContainer lists c's commands and writes its module, given where c
 // is. It prints a line on stdout, and on stderr a warning for anything left
-// out of the module, and reports whether it wrote one. A container on a
-// share gets no module: the share provides its own.
+// out of the module, and reports whether it wrote one. A container only on
+// a share gets no module: the share provides its own. One also in the
+// caller's container_dir gets one, as when an admin's container_dir is the
+// share every user reads.
 func installContainer(ctx context.Context, stdout, stderr io.Writer, cfg config, c container, loc location) (bool, error) {
 	if loc.share != "" {
-		_, err := fmt.Fprintf(stdout, "No module written for %s: it is on the %s share, which provides its modules\n", c.name(), loc.share)
-		return false, err
+		path, err := storePath(cfg, c)
+		if err != nil {
+			return false, err
+		}
+		if path == "" {
+			_, err := fmt.Fprintf(stdout, "No module written for %s: it is on the %s share, which provides its modules\n", c.name(), loc.share)
+			return false, err
+		}
+		loc = location{path: path}
 	}
 	list, err := listCommands(ctx, cfg, c, loc)
 	if err != nil {
@@ -40,6 +49,20 @@ func installContainer(ctx context.Context, stdout, stderr io.Writer, cfg config,
 	}
 	_, err = fmt.Fprintf(stdout, "Installed %s: module %s, %d %s\n", c.name(), c.name(), len(info.commands), noun)
 	return true, err
+}
+
+// storePath returns c's path in the caller's container_dir, or "" if it
+// is not there.
+func storePath(cfg config, c container) (string, error) {
+	dir, _, err := cfg.get("container_dir")
+	if err != nil {
+		return "", err
+	}
+	layout, _, err := cfg.get("container_layout")
+	if err != nil {
+		return "", err
+	}
+	return findContainer(dir, layout, c)
 }
 
 // moduleUseLine returns the module use command for catalog's module

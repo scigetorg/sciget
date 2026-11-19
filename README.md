@@ -49,6 +49,7 @@ such as a port forwarded through an SSH tunnel
 | `sciget install <tool/version>...` | Download containers, then make a module for each, so `module load` works |
 | `sciget doctor` | Report problems, such as stopped downloads, and the commands that fix them |
 | `sciget config [get\|set\|unset\|list]` | Show and change settings |
+| `--system` (on `catalog add/remove/use/unuse` and `config set/unset`) | Change the system files in `/etc/sciget` for every user; needs root |
 | `sciget completion <shell>` | Print a shell completion script |
 | `sciget version` | Print the version |
 
@@ -86,7 +87,8 @@ a Lmod module for it: `<module_dir>/<catalog>/fsl/6.0.7.8.lua`
 the container gets a small wrapper that runs it through sciget, so it gets
 the same Apptainer settings as `sciget apptainer exec`. A container on a
 share, such as CVMFS, gets no module from sciget: use the share's own
-modules.
+modules. One that is also in your own `container_dir` gets one (see
+Shared machines).
 
 sciget never edits your shell files. If the module folder is not on your
 `MODULEPATH`, `install` prints the line to add to `~/.bashrc`, once per
@@ -102,6 +104,55 @@ finds. Names in `finder_excludes`, such as `bash` and `sudo`, are never
 wrapped from a container's own folders. Wrappers call sciget by the name in
 `module_sciget` (default `sciget`, found on PATH). Run `sciget install`
 again to rebuild a module.
+
+## System setup
+
+An admin, or an image's Dockerfile, sets sciget up for every user with
+`--system`, run as root. It writes `/etc/sciget/config.json` and
+`/etc/sciget/catalogs.json`, which sciget reads on every run, under each
+user's own files:
+
+```sh
+sudo sciget catalog add --system neuroimaging https://apps-json.neurodesk.workers.dev/neuroimaging/apps.json \
+    --dir /cvmfs/neurodesk.ardc.edu.au/containers
+sudo sciget config set --system display_start_command '["/opt/scidesktop/start_desktop.sh"]'
+```
+
+- These are defaults, not rules. A user's own settings win, and their own
+  catalogs come before the system's. `sciget config list` and
+  `sciget catalog list` show where each comes from.
+- A user can switch a system catalog off or on (`sciget catalog unuse` and
+  `use`); the system's later changes to it still arrive. They cannot change
+  or remove it, or add their own under its name.
+- `cache_dir`, `container_dir` and `module_dir` are always each user's
+  own: sciget writes into them, so one shared folder would let one user
+  change what another runs.
+- `sciget doctor` names a user's catalog that hides a system one, and a
+  user setting that only repeats the system's (often a copy left by an
+  older setup), so later system changes would not reach them.
+- Each user downloads catalogs into their own cache with `sciget refresh`.
+
+## Shared machines
+
+On a shared workstation or cluster, the admin keeps containers and modules
+in folders only root can write, and every user reads them:
+
+1. As root, set root's own `container_dir` and `module_dir` to shared
+   folders, such as `/opt/sciget/containers` and `/opt/sciget/modules`.
+2. Add the catalog for everyone with that folder as its share:
+   `sudo sciget catalog add --system neuroimaging <url> --dir /opt/sciget/containers`.
+3. Install containers as root, with a umask such as 022 so every user can
+   read what is written: `sudo sciget install fsl/6.0.7.8`. Each gets its
+   module in the shared module folder.
+4. Add `/opt/sciget/modules/neuroimaging` to `MODULEPATH` for everyone,
+   for example in `/etc/profile.d/`.
+5. Keep the shared folders current with a scheduled job as root, such as
+   `sciget refresh && sciget install fsl/6.0.7.8 …`.
+
+Users then run the shared containers and load the shared modules with no
+copies. A container the admin has not provided is downloaded into the
+user's own `container_dir`, and `sciget install` writes its module into
+their own `module_dir`.
 
 ## Licence
 
