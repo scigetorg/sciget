@@ -78,7 +78,7 @@ func localCatalog(t *testing.T) (container, catalog, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCatalogList(path, []catalog{cat}); err != nil {
+	if err := writeCatalogList(path, []catalog{cat}, false); err != nil {
 		t.Fatal(err)
 	}
 	cache := cat.dir(filepath.Join(base, "cache"))
@@ -222,7 +222,7 @@ func TestLocate(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := writeCatalogList(path, []catalog{cat, other}); err != nil {
+				if err := writeCatalogList(path, []catalog{cat, other}, false); err != nil {
 					t.Fatal(err)
 				}
 				makeContainerPath(t, other.Dir, layout, c, false)

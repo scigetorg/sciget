@@ -45,6 +45,41 @@ func findProblems(cfg config) ([]problem, error) {
 			fix:  []string{shellJoin([]string{"rm", "--", path})},
 		})
 	}
+	layerProblems, err := findLayerProblems(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return append(problems, layerProblems...), nil
+}
+
+// findLayerProblems reports the user's entries that stop the system
+// layer's changes reaching them: a catalog hiding a system catalog of the
+// same name, and a setting equal to the system file's (most likely a
+// copy).
+func findLayerProblems(cfg config) ([]problem, error) {
+	l, err := readCatalogLayers()
+	if err != nil {
+		return nil, err
+	}
+	var problems []problem
+	for _, c := range l.user {
+		if i := findCatalog(l.system, c.Name); i >= 0 && c.URL != "" {
+			problems = append(problems, problem{
+				text: fmt.Sprintf("Your catalog %s hides the system catalog of the same name (%s).", c.Name, l.system[i].URL),
+				fix:  []string{shellJoin([]string{"sciget", "catalog", "remove", c.Name})},
+			})
+		}
+	}
+	for _, key := range configKeys {
+		value, ok := cfg.overrides[key.name]
+		if system, inSystem := cfg.system[key.name]; ok && inSystem && value == system {
+			problems = append(problems, problem{
+				text: fmt.Sprintf("Your config sets %s to the same value as %s, so later changes there will not reach you.",
+					key.name, systemPath("config.json")),
+				fix: []string{shellJoin([]string{"sciget", "config", "unset", key.name})},
+			})
+		}
+	}
 	return problems, nil
 }
 

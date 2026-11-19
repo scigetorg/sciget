@@ -63,7 +63,7 @@ func layoutPath(layout string, c container) (string, error) {
 // tool and version, so a catalog refresh never stops a container on the
 // machine from running.
 func locate(cfg config, c container) (location, error) {
-	_, _, catalogs, err := readCatalogs()
+	_, catalogs, err := readCatalogs()
 	if err != nil {
 		return location{}, err
 	}

@@ -130,7 +130,7 @@ func TestConfigGet(t *testing.T) {
 	}{
 		{name: "default", key: "cache_dir", wantValue: filepath.Join(cache, "sciget"), wantSource: "default"},
 		{name: "override", overrides: map[string]string{"cache_dir": "/c"}, key: "cache_dir",
-			wantValue: "/c", wantSource: "config"},
+			wantValue: "/c", wantSource: "user"},
 		{name: "unknown key", key: "cache-dir", wantErr: `unknown key "cache-dir"`},
 	}
 
@@ -386,7 +386,7 @@ func TestWriteConfigList(t *testing.T) {
 		want      string
 	}{
 		{name: "tab-separated when piped", want: "cache_dir\t" + cacheDir + "\tdefault\n" + piped.String()},
-		{name: "from the config", overrides: map[string]string{"cache_dir": "/c"}, want: "cache_dir\t/c\tconfig\n" + piped.String()},
+		{name: "from the config", overrides: map[string]string{"cache_dir": "/c"}, want: "cache_dir\t/c\tuser\n" + piped.String()},
 		{name: "aligned with a header on a terminal", terminal: true, want: aligned.String()},
 	}
 	for _, tt := range tests {
@@ -558,6 +558,28 @@ func TestLaunchChecks(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.check(tt.value); (err != nil) != tt.bad {
 				t.Errorf("error = %v, want error: %v", err, tt.bad)
+			}
+		})
+	}
+}
+
+func TestSystemPath(t *testing.T) {
+	tests := []struct {
+		name string
+		dir  string
+		want string
+	}{
+		{name: "absolute", dir: "/etc/sciget", want: filepath.Join("/etc/sciget", "config.json")},
+		{name: "relative gives no system layer", dir: "etc/sciget"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setSystemDir(t, tt.dir)
+			if filepath.IsAbs(tt.dir) != (tt.want != "") {
+				t.Skip("not absolute on this platform")
+			}
+			if got := systemPath("config.json"); got != tt.want {
+				t.Errorf("systemPath = %q, want %q", got, tt.want)
 			}
 		})
 	}

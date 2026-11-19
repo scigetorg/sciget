@@ -25,6 +25,27 @@ type testCatalog struct {
 	unused bool // registered with "use": false
 }
 
+// TestMain points the system layer at an empty folder, so no test reads
+// the real /etc/sciget.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "sciget-system-")
+	if err != nil {
+		panic(err)
+	}
+	systemDir = dir
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// setSystemDir points the system layer at dir for one test.
+func setSystemDir(t *testing.T, dir string) {
+	t.Helper()
+	old := systemDir
+	systemDir = dir
+	t.Cleanup(func() { systemDir = old })
+}
+
 // exampleURL is the URL a testCatalog gets when none is given and nothing
 // is served.
 func exampleURL(name string) string { return "https://example.org/" + name + "/apps.json" }
@@ -89,30 +110,34 @@ func TestRun(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		args            []string
-		before          [][]string        // commands run first, each of which must succeed
-		config          string            // written to SCIGET_CONFIG; no file when empty
-		catalogs        []testCatalog     // written to catalogs.json, in order
-		list            string            // written to catalogs.json instead, when set
-		readOnlyList    bool              // write catalogs.json with mode 0o400
-		lockedCaches    bool              // cache_dir/catalogs allows no deletions
-		serve           map[string]string // when set, a test server serves each body at /<name>/apps.json, else 404
-		readOnly        bool              // write config with mode 0o400
-		env             map[string]string // set after the defaults
-		stored          []string          // paths created under the default container_dir
-		wantExec        []string          // argv handed to Apptainer, when set; <store> and <cwd> stand for those paths
-		wantConfig      string            // the config file afterwards, when set
-		wantList        []catalog         // catalogs.json afterwards, when set
-		wantListSame    bool              // catalogs.json is byte for byte as written
-		wantCaches      []string          // names of the dirs in cache_dir/catalogs afterwards, when set
-		wantRequests    []string          // paths the server was asked for, when set
-		wantCode        int
-		wantStdout      string // exact, unless wantStdoutHas is set; <store> and <cwd> as in wantExec
-		wantStdoutHas   string // checks only that stdout contains this
-		wantStdoutLacks string
-		wantStderr      string // exact, unless wantStderrHas is set
-		wantStderrHas   string
+		name             string
+		args             []string
+		before           [][]string        // commands run first, each of which must succeed
+		config           string            // written to SCIGET_CONFIG; no file when empty
+		catalogs         []testCatalog     // written to catalogs.json, in order
+		systemCatalogs   []testCatalog     // written to the system catalogs.json
+		systemConfig     string            // written to the system config.json
+		wantSystemList   []catalog         // the system catalogs.json afterwards, when set
+		wantSystemConfig string            // the system config.json afterwards, when set
+		list             string            // written to catalogs.json instead, when set
+		readOnlyList     bool              // write catalogs.json with mode 0o400
+		lockedCaches     bool              // cache_dir/catalogs allows no deletions
+		serve            map[string]string // when set, a test server serves each body at /<name>/apps.json, else 404
+		readOnly         bool              // write config with mode 0o400
+		env              map[string]string // set after the defaults
+		stored           []string          // paths created under the default container_dir
+		wantExec         []string          // argv handed to Apptainer, when set; <store> and <cwd> stand for those paths
+		wantConfig       string            // the config file afterwards, when set
+		wantList         []catalog         // catalogs.json afterwards, when set
+		wantListSame     bool              // catalogs.json is byte for byte as written
+		wantCaches       []string          // names of the dirs in cache_dir/catalogs afterwards, when set
+		wantRequests     []string          // paths the server was asked for, when set
+		wantCode         int
+		wantStdout       string // exact, unless wantStdoutHas is set; <store> and <cwd> as in wantExec
+		wantStdoutHas    string // checks only that stdout contains this
+		wantStdoutLacks  string
+		wantStderr       string // exact, unless wantStderrHas is set
+		wantStderrHas    string
 	}{
 		{name: "no arguments", wantCode: 2,
 			wantStderr: "sciget: no command given" + usageHint},
@@ -429,10 +454,10 @@ func TestRun(t *testing.T) {
 			wantStderr: "sciget: no catalog named \"x\"\n"},
 		{name: "catalog list", args: []string{"catalog", "list"},
 			catalogs: []testCatalog{{name: "mylab"}, {name: "old", unused: true}, {name: "neuroimaging"}},
-			wantStdout: "mylab\t1\t" + exampleURL("mylab") + "\t\nold\t-\t" + exampleURL("old") +
-				"\t\nneuroimaging\t2\t" + exampleURL("neuroimaging") + "\t\n"},
+			wantStdout: "mylab\t1\tuser\t" + exampleURL("mylab") + "\t\nold\t-\tuser\t" + exampleURL("old") +
+				"\t\nneuroimaging\t2\tuser\t" + exampleURL("neuroimaging") + "\t\n"},
 		{name: "catalog alone lists", args: []string{"catalog"}, catalogs: []testCatalog{{name: "mylab"}},
-			wantStdout: "mylab\t1\t" + exampleURL("mylab") + "\t\n"},
+			wantStdout: "mylab\t1\tuser\t" + exampleURL("mylab") + "\t\n"},
 		{name: "catalog list with a broken list", args: []string{"catalog", "list"}, list: "{", wantCode: 1,
 			wantStderrHas: "sciget: reading catalogs "},
 		{name: "catalog use completes names", args: []string{"__complete", "catalog", "use", "n"},
@@ -447,10 +472,119 @@ func TestRun(t *testing.T) {
 		{name: "catalog completion with a broken list", args: []string{"__complete", "catalog", "use", ""},
 			list: "{", wantStdout: ":1\n", wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
 
+		// The system layer: catalogs and settings an admin set with --system.
+		{name: "catalog list with a system catalog", args: []string{"catalog", "list"},
+			catalogs: []testCatalog{{name: "mylab"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "mylab\t1\tuser\t" + exampleURL("mylab") + "\t\nneuro\t2\tsystem\t" + exampleURL("neuro") + "\t\n"},
+		{name: "a user catalog hides a system one of the same name", args: []string{"catalog", "list"},
+			catalogs: []testCatalog{{name: "neuro", url: "https://lab.example/neuro.json"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "neuro\t1\tuser\thttps://lab.example/neuro.json\t\n"},
+		{name: "catalog unuse of a system catalog records only that", args: []string{"catalog", "unuse", "neuro"},
+			systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout:     "Catalog \"neuro\" no longer in use.\n", wantList: []catalog{{Name: "neuro"}}},
+		{name: "an unused system catalog is listed as unused", args: []string{"catalog", "list"},
+			before: [][]string{{"catalog", "unuse", "neuro"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "neuro\t-\tsystem\t" + exampleURL("neuro") + "\t\n"},
+		{name: "catalog use of a system catalog", args: []string{"catalog", "use", "neuro"},
+			list: `[{"name": "neuro", "use": false}]`, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "Catalog \"neuro\" in use. Run 'sciget refresh' to update it.\n",
+			wantList:   []catalog{{Name: "neuro", Use: true}}},
+		{name: "catalog use --append of a system catalog", args: []string{"catalog", "use", "--append", "neuro"},
+			systemCatalogs: []testCatalog{{name: "neuro"}}, wantCode: 2,
+			wantStderrHas: "--append cannot move it"},
+		{name: "a switch for a system catalog that has gone is ignored", args: []string{"catalog", "list"},
+			list: `[{"name": "neuro", "use": false}]`, wantStdout: ""},
+		{name: "catalog remove of a system catalog", args: []string{"catalog", "remove", "neuro"},
+			systemCatalogs: []testCatalog{{name: "neuro"}}, wantCode: 1,
+			wantStderrHas: "catalogs.json; an admin can change it with --system\n"},
+		{name: "catalog remove of a switch shows the system catalog", args: []string{"catalog", "remove", "neuro"},
+			list: `[{"name": "neuro", "use": false}]`, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "Catalog \"neuro\" removed.\n", wantList: []catalog{}},
+		{name: "catalog remove of a shadow keeps the cache it shares", args: []string{"catalog", "remove", "neuro"},
+			catalogs: []testCatalog{{name: "neuro", apps: "[]"}}, systemCatalogs: []testCatalog{{name: "neuro", apps: "[]"}},
+			wantStdout: "Catalog \"neuro\" removed.\n", wantCaches: []string{"neuro"}},
+		{name: "catalog add of a system name", args: []string{"catalog", "add", "neuro", "https://lab.example/neuro.json"},
+			systemCatalogs: []testCatalog{{name: "neuro"}}, wantCode: 1, wantStderrHas: "catalogs.json; choose another name\n"},
+		{name: "catalog add of a system name even with --force-update",
+			args:           []string{"catalog", "add", "--force-update", "neuro", "https://lab.example/neuro.json"},
+			systemCatalogs: []testCatalog{{name: "neuro"}}, wantCode: 1, wantStderrHas: "choose another name"},
+		{name: "catalog add of a system catalog as it is", args: []string{"catalog", "add", "neuro", exampleURL("neuro")},
+			systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout:     "Catalog \"neuro\" already exists with the same settings; nothing to do.\n"},
+		{name: "catalog add --append stays before system catalogs", args: []string{"catalog", "list"},
+			before:         [][]string{{"catalog", "add", "--append", "mylab", exampleURL("mylab")}},
+			systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout:     "mylab\t1\tuser\t" + exampleURL("mylab") + "\t\nneuro\t2\tsystem\t" + exampleURL("neuro") + "\t\n"},
+		{name: "only system catalogs, none in use", args: []string{"find"},
+			list: `[{"name": "neuro", "use": false}]`, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantCode: 1, wantStderr: "sciget: no catalogs in use; run 'sciget catalog use <name>'\n"},
+		{name: "catalog add --system", args: []string{"catalog", "add", "--system", "neuro", exampleURL("neuro")},
+			wantStdout:     "Catalog \"neuro\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantSystemList: []catalog{{Name: "neuro", URL: exampleURL("neuro"), Use: true}}, wantCaches: []string{}},
+		{name: "catalog add --system ignores a broken user list",
+			args: []string{"catalog", "add", "--system", "neuro", exampleURL("neuro")}, list: "{", config: "{",
+			wantStdout:     "Catalog \"neuro\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantSystemList: []catalog{{Name: "neuro", URL: exampleURL("neuro"), Use: true}}},
+		{name: "catalog add --system --force-update keeps caches",
+			args:           []string{"catalog", "add", "--system", "--force-update", "neuro", "https://lab.example/neuro.json"},
+			systemCatalogs: []testCatalog{{name: "neuro", apps: "[]"}},
+			wantStdout:     "Catalog \"neuro\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantSystemList: []catalog{{Name: "neuro", URL: "https://lab.example/neuro.json", Use: true}}, wantCaches: []string{"neuro"}},
+		{name: "catalog remove --system keeps caches", args: []string{"catalog", "remove", "--system", "neuro"},
+			systemCatalogs: []testCatalog{{name: "neuro", apps: "[]"}},
+			wantStdout:     "Catalog \"neuro\" removed.\n", wantSystemList: []catalog{}, wantCaches: []string{"neuro"}},
+		{name: "catalog unuse --system", args: []string{"catalog", "unuse", "--system", "neuro"},
+			systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout:     "Catalog \"neuro\" no longer in use.\n", wantSystemList: []catalog{{Name: "neuro", URL: exampleURL("neuro")}}},
+		{name: "catalog use --system --append", args: []string{"catalog", "use", "--system", "--append", "neuro"},
+			systemCatalogs: []testCatalog{{name: "neuro"}, {name: "other"}},
+			wantStdout:     "Catalog \"neuro\" in use at the bottom. Run 'sciget refresh' to update it.\n",
+			wantSystemList: []catalog{{Name: "other", URL: exampleURL("other"), Use: true}, {Name: "neuro", URL: exampleURL("neuro"), Use: true}}},
+		{name: "catalog remove completes only the user's", args: []string{"__complete", "catalog", "remove", ""},
+			catalogs: []testCatalog{{name: "mylab"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "mylab\n:4\n", wantStderrHas: "Completion ended with directive"},
+		{name: "catalog use completes system catalogs too", args: []string{"__complete", "catalog", "use", ""},
+			catalogs: []testCatalog{{name: "mylab"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "mylab\nneuro\n:4\n", wantStderrHas: "Completion ended with directive"},
+		{name: "--system completes the system's", args: []string{"__complete", "catalog", "remove", "--system", ""},
+			catalogs: []testCatalog{{name: "mylab"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "neuro\n:4\n", wantStderrHas: "Completion ended with directive"},
+		{name: "config get of a system value prints only the value", args: []string{"config", "get", "display_start_command"},
+			systemConfig: `{"display_start_command": ["/s"]}`, wantStdout: "[\"/s\"]\n"},
+		{name: "config list names the system as the source", args: []string{"config", "list"},
+			systemConfig: `{"display_start_command": ["/s"]}`, wantStdoutHas: "display_start_command\t[\"/s\"]\tsystem\n"},
+		{name: "a user value wins over the system's", args: []string{"config", "get", "auto_pull"},
+			config: `{"auto_pull": true}`, systemConfig: `{"auto_pull": false}`, wantStdout: "true\n"},
+		{name: "config set --system", args: []string{"config", "set", "--system", "auto_pull", "true"},
+			wantSystemConfig: "{\n  \"auto_pull\": true\n}\n"},
+		{name: "config set --system keeps the user's file out", args: []string{"config", "set", "--system", "auto_pull", "true"},
+			config: `{"parallel_pulls": 2}`, wantConfig: `{"parallel_pulls": 2}`, wantSystemConfig: "{\n  \"auto_pull\": true\n}\n"},
+		{name: "config set --system of a per-user key", args: []string{"config", "set", "--system", "cache_dir", "/c"},
+			wantCode: 2, wantStderr: "sciget: cache_dir can only be set per user" + usageHint},
+		{name: "a per-user key in the system file", args: []string{"config", "get", "auto_pull"},
+			systemConfig: `{"container_dir": "/c"}`, wantCode: 1, wantStderrHas: "container_dir can only be set per user\n"},
+		{name: "an invalid system file", args: []string{"config", "list"},
+			systemConfig: "{", wantCode: 1, wantStderrHas: "sciget: reading config "},
+		{name: "config unset --system", args: []string{"config", "unset", "--system", "auto_pull"},
+			systemConfig: `{"auto_pull": true}`, wantSystemConfig: "{}\n"},
+		{name: "config unset of a key only the system sets writes nothing", args: []string{"config", "unset", "auto_pull"},
+			config: "{ }", systemConfig: `{"auto_pull": true}`, wantConfig: "{ }"},
+		{name: "config set does not copy system values", args: []string{"config", "set", "parallel_pulls", "2"},
+			config: "{}", systemConfig: `{"auto_pull": true}`, wantConfig: "{\n  \"parallel_pulls\": 2\n}\n"},
+		{name: "doctor names a user catalog hiding a system one", args: []string{"doctor"},
+			catalogs: []testCatalog{{name: "neuro", url: "https://lab.example/neuro.json"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "Your catalog neuro hides the system catalog of the same name (" + exampleURL("neuro") + "). Fix it with:\n" +
+				"  sciget catalog remove neuro\n"},
+		{name: "doctor names a setting equal to the system's", args: []string{"doctor"},
+			config: `{"auto_pull": true}`, systemConfig: `{"auto_pull": true}`,
+			wantStdoutHas: "Your config sets auto_pull to the same value as "},
+		{name: "doctor accepts a deliberate override", args: []string{"doctor"},
+			config: `{"auto_pull": true}`, systemConfig: `{"auto_pull": false}`, wantStdout: "No problems found.\n"},
+
 		{name: "config lists", args: []string{"config"}, config: `{"cache_dir": "/c"}`, env: map[string]string{"XDG_DATA_HOME": "/data"},
-			wantStdout: "cache_dir\t/c\tconfig\n" + otherDefaults},
+			wantStdout: "cache_dir\t/c\tuser\n" + otherDefaults},
 		{name: "config list", args: []string{"config", "list"}, config: `{"cache_dir": "/c"}`, env: map[string]string{"XDG_DATA_HOME": "/data"},
-			wantStdout: "cache_dir\t/c\tconfig\n" + otherDefaults},
+			wantStdout: "cache_dir\t/c\tuser\n" + otherDefaults},
 		{name: "config with an unknown subcommand", args: []string{"config", "bogus"}, wantCode: 2,
 			wantStderr: "sciget: unknown command \"bogus\" for \"sciget config\"" + usageHint},
 		{name: "config get a default", args: []string{"config", "get", "cache_dir"},
@@ -570,10 +704,18 @@ func TestRun(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			list := tt.list
-			if tt.catalogs != nil {
+			sysDir := t.TempDir()
+			setSystemDir(t, sysDir)
+			if tt.systemConfig != "" {
+				if err := os.WriteFile(filepath.Join(sysDir, "config.json"), []byte(tt.systemConfig), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// buildList returns the catalogs as JSON, writing each one's
+			// apps.json into the cache.
+			buildList := func(tcs []testCatalog) string {
 				var catalogs []catalog
-				for _, tc := range tt.catalogs {
+				for _, tc := range tcs {
 					c := catalog{Name: tc.name, URL: tc.url, Use: !tc.unused, Dir: tc.dir, Layout: tc.layout}
 					switch {
 					case c.URL != "":
@@ -597,7 +739,16 @@ func TestRun(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				list = string(data)
+				return string(data)
+			}
+			list := tt.list
+			if tt.catalogs != nil {
+				list = buildList(tt.catalogs)
+			}
+			if tt.systemCatalogs != nil {
+				if err := os.WriteFile(filepath.Join(sysDir, "catalogs.json"), []byte(buildList(tt.systemCatalogs)), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if list != "" {
 				mode := os.FileMode(0o600)
@@ -685,6 +836,24 @@ func TestRun(t *testing.T) {
 				}
 				if !slices.Equal(catalogs, tt.wantList) {
 					t.Errorf("catalogs.json = %v, want %v", catalogs, tt.wantList)
+				}
+			}
+			if tt.wantSystemList != nil {
+				catalogs, err := loadCatalogList(filepath.Join(sysDir, "catalogs.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(catalogs, tt.wantSystemList) {
+					t.Errorf("system catalogs.json = %v, want %v", catalogs, tt.wantSystemList)
+				}
+			}
+			if tt.wantSystemConfig != "" {
+				data, err := os.ReadFile(filepath.Join(sysDir, "config.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(data) != tt.wantSystemConfig {
+					t.Errorf("system config.json = %q, want %q", data, tt.wantSystemConfig)
 				}
 			}
 			if tt.wantCaches != nil {

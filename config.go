@@ -68,20 +68,50 @@ var configKeys = []configKey{
 //go:embed defaults.json
 var defaultsJSON []byte
 
-// config is a loaded config file: its path and the keys it sets, each in
-// its text form. Keys it does not set have their default.
-type config struct {
-	path      string
-	overrides map[string]string
+// systemDir is the folder of the system layer: the config and catalog
+// list an admin or image writes with --system, read under the user's.
+var systemDir = "/etc/sciget"
+
+// systemPath returns the path of the named file in systemDir, or "" when
+// systemDir is not absolute (on Windows, /etc/sciget is relative to the
+// current drive), so there is no system layer.
+func systemPath(name string) string {
+	if !filepath.IsAbs(systemDir) {
+		return ""
+	}
+	return filepath.Join(systemDir, name)
 }
 
-// readConfig loads the config file at configPath.
+// config is a loaded config file: its path and the keys it sets, each in
+// its text form. The user's config also holds the system file's keys, under
+// its own. Keys neither sets have their default.
+type config struct {
+	path      string
+	overrides map[string]string // the keys the file at path sets
+	system    map[string]string // the system file's keys; nil when path is the system file
+	isSystem  bool              // path is the system file
+}
+
+// readConfig loads the config file at configPath, over the system file.
 func readConfig() (config, error) {
 	path, err := configPath()
 	if err != nil {
 		return config{}, err
 	}
 	return loadConfig(path)
+}
+
+// readSystemConfig loads the system file alone, for --system.
+func readSystemConfig() (config, error) {
+	path := systemPath("config.json")
+	if path == "" {
+		return config{}, errors.New("this system has no system folder")
+	}
+	overrides, err := readConfigFile(path, true)
+	if err != nil {
+		return config{}, err
+	}
+	return config{path: path, overrides: overrides, isSystem: true}, nil
 }
 
 // configPath returns SCIGET_CONFIG if it is set, otherwise config.json in
@@ -97,51 +127,84 @@ func configPath() (string, error) {
 	return filepath.Join(dir, "sciget", "config.json"), nil
 }
 
-// loadConfig reads the config file at path. A missing file sets nothing.
-// Anything but a JSON object of known keys with valid values of their kinds
-// is an error.
+// loadConfig reads the config file at path, over the system file.
 func loadConfig(path string) (config, error) {
+	system := map[string]string{}
+	if systemFile := systemPath("config.json"); systemFile != "" {
+		var err error
+		if system, err = readConfigFile(systemFile, true); err != nil {
+			return config{}, err
+		}
+	}
+	overrides, err := readConfigFile(path, false)
+	if err != nil {
+		return config{}, err
+	}
+	return config{path: path, overrides: overrides, system: system}, nil
+}
+
+// readConfigFile returns the keys the config file at path sets, each in its
+// text form. A missing file sets nothing. Anything but a JSON object of
+// known keys with valid values of their kinds is an error, as is a per-user
+// key in the system file.
+func readConfigFile(path string, system bool) (map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return config{path: path, overrides: map[string]string{}}, nil
+		return map[string]string{}, nil
 	}
 	if err != nil {
-		return config{}, fmt.Errorf("reading config: %w", err)
+		return nil, fmt.Errorf("reading config: %w", err)
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return config{}, fmt.Errorf("reading config %s: %w", path, err)
+		return nil, fmt.Errorf("reading config %s: %w", path, err)
 	}
 	if raw == nil {
-		return config{}, fmt.Errorf("reading config %s: not a JSON object", path)
+		return nil, fmt.Errorf("reading config %s: not a JSON object", path)
 	}
 	overrides := map[string]string{}
 	for _, name := range slices.Sorted(maps.Keys(raw)) {
 		key, err := findConfigKey(name)
+		if err == nil && system && key.path {
+			err = perUserError(name)
+		}
 		if err != nil {
-			return config{}, fmt.Errorf("reading config %s: %w", path, err)
+			return nil, fmt.Errorf("reading config %s: %w", path, err)
 		}
 		value, err := valueText(key.kind, raw[name])
 		if err == nil {
 			err = key.validate(value)
 		}
 		if err != nil {
-			return config{}, fmt.Errorf("reading config %s: invalid %s: %w", path, name, err)
+			return nil, fmt.Errorf("reading config %s: invalid %s: %w", path, name, err)
 		}
 		overrides[name] = value
 	}
-	return config{path: path, overrides: overrides}, nil
+	return overrides, nil
+}
+
+// perUserError is why a folder key may not be set system-wide: sciget
+// writes into these folders, so one shared by every user would let one
+// user change what another runs.
+func perUserError(name string) error {
+	return fmt.Errorf("%s can only be set per user", name)
 }
 
 // get returns the text form of the named key's value and where it came
-// from: "config" if the file sets it, otherwise "default".
+// from: "user" or "system" for the file that sets it, otherwise "default".
 func (c config) get(name string) (value, source string, err error) {
 	key, err := findConfigKey(name)
 	if err != nil {
 		return "", "", err
 	}
 	if v, ok := c.overrides[name]; ok {
-		return v, "config", nil
+		if c.isSystem {
+			return v, "system", nil
+		}
+		return v, "user", nil
+	}
+	if v, ok := c.system[name]; ok {
+		return v, "system", nil
 	}
 	v, err := defaultValue(key.name)
 	return v, "default", err
@@ -187,6 +250,9 @@ func (c config) set(name, value string) error {
 	if err != nil {
 		return usageError{err.Error()}
 	}
+	if key.path && c.isSystem {
+		return usageError{perUserError(name).Error()}
+	}
 	if key.path && value != "" {
 		if value, err = filepath.Abs(value); err != nil {
 			return fmt.Errorf("making %s absolute: %w", name, err)
@@ -202,7 +268,7 @@ func (c config) set(name, value string) error {
 		return usageError{fmt.Sprintf("invalid %s: %s", name, err)}
 	}
 	c.overrides[name] = value
-	return writeConfig(c.path, c.overrides)
+	return c.write()
 }
 
 // unset removes the named key from the file, if the file sets it. An
@@ -215,17 +281,50 @@ func (c config) unset(name string) error {
 		return nil
 	}
 	delete(c.overrides, name)
+	return c.write()
+}
+
+// write saves the keys c's file sets.
+func (c config) write() error {
+	if c.isSystem {
+		return writeSystemConfig(c.path, c.overrides)
+	}
 	return writeConfig(c.path, c.overrides)
 }
 
 // writeConfig writes overrides, each in its text form, to the config file
 // at path, in place, each as its kind's JSON type.
 func writeConfig(path string, overrides map[string]string) error {
+	values, err := configValues(overrides)
+	if err == nil {
+		err = writeJSONFile(path, values)
+	}
+	if err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+	return nil
+}
+
+// writeSystemConfig writes overrides to the system config file at path, as
+// writeSystemFile does.
+func writeSystemConfig(path string, overrides map[string]string) error {
+	values, err := configValues(overrides)
+	if err == nil {
+		err = writeSystemFile(path, values)
+	}
+	if err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+	return nil
+}
+
+// configValues returns overrides with each value as its kind's JSON type.
+func configValues(overrides map[string]string) (map[string]any, error) {
 	values := map[string]any{}
 	for name, value := range overrides {
 		key, err := findConfigKey(name)
 		if err != nil {
-			return fmt.Errorf("writing config: %w", err)
+			return nil, err
 		}
 		if key.kind == textKind {
 			values[name] = value
@@ -233,10 +332,7 @@ func writeConfig(path string, overrides map[string]string) error {
 			values[name] = json.RawMessage(value)
 		}
 	}
-	if err := writeJSONFile(path, values); err != nil {
-		return fmt.Errorf("writing config: %w", err)
-	}
-	return nil
+	return values, nil
 }
 
 // writeJSONFile writes v as indented JSON to the file at path in place, so a
@@ -257,6 +353,37 @@ func writeJSONFile(path string, v any) error {
 	_, err = f.Write(append(data, '\n'))
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
+	}
+	return err
+}
+
+// writeSystemFile writes v as indented JSON to the system file at path,
+// for every user to read: through a temporary file renamed into place, so
+// no user reads part of one and a symlink at path is replaced, not
+// followed. A folder it creates is readable by everyone, whatever root's
+// umask. Permission errors say that --system needs root.
+func writeSystemFile(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		err = os.MkdirAll(dir, 0o755)
+		if err == nil {
+			err = os.Chmod(dir, 0o755)
+		}
+		if err != nil {
+			return systemWriteError(err)
+		}
+	}
+	return systemWriteError(writeFileAtomic(path, string(data)+"\n"))
+}
+
+// systemWriteError adds a hint to a permission error from a --system write.
+func systemWriteError(err error) error {
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("%w (--system needs root)", err)
 	}
 	return err
 }

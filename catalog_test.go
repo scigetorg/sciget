@@ -243,7 +243,7 @@ func TestReadContainers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := writeCatalogList(path, tt.catalogs); err != nil {
+			if err := writeCatalogList(path, tt.catalogs, false); err != nil {
 				t.Fatal(err)
 			}
 			if tt.apps != "" {

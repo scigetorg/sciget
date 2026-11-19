@@ -756,8 +756,11 @@ func (m *model) lookUpLocation() tea.Cmd {
 
 // moduleText describes c's module: how to load it, or why it has none.
 func moduleText(cfg config, c container) string {
+	// As install: a share that is also the caller's container_dir is theirs.
 	if loc, err := locate(cfg, c); err == nil && loc.share != "" {
-		return "the " + loc.share + " share's own modules"
+		if path, err := storePath(cfg, c); err != nil || path == "" {
+			return "the " + loc.share + " share's own modules"
+		}
 	}
 	moduleDir, _, err := cfg.get("module_dir")
 	if err != nil || slices.ContainsFunc([]string{c.catalog, c.tool, c.version, c.buildDate}, unsafeLayoutValue) {
@@ -784,7 +787,7 @@ func locationText(cfg config, c container) string {
 	var missing notOnMachineError
 	switch {
 	case errors.As(err, &missing):
-		if _, _, catalogs, err := readCatalogs(); err == nil {
+		if _, catalogs, err := readCatalogs(); err == nil {
 			if cat, mounted := containerShare(catalogs, c); cat.Dir != "" && !mounted {
 				return fmt.Sprintf("%s: the %s share (%s) is not mounted", notHere, cat.Name, cat.Dir)
 			}

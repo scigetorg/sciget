@@ -13,6 +13,7 @@ func TestInstall(t *testing.T) {
 		name       string
 		args       []string
 		onShare    bool   // fsl/6.0.3 is on the share, not downloaded
+		shareStore bool   // container_dir is the share's folder, as an admin's is
 		modulePath string // MODULEPATH; {modules} is module_dir
 		wantCode   int
 		wantStdout string // {path} is the container's path, {modules} module_dir
@@ -29,6 +30,10 @@ func TestInstall(t *testing.T) {
 		{name: "share container gets no module", args: []string{"install", "fsl/6.0.3"}, onShare: true,
 			wantStdout: "fsl/6.0.3 is already on the machine: {path}\n" +
 				"No module written for fsl/6.0.3: it is on the neuro share, which provides its modules\n"},
+		{name: "a share that is also container_dir gets a module", args: []string{"install", "fsl/6.0.3"}, shareStore: true,
+			wantStdout: "fsl/6.0.3 is already on the machine: {path}\n" +
+				"Installed fsl/6.0.3: module fsl/6.0.3, 2 commands\n" +
+				"To use sciget's modules, run: module use {modules}/neuro\n", wantModule: true},
 		{name: "unknown name", args: []string{"install", "nope/1"}, wantCode: 1,
 			wantStderr: "sciget: no container named \"nope/1\""},
 		{name: "no name", args: []string{"install"}, wantCode: 2,
@@ -40,6 +45,9 @@ func TestInstall(t *testing.T) {
 			base := filepath.Dir(store)
 			moduleDir := filepath.Join(base, "modules")
 			apptainer, _ := fakeFinderApptainer(t, false)
+			if tt.shareStore {
+				store = cat.Dir
+			}
 			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
 				"cache_dir": filepath.Join(base, "cache"), "container_dir": store, "module_dir": moduleDir,
 				"apptainer_path": apptainer,
