@@ -362,7 +362,6 @@ func TestWriteConfigList(t *testing.T) {
 		{"launch_check_seconds", "5"},
 		{"network_timeout_seconds", "30"},
 		{"update_url", updateURL},
-		{"download_urls", `["https://object-store.rc.nectar.org.au/v1/AUTH_dead991e1fa847e3afcca2d3a7041f5d/neurodesk/{file}","https://neurocontainers.s3.us-east-2.amazonaws.com/{file}"]`},
 		{"warn_missing_checksum", "false"},
 		{"auto_pull", "false"},
 		{"parallel_pulls", "3"},

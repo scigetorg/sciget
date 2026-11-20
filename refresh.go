@@ -88,9 +88,10 @@ func refreshCatalogs() ([]refreshResult, error) {
 		return nil, err
 	}
 	client.CheckRedirect = httpsOnly // as the catalog URL itself must be
+	read := onceReader(client, maxSize)
 	var results []refreshResult
 	for _, cat := range used {
-		changed, err := refreshCatalog(client, cat.URL, cat.dir(cacheDir), maxSize)
+		changed, err := refreshCatalog(read, cat, cat.dir(cacheDir))
 		results = append(results, refreshResult{name: cat.Name, changed: changed, err: err})
 	}
 	return results, nil
@@ -106,75 +107,105 @@ func newHTTPClient(cfg config) (*http.Client, error) {
 	return &http.Client{Timeout: time.Duration(seconds) * time.Second}, nil
 }
 
-// refreshCatalog downloads the catalog at catalogURL and, if it differs
-// from apps.json in dir, replaces that file. It reports whether it did. Each
-// success also writes the URL to dir's url file. A catalog larger than
-// maxSize bytes is an error.
-func refreshCatalog(client *http.Client, catalogURL, dir string, maxSize int64) (bool, error) {
-	data, err := downloadCatalog(client, catalogURL, maxSize)
+// refreshCatalog reads cat's catalog JSON with read (taking its domain
+// from a domains file), then its apps list, and if either differs from the
+// copy in dir, replaces it there: apps.json, then catalog.json. It reports
+// whether it did. Any failure leaves the copy as it was. Each success also
+// writes the URL to dir's url file.
+func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog, dir string) (bool, error) {
+	data, base, err := read(cat.URL)
 	if err != nil {
 		return false, err
 	}
-	if _, err := parseCatalog(data); err != nil {
+	if cat.Domain != "" {
+		parts, err := splitDomains(data)
+		if err != nil {
+			return false, fmt.Errorf("%s is not a valid domains file: %w", cat.URL, err)
+		}
+		var ok bool
+		if data, ok = parts[cat.Domain]; !ok {
+			return false, fmt.Errorf("domain %q is no longer in %s", cat.Domain, cat.URL)
+		}
+	}
+	_, appsLink, err := checkCatalogJSON(data, base)
+	if err != nil {
+		return false, fmt.Errorf("%s is not a valid catalog JSON: %w", cat.URL, err)
+	}
+	apps, _, err := read(appsLink)
+	if err != nil {
+		return false, err
+	}
+	if _, err := parseCatalog(apps); err != nil {
 		return false, fmt.Errorf("downloaded catalog is invalid: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("writing catalog: %w", err)
 	}
 	// 0o600, as catalogs.json: a query string may carry a token.
-	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(catalogURL+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
 		return false, fmt.Errorf("writing catalog: %w", err)
 	}
-	path := filepath.Join(dir, "apps.json")
-	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
-		return false, nil
+	// The two files are not replaced as one: if the second write fails, the
+	// next refresh puts it right.
+	changed := false
+	for _, file := range []struct {
+		name string
+		data []byte
+		mode os.FileMode
+	}{{"apps.json", apps, 0o644}, {"catalog.json", data, 0o600}} {
+		path := filepath.Join(dir, file.name)
+		if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, file.data) {
+			continue
+		}
+		if err := writeCatalog(path, file.data, file.mode); err != nil {
+			return changed, fmt.Errorf("writing catalog: %w", err)
+		}
+		changed = true
 	}
-	if err := writeCatalog(path, data); err != nil {
-		return false, fmt.Errorf("writing catalog: %w", err)
-	}
-	return true, nil
+	return changed, nil
 }
 
 // downloadCatalog returns the body of a GET of catalogURL, which must
 // answer 200 with at most maxSize bytes, so a catalog URL that names some
-// other, larger file fails before it fills memory.
-func downloadCatalog(client *http.Client, catalogURL string, maxSize int64) ([]byte, error) {
+// other, larger file fails before it fills memory. It also returns the URL
+// the body came from, after any redirects.
+func downloadCatalog(client *http.Client, catalogURL string, maxSize int64) ([]byte, string, error) {
 	req, err := http.NewRequest(http.MethodGet, catalogURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("downloading catalog: %w", err)
+		return nil, "", fmt.Errorf("downloading catalog: %w", err)
 	}
 	req.Header.Set("User-Agent", "sciget/"+version)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("downloading catalog: %w", err)
+		return nil, "", fmt.Errorf("downloading catalog: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("downloading catalog: %s returned %s", catalogURL, resp.Status)
+		return nil, "", fmt.Errorf("downloading catalog: %s returned %s", catalogURL, resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("downloading catalog: %w", err)
+		return nil, "", fmt.Errorf("downloading catalog: %w", err)
 	}
 	if int64(len(data)) > maxSize {
-		return nil, fmt.Errorf("downloading catalog: %s is larger than max_catalog_size (%d bytes)",
+		return nil, "", fmt.Errorf("downloading catalog: %s is larger than max_catalog_size (%d bytes)",
 			catalogURL, maxSize)
 	}
-	return data, nil
+	return data, resp.Request.URL.String(), nil
 }
 
-// writeCatalog writes data to a new temporary file beside path and
-// renames it to path, so readers see the old file or the new one, never a
+// writeCatalog writes data, with mode, to a new temporary file beside path
+// and renames it to path, so readers see the old file or the new one, never a
 // partial write, and two refreshes at once never share a file. The
 // directory must exist.
-func writeCatalog(path string, data []byte) error {
+func writeCatalog(path string, data []byte, mode os.FileMode) error {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.incomplete")
 	if err != nil {
 		return err
 	}
 	_, err = f.Write(data)
 	if err == nil {
-		err = f.Chmod(0o644)
+		err = f.Chmod(mode)
 	}
 	if closeErr := f.Close(); err == nil {
 		err = closeErr

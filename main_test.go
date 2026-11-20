@@ -19,22 +19,33 @@ import (
 type testCatalog struct {
 	name   string
 	url    string // exampleURL(name), or the test server's, when empty
+	domain string
 	apps   string // apps.json in its cache dir; none when empty
 	dir    string
 	layout string
 	unused bool // registered with "use": false
 }
 
+// exampleDir holds the catalog JSONs exampleURL writes.
+var exampleDir string
+
+// testCatalogJSON is the catalog JSON of every test catalog.
+const testCatalogJSON = `{"schemaVersion": 1, "appJsonUrl": "apps.json", "downloadUrls": ["https://example.org/{file}"]}`
+
 // TestMain points the system layer at an empty folder, so no test reads
-// the real /etc/sciget.
+// the real /etc/sciget, and makes the folder exampleURL writes in.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "sciget-system-")
 	if err != nil {
 		panic(err)
 	}
 	systemDir = dir
+	if exampleDir, err = os.MkdirTemp("", "sciget-examples-"); err != nil {
+		panic(err)
+	}
 	code := m.Run()
 	os.RemoveAll(dir)
+	os.RemoveAll(exampleDir)
 	os.Exit(code)
 }
 
@@ -46,9 +57,42 @@ func setSystemDir(t *testing.T, dir string) {
 	t.Cleanup(func() { systemDir = old })
 }
 
-// exampleURL is the URL a testCatalog gets when none is given and nothing
-// is served.
-func exampleURL(name string) string { return "https://example.org/" + name + "/apps.json" }
+// exampleDomains returns the path of a local domains file with the keys
+// eeg and neuro, writing it and each one's apps.json beside it if needed.
+func exampleDomains(eeg, neuro string) string {
+	dir := filepath.Join(exampleDir, "domains")
+	files := map[string]string{
+		"domains.json": `{"schemaVersion": 1, "domains": {
+			"eeg": {"appJsonUrl": "eeg/apps.json", "downloadUrls": ["https://example.org/{file}"]},
+			"neuro": {"appJsonUrl": "neuro/apps.json", "downloadUrls": ["https://example.org/{file}"], "registry": "x"}}}`,
+		"eeg/apps.json":   eeg,
+		"neuro/apps.json": neuro,
+	}
+	for name, data := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			panic(err)
+		}
+	}
+	return filepath.Join(dir, "domains.json")
+}
+
+// exampleURL returns the path of a local catalog JSON for name, writing it
+// if needed. A testCatalog gets it when no URL is given and nothing is
+// served.
+func exampleURL(name string) string {
+	path := filepath.Join(exampleDir, name, "catalog.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(path, []byte(testCatalogJSON), 0o644); err != nil {
+		panic(err)
+	}
+	return path
+}
 
 func TestRun(t *testing.T) {
 	const helpText = "Usage:\n  sciget [flags]\n  sciget [command]\n"
@@ -58,8 +102,11 @@ func TestRun(t *testing.T) {
 		"fsleyesGUI-fsl 6.0.3": {"version": "20200905", "exec": "fsleyes"},
 		"fsl 6.0.3 arm64": {"version": "20260101", "image": "fsl_6.0.3_arm64", "show_in_applist": false}}}}`
 	const labCatalog = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20240101"}}}}`
+	const labCatalogJSONApps = `{"eeg": {"apps": {"eeg 1.0": {"version": "20240101"}}}}`
+	const fslCatalogJSONApps = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905"}}}}`
 	const hiddenCatalog = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "1", "show_in_applist": false}}}}`
-	const mirrorURL = "https://mirror.example.org/neuroimaging/apps.json"
+	mirrorURL := exampleURL("mirror")
+	labURL := exampleURL("lab")
 	const noCatalogs = "sciget: no catalogs; run 'sciget catalog add <name> <url>'\n"
 	const noneInUse = "sciget: no catalogs in use; run 'sciget catalog use <name>'\n"
 	neuroimaging := []testCatalog{{name: "neuroimaging", apps: fslCatalog}}
@@ -70,6 +117,15 @@ func TestRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	physicalCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domainsURL := exampleDomains(labCatalogJSONApps, fslCatalogJSONApps)
+	badURL := filepath.Join(exampleDir, "bad.json")
+	if err := os.WriteFile(badURL, []byte(`{"appJsonUrl": "apps.json"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	relativeURL, err := filepath.Rel(cwd, exampleURL("relative"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +156,6 @@ func TestRun(t *testing.T) {
 		"launch_check_seconds\t5\tdefault\n" +
 		"network_timeout_seconds\t30\tdefault\n" +
 		"update_url\thttps://github.com/scigetorg/sciget/releases/latest\tdefault\n" +
-		"download_urls\t[\"https://object-store.rc.nectar.org.au/v1/AUTH_dead991e1fa847e3afcca2d3a7041f5d/neurodesk/{file}\",\"https://neurocontainers.s3.us-east-2.amazonaws.com/{file}\"]\tdefault\n" +
 		"warn_missing_checksum\tfalse\tdefault\n" +
 		"auto_pull\tfalse\tdefault\n" +
 		"parallel_pulls\t3\tdefault\n"
@@ -122,7 +177,7 @@ func TestRun(t *testing.T) {
 		list             string            // written to catalogs.json instead, when set
 		readOnlyList     bool              // write catalogs.json with mode 0o400
 		lockedCaches     bool              // cache_dir/catalogs allows no deletions
-		serve            map[string]string // when set, a test server serves each body at /<name>/apps.json, else 404
+		serve            map[string]string // when set, a test server serves each body at /<name>/apps.json, with testCatalogJSON at /<name>/catalog.json; else 404
 		readOnly         bool              // write config with mode 0o400
 		env              map[string]string // set after the defaults
 		stored           []string          // paths created under the default container_dir
@@ -247,7 +302,7 @@ func TestRun(t *testing.T) {
 			catalogs: []testCatalog{{name: "neuroimaging", apps: fslCatalog, unused: true}}},
 		{name: "find before a refresh", args: []string{"find"}, wantCode: 1,
 			catalogs:      []testCatalog{{name: "neuroimaging"}},
-			wantStderrHas: "/catalogs/neuroimaging-77a7c3e239d9/apps.json; run 'sciget refresh'\n"},
+			wantStderrHas: "/catalogs/neuroimaging-"},
 		{name: "find", args: []string{"find", "fsl"}, catalogs: neuroimaging,
 			wantStdout: "fsl/6.0.3\tneuroimaging\timage registration\tyes\t\n"},
 		{name: "find --all", args: []string{"find", "--all", "fsl"}, catalogs: neuroimaging,
@@ -286,8 +341,7 @@ func TestRun(t *testing.T) {
 			wantStdout: ":1\n", wantStderrHas: "Completion ended with directive: ShellCompDirectiveError"},
 		{name: "find reads cache_dir from the config", args: []string{"find"},
 			config: `{"cache_dir": "/nowhere"}`, catalogs: []testCatalog{{name: "neuroimaging"}}, wantCode: 1,
-			wantStderr: "sciget: no catalog at /nowhere/catalogs/neuroimaging-77a7c3e239d9/apps.json; " +
-				"run 'sciget refresh'\n"},
+			wantStderrHas: "sciget: no catalog at /nowhere/catalogs/neuroimaging-"},
 		{name: "find with a broken config", args: []string{"find"}, catalogs: neuroimaging,
 			config: `{"cache-dir": "/c"}`, wantCode: 1, wantStderrHas: "sciget: reading config "},
 		{name: "find with a broken list", args: []string{"find"}, list: "{", wantCode: 1,
@@ -306,7 +360,7 @@ func TestRun(t *testing.T) {
 		{name: "refresh in order", args: []string{"refresh"},
 			catalogs:     []testCatalog{{name: "mylab"}, {name: "neuroimaging", apps: fslCatalog}},
 			serve:        map[string]string{"mylab": labCatalog, "neuroimaging": fslCatalog},
-			wantRequests: []string{"/mylab/apps.json", "/neuroimaging/apps.json"},
+			wantRequests: []string{"/mylab/catalog.json", "/mylab/apps.json", "/neuroimaging/catalog.json", "/neuroimaging/apps.json"},
 			wantStdout:   "Catalog \"mylab\" updated.\nCatalog \"neuroimaging\" is up to date.\n"},
 		{name: "refresh carries on after a failure", args: []string{"refresh"},
 			catalogs: []testCatalog{{name: "cryoem"}, {name: "neuroimaging"}},
@@ -315,11 +369,11 @@ func TestRun(t *testing.T) {
 			wantStderrHas: "sciget: catalog \"cryoem\": downloading catalog: http://127.0.0.1:"},
 		{name: "refresh with two failures", args: []string{"refresh"},
 			catalogs: []testCatalog{{name: "a"}, {name: "b"}}, serve: map[string]string{}, wantCode: 1,
-			wantStderrHas: "/a/apps.json returned 404 Not Found\nsciget: catalog \"b\": "},
+			wantStderrHas: "/a/catalog.json returned 404 Not Found\nsciget: catalog \"b\": "},
 		{name: "refresh skips catalogs not in use", args: []string{"refresh"},
 			catalogs:     []testCatalog{{name: "old", unused: true}, {name: "neuroimaging"}},
 			serve:        map[string]string{"old": fslCatalog, "neuroimaging": fslCatalog},
-			wantRequests: []string{"/neuroimaging/apps.json"},
+			wantRequests: []string{"/neuroimaging/catalog.json", "/neuroimaging/apps.json"},
 			wantStdout:   "Catalog \"neuroimaging\" updated.\n"},
 		{name: "refresh without catalogs", args: []string{"refresh"}, wantCode: 1, wantStderr: noCatalogs},
 		{name: "refresh with none in use", args: []string{"refresh"}, wantCode: 1, wantStderr: noneInUse,
@@ -370,13 +424,14 @@ func TestRun(t *testing.T) {
 		{name: "catalog add a bad name", args: []string{"catalog", "add", "My Lab", exampleURL("mylab")}, wantCode: 2,
 			wantStderr: "sciget: invalid catalog name \"My Lab\": must be lowercase letters, digits, \"-\" and \"_\", " +
 				"starting with a letter or digit" + usageHint},
-		{name: "catalog add a bad URL", args: []string{"catalog", "add", "mylab", "example.org/apps.json"}, wantCode: 2,
+		{name: "catalog add a missing file", args: []string{"catalog", "add", "mylab", "example.org/apps.json"}, wantCode: 1,
+			wantStderr: "sciget: reading catalog: open " + filepath.Join(cwd, "example.org", "apps.json") + ": no such file or directory\n"},
+		{name: "catalog add another scheme", args: []string{"catalog", "add", "mylab", "ftp://example.org/apps.json"}, wantCode: 2,
 			wantStderr: "sciget: invalid catalog URL: must start with https:// or http://" + usageHint},
 		{name: "catalog add a plain http URL", args: []string{"catalog", "add", "mylab", "http://mirror.local/apps.json"}, wantCode: 2,
 			wantStderr: "sciget: invalid catalog URL: must use https; plain http is allowed only to this machine (localhost)" + usageHint},
-		{name: "catalog add plain http to this machine", args: []string{"catalog", "add", "mylab", "http://localhost:8080/apps.json"},
-			wantStdout: "Catalog \"mylab\" added at the top. Run 'sciget refresh' to download it.\n",
-			wantList:   []catalog{{Name: "mylab", URL: "http://localhost:8080/apps.json", Use: true}}},
+		{name: "catalog add plain http to this machine is read", args: []string{"catalog", "add", "mylab", "http://localhost:1/catalog.json"},
+			wantCode: 1, wantStderrHas: `sciget: downloading catalog: Get "http://localhost:1/catalog.json"`},
 		{name: "catalog add a URL with credentials", args: []string{"catalog", "add", "mylab", "https://u:p@e.org/a.json"},
 			wantCode: 2, wantStderr: "sciget: invalid catalog URL: must not contain credentials" + usageHint},
 		{name: "catalog add without a URL", args: []string{"catalog", "add", "mylab"}, wantCode: 2,
@@ -452,6 +507,45 @@ func TestRun(t *testing.T) {
 			wantCaches: []string{"neuroimaging"}},
 		{name: "catalog unuse an unknown name", args: []string{"catalog", "unuse", "x"}, wantCode: 1,
 			wantStderr: "sciget: no catalog named \"x\"\n"},
+		{name: "catalog add a domains file", args: []string{"catalog", "add", "sci", domainsURL},
+			wantStdout: "Catalog \"sci-eeg\" added at the top.\nCatalog \"sci-neuro\" added at the top. Run 'sciget refresh' to download them.\n",
+			wantList: []catalog{{Name: "sci-eeg", URL: domainsURL, Domain: "eeg", Use: true},
+				{Name: "sci-neuro", URL: domainsURL, Domain: "neuro", Use: true}}},
+		{name: "catalog add a domains file --append", args: []string{"catalog", "add", "--append", "sci", domainsURL},
+			catalogs:   []testCatalog{{name: "mylab"}},
+			wantStdout: "Catalog \"sci-eeg\" added at the bottom.\nCatalog \"sci-neuro\" added at the bottom. Run 'sciget refresh' to download them.\n",
+			wantList: []catalog{{Name: "mylab", URL: exampleURL("mylab"), Use: true},
+				{Name: "sci-eeg", URL: domainsURL, Domain: "eeg", Use: true},
+				{Name: "sci-neuro", URL: domainsURL, Domain: "neuro", Use: true}}},
+		{name: "catalog add a domains file again adds only new keys", args: []string{"catalog", "add", "sci", domainsURL},
+			catalogs: []testCatalog{{name: "sci-eeg", url: domainsURL, domain: "eeg"}},
+			wantStdout: "Catalog \"sci-eeg\" already exists with the same settings; nothing to do.\n" +
+				"Catalog \"sci-neuro\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantList: []catalog{{Name: "sci-neuro", URL: domainsURL, Domain: "neuro", Use: true},
+				{Name: "sci-eeg", URL: domainsURL, Domain: "eeg", Use: true}}},
+		{name: "catalog add a domains file with a key of another domain", args: []string{"catalog", "add", "sci", domainsURL},
+			catalogs: []testCatalog{{name: "sci-eeg", url: domainsURL, domain: "neuro"}}, wantCode: 1, wantListSame: true,
+			wantStderr: "sciget: catalog \"sci-eeg\" already exists with different settings; use --force-update to replace it, or choose another name\n"},
+		{name: "catalog add a domains file with a system name", args: []string{"catalog", "add", "sci", domainsURL},
+			list: "[]", systemCatalogs: []testCatalog{{name: "sci-neuro"}}, wantCode: 1, wantListSame: true,
+			wantStderrHas: "sciget: catalog \"sci-neuro\" is set by "},
+		{name: "catalog add an invalid catalog JSON", args: []string{"catalog", "add", "bad", badURL}, wantCode: 1,
+			wantStderr: "sciget: " + badURL + " is not a valid catalog JSON: schemaVersion must be 1\n"},
+		{name: "catalog add a relative file", args: []string{"catalog", "add", "rel", relativeURL},
+			wantStdout: "Catalog \"rel\" added at the top. Run 'sciget refresh' to download it.\n",
+			wantList:   []catalog{{Name: "rel", URL: exampleURL("relative"), Use: true}}},
+		{name: "refresh a domain of a domains file", args: []string{"refresh"},
+			catalogs:   []testCatalog{{name: "sci-neuro", url: domainsURL, domain: "neuro"}},
+			wantStdout: "Catalog \"sci-neuro\" updated.\n"},
+		{name: "find after refreshing a domain", args: []string{"find", "fsl"},
+			before:        [][]string{{"refresh"}},
+			catalogs:      []testCatalog{{name: "sci-neuro", url: domainsURL, domain: "neuro"}},
+			wantStdoutHas: "fsl/6.0.3"},
+		{name: "catalog list shows a domain", args: []string{"catalog", "list"},
+			catalogs:   []testCatalog{{name: "sci-neuro", url: domainsURL, domain: "neuro"}},
+			wantStdout: "sci-neuro\t1\tuser\t" + domainsURL + "#neuro\t\n"},
+		{name: "download_urls is no longer a setting", args: []string{"find"}, config: `{"download_urls": []}`,
+			catalogs: neuroimaging, wantCode: 1, wantStderrHas: `unknown key "download_urls"`},
 		{name: "catalog list", args: []string{"catalog", "list"},
 			catalogs: []testCatalog{{name: "mylab"}, {name: "old", unused: true}, {name: "neuroimaging"}},
 			wantStdout: "mylab\t1\tuser\t" + exampleURL("mylab") + "\t\nold\t-\tuser\t" + exampleURL("old") +
@@ -477,8 +571,8 @@ func TestRun(t *testing.T) {
 			catalogs: []testCatalog{{name: "mylab"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
 			wantStdout: "mylab\t1\tuser\t" + exampleURL("mylab") + "\t\nneuro\t2\tsystem\t" + exampleURL("neuro") + "\t\n"},
 		{name: "a user catalog hides a system one of the same name", args: []string{"catalog", "list"},
-			catalogs: []testCatalog{{name: "neuro", url: "https://lab.example/neuro.json"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
-			wantStdout: "neuro\t1\tuser\thttps://lab.example/neuro.json\t\n"},
+			catalogs: []testCatalog{{name: "neuro", url: labURL}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			wantStdout: "neuro\t1\tuser\t" + labURL + "\t\n"},
 		{name: "catalog unuse of a system catalog records only that", args: []string{"catalog", "unuse", "neuro"},
 			systemCatalogs: []testCatalog{{name: "neuro"}},
 			wantStdout:     "Catalog \"neuro\" no longer in use.\n", wantList: []catalog{{Name: "neuro"}}},
@@ -503,10 +597,10 @@ func TestRun(t *testing.T) {
 		{name: "catalog remove of a shadow keeps the cache it shares", args: []string{"catalog", "remove", "neuro"},
 			catalogs: []testCatalog{{name: "neuro", apps: "[]"}}, systemCatalogs: []testCatalog{{name: "neuro", apps: "[]"}},
 			wantStdout: "Catalog \"neuro\" removed.\n", wantCaches: []string{"neuro"}},
-		{name: "catalog add of a system name", args: []string{"catalog", "add", "neuro", "https://lab.example/neuro.json"},
+		{name: "catalog add of a system name", args: []string{"catalog", "add", "neuro", labURL},
 			systemCatalogs: []testCatalog{{name: "neuro"}}, wantCode: 1, wantStderrHas: "catalogs.json; choose another name\n"},
 		{name: "catalog add of a system name even with --force-update",
-			args:           []string{"catalog", "add", "--force-update", "neuro", "https://lab.example/neuro.json"},
+			args:           []string{"catalog", "add", "--force-update", "neuro", labURL},
 			systemCatalogs: []testCatalog{{name: "neuro"}}, wantCode: 1, wantStderrHas: "choose another name"},
 		{name: "catalog add of a system catalog as it is", args: []string{"catalog", "add", "neuro", exampleURL("neuro")},
 			systemCatalogs: []testCatalog{{name: "neuro"}},
@@ -526,10 +620,10 @@ func TestRun(t *testing.T) {
 			wantStdout:     "Catalog \"neuro\" added at the top. Run 'sciget refresh' to download it.\n",
 			wantSystemList: []catalog{{Name: "neuro", URL: exampleURL("neuro"), Use: true}}},
 		{name: "catalog add --system --force-update keeps caches",
-			args:           []string{"catalog", "add", "--system", "--force-update", "neuro", "https://lab.example/neuro.json"},
+			args:           []string{"catalog", "add", "--system", "--force-update", "neuro", labURL},
 			systemCatalogs: []testCatalog{{name: "neuro", apps: "[]"}},
 			wantStdout:     "Catalog \"neuro\" added at the top. Run 'sciget refresh' to download it.\n",
-			wantSystemList: []catalog{{Name: "neuro", URL: "https://lab.example/neuro.json", Use: true}}, wantCaches: []string{"neuro"}},
+			wantSystemList: []catalog{{Name: "neuro", URL: labURL, Use: true}}, wantCaches: []string{"neuro"}},
 		{name: "catalog remove --system keeps caches", args: []string{"catalog", "remove", "--system", "neuro"},
 			systemCatalogs: []testCatalog{{name: "neuro", apps: "[]"}},
 			wantStdout:     "Catalog \"neuro\" removed.\n", wantSystemList: []catalog{}, wantCaches: []string{"neuro"}},
@@ -572,7 +666,7 @@ func TestRun(t *testing.T) {
 		{name: "config set does not copy system values", args: []string{"config", "set", "parallel_pulls", "2"},
 			config: "{}", systemConfig: `{"auto_pull": true}`, wantConfig: "{\n  \"parallel_pulls\": 2\n}\n"},
 		{name: "doctor names a user catalog hiding a system one", args: []string{"doctor"},
-			catalogs: []testCatalog{{name: "neuro", url: "https://lab.example/neuro.json"}}, systemCatalogs: []testCatalog{{name: "neuro"}},
+			catalogs: []testCatalog{{name: "neuro", url: labURL}}, systemCatalogs: []testCatalog{{name: "neuro"}},
 			wantStdout: "Your catalog neuro hides the system catalog of the same name (" + exampleURL("neuro") + "). Fix it with:\n" +
 				"  sciget catalog remove neuro\n"},
 		{name: "doctor names a setting equal to the system's", args: []string{"doctor"},
@@ -683,9 +777,12 @@ func TestRun(t *testing.T) {
 			if tt.serve != nil {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					requests = append(requests, r.URL.Path)
-					name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/apps.json")
+					name, file, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 					body, ok := tt.serve[name]
-					if !ok {
+					if file == "catalog.json" {
+						body = testCatalogJSON
+					}
+					if !ok || file != "catalog.json" && file != "apps.json" {
 						http.NotFound(w, r)
 						return
 					}
@@ -716,11 +813,11 @@ func TestRun(t *testing.T) {
 			buildList := func(tcs []testCatalog) string {
 				var catalogs []catalog
 				for _, tc := range tcs {
-					c := catalog{Name: tc.name, URL: tc.url, Use: !tc.unused, Dir: tc.dir, Layout: tc.layout}
+					c := catalog{Name: tc.name, URL: tc.url, Domain: tc.domain, Use: !tc.unused, Dir: tc.dir, Layout: tc.layout}
 					switch {
 					case c.URL != "":
 					case base != "":
-						c.URL = base + "/" + tc.name + "/apps.json"
+						c.URL = base + "/" + tc.name + "/catalog.json"
 					default:
 						c.URL = exampleURL(tc.name)
 					}
@@ -731,6 +828,9 @@ func TestRun(t *testing.T) {
 							t.Fatal(err)
 						}
 						if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(tc.apps), 0o644); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(filepath.Join(dir, "catalog.json"), []byte(testCatalogJSON), 0o600); err != nil {
 							t.Fatal(err)
 						}
 					}

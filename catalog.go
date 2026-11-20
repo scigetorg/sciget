@@ -28,6 +28,7 @@ type container struct {
 	graphical     bool     // some entry has a graphical command
 	hidden        bool     // every entry is hidden
 	catalog       string   // the name of the catalog it comes from
+	mirrors       []string // the catalog's download URLs, with {file}
 	shadowed      bool     // an earlier catalog in use has the same name
 	entries       []entry  // visible entries with a command, in key order
 	published     download // the image's size and SHA-256, if the catalog gives them
@@ -83,8 +84,13 @@ func readContainers() ([]container, error) {
 		if err != nil {
 			return nil, &catalogError{name: cat.Name, err: err}
 		}
+		mirrors, err := loadMirrors(filepath.Join(cat.dir(cacheDir), "catalog.json"))
+		if err != nil {
+			return nil, &catalogError{name: cat.Name, err: err}
+		}
 		for _, c := range containers {
 			c.catalog = cat.Name
+			c.mirrors = mirrors
 			c.shadowed = seen[c.name()]
 			seen[c.name()] = true
 			all = append(all, c)
@@ -93,6 +99,24 @@ func readContainers() ([]container, error) {
 	// A stable sort keeps copies of a name in catalog order.
 	slices.SortStableFunc(all, compareContainers)
 	return all, nil
+}
+
+// loadMirrors returns the download URLs in the catalog JSON at path, or
+// none when there is no such file, so a catalog last refreshed by an older
+// sciget still lists its containers.
+func loadMirrors(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading catalog: %w", err)
+	}
+	c, err := parseCatalogJSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("reading catalog %s: %w", path, err)
+	}
+	return c.DownloadURLs, nil
 }
 
 // catalogError is why the catalog in use called name could not be read.

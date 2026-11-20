@@ -22,7 +22,7 @@ import (
 
 // pullContainer downloads c into the store unless its build is already on
 // the machine, and returns where it is and whether it was downloaded. It tries
-// each of download_urls in turn until one gives a file of the right size
+// each of its catalog's download URLs in turn until one gives a file of the right size
 // (and SHA-256, if the catalog has one) that Apptainer can open.
 // progress, if not nil, receives the source's host and the bytes so far;
 // warn receives a warning to show. Cancelling ctx stops the pull and
@@ -64,7 +64,7 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 	if err != nil {
 		return location{}, false, err
 	}
-	urls, err := downloadURLs(cfg, c)
+	urls, err := downloadURLs(c)
 	if err != nil {
 		return location{}, false, err
 	}
@@ -114,16 +114,15 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 	return location{}, false, fmt.Errorf("could not download %s:\n  %s", c.name(), strings.Join(failures, "\n  "))
 }
 
-// downloadURLs returns c's download URLs: each of download_urls with {file}
-// replaced by the image's file name.
-func downloadURLs(cfg config, c container) ([]string, error) {
-	templates, err := cfg.getList("download_urls")
-	if err != nil {
-		return nil, err
+// downloadURLs returns c's download URLs: each of its catalog's mirrors
+// with {file} replaced by the image's file name.
+func downloadURLs(c container) ([]string, error) {
+	if len(c.mirrors) == 0 {
+		return nil, fmt.Errorf("catalog %q has no download mirrors; run 'sciget refresh'", c.catalog)
 	}
 	file := url.PathEscape(c.fileName() + ".simg")
-	urls := make([]string, len(templates))
-	for i, t := range templates {
+	urls := make([]string, len(c.mirrors))
+	for i, t := range c.mirrors {
 		urls[i] = strings.Replace(t, "{file}", file, 1)
 	}
 	return urls, nil

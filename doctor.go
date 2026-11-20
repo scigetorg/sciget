@@ -65,7 +65,7 @@ func findLayerProblems(cfg config) ([]problem, error) {
 	for _, c := range l.user {
 		if i := findCatalog(l.system, c.Name); i >= 0 && c.URL != "" {
 			problems = append(problems, problem{
-				text: fmt.Sprintf("Your catalog %s hides the system catalog of the same name (%s).", c.Name, l.system[i].URL),
+				text: fmt.Sprintf("Your catalog %s hides the system catalog of the same name (%s).", c.Name, l.system[i].link()),
 				fix:  []string{shellJoin([]string{"sciget", "catalog", "remove", c.Name})},
 			})
 		}

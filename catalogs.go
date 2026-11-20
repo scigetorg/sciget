@@ -19,12 +19,15 @@ import (
 	"strings"
 )
 
-// catalog is one entry of catalogs.json: a named apps.json and whether it
-// is in use. In the user's file, an entry with no URL only switches the
-// system catalog of that name on or off.
+// catalog is one entry of catalogs.json: a named catalog JSON and whether
+// it is in use. URL is a URL or an absolute path; Domain, when set, is the
+// key the catalog takes from the domains file there. In the user's file,
+// an entry with no URL only switches the system catalog of that name on or
+// off.
 type catalog struct {
 	Name   string `json:"name"`
 	URL    string `json:"url,omitempty"`
+	Domain string `json:"domain,omitempty"`
 	Use    bool   `json:"use"`
 	Dir    string `json:"dir,omitempty"`
 	Layout string `json:"layout,omitempty"`
@@ -36,15 +39,17 @@ type catalog struct {
 type catalogEntry struct {
 	Name   string `json:"name"`
 	URL    string `json:"url"`
+	Domain string `json:"domain"`
 	Use    *bool  `json:"use"`
 	Dir    string `json:"dir"`
 	Layout string `json:"layout"`
 }
 
 // dir returns the catalog's directory in cacheDir. Its name ends in a hash
-// of the URL, so a catalog whose URL changes gets a new directory.
+// of the URL and domain, so a catalog whose source changes gets a new
+// directory.
 func (c catalog) dir(cacheDir string) string {
-	sum := sha256.Sum256([]byte(c.URL))
+	sum := sha256.Sum256([]byte(c.URL + "\n" + c.Domain))
 	return filepath.Join(cacheDir, "catalogs", c.Name+"-"+hex.EncodeToString(sum[:])[:12])
 }
 
@@ -210,7 +215,7 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 	}
 	for _, o := range objects {
 		for _, key := range slices.Sorted(maps.Keys(o)) {
-			if !slices.Contains([]string{"name", "url", "use", "dir", "layout"}, key) {
+			if !slices.Contains([]string{"name", "url", "domain", "use", "dir", "layout"}, key) {
 				return nil, fmt.Errorf("unknown field %q", key)
 			}
 		}
@@ -221,12 +226,17 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 		if err := checkCatalogName(e.Name); err != nil {
 			return nil, fmt.Errorf("invalid catalog name %q: %w", e.Name, err)
 		}
-		if e.URL == "" && (e.Dir != "" || e.Layout != "") {
-			return nil, fmt.Errorf("catalog %q has a dir or layout but no url", e.Name)
+		if e.URL == "" && (e.Domain != "" || e.Dir != "" || e.Layout != "") {
+			return nil, fmt.Errorf("catalog %q has a domain, dir or layout but no url", e.Name)
 		}
 		if e.URL != "" {
-			if err := checkCatalogURL(e.URL); err != nil {
+			if err := checkLink(e.URL); err != nil {
 				return nil, fmt.Errorf("catalog %q has an invalid URL: %w", e.Name, err)
+			}
+		}
+		if e.Domain != "" {
+			if err := checkCatalogName(e.Domain); err != nil {
+				return nil, fmt.Errorf("catalog %q has an invalid domain: %w", e.Name, err)
 			}
 		}
 		if e.Use == nil {
@@ -248,7 +258,7 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 				return nil, fmt.Errorf("catalog %q has an invalid layout: %w", e.Name, err)
 			}
 		}
-		catalogs = append(catalogs, catalog{Name: e.Name, URL: e.URL, Use: *e.Use, Dir: e.Dir, Layout: e.Layout})
+		catalogs = append(catalogs, catalog{Name: e.Name, URL: e.URL, Domain: e.Domain, Use: *e.Use, Dir: e.Dir, Layout: e.Layout})
 	}
 	return catalogs, nil
 }
@@ -267,6 +277,20 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
 	return nil
+}
+
+// sameSettings reports whether a and b read the same file and store
+// containers in the same place.
+func sameSettings(a, b catalog) bool {
+	return a.URL == b.URL && a.Domain == b.Domain && a.Dir == b.Dir && a.Layout == b.Layout
+}
+
+// link returns where the catalog comes from, as catalog list shows it.
+func (c catalog) link() string {
+	if c.Domain != "" {
+		return c.URL + "#" + c.Domain
+	}
+	return c.URL
 }
 
 // findCatalog returns the index of the catalog with this name, or -1.
@@ -304,7 +328,7 @@ func writeCatalogTable(w io.Writer, catalogs []catalog, terminal bool) error {
 		if c.System {
 			source = "system"
 		}
-		fmt.Fprintf(&rows, "%s\t%s\t%s\t%s\t%s\n", c.Name, position, source, c.URL, c.Dir)
+		fmt.Fprintf(&rows, "%s\t%s\t%s\t%s\t%s\n", c.Name, position, source, c.link(), c.Dir)
 	}
 	return writeTable(w, terminal, "NAME\tORDER\tSOURCE\tURL\tDIR\n", rows.String())
 }

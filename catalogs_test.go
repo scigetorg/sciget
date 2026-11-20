@@ -57,7 +57,17 @@ func TestLoadCatalogList(t *testing.T) {
 		{name: "no url: switches a system catalog", json: `[{"name": "a", "use": false}]`,
 			want: []catalog{{Name: "a"}}},
 		{name: "no url with a dir", json: `[{"name": "a", "use": true, "dir": "/d"}]`,
-			wantErr: `catalog "a" has a dir or layout but no url`},
+			wantErr: `catalog "a" has a domain, dir or layout but no url`},
+		{name: "a domain", json: `[{"name": "a-neuro", "url": "https://e.org/d.json", "domain": "neuro", "use": true}]`,
+			want: []catalog{{Name: "a-neuro", URL: "https://e.org/d.json", Domain: "neuro", Use: true}}},
+		{name: "no url with a domain", json: `[{"name": "a", "use": true, "domain": "neuro"}]`,
+			wantErr: `catalog "a" has a domain, dir or layout but no url`},
+		{name: "bad domain", json: `[{"name": "a", "url": "https://e.org/d.json", "domain": "Neuro", "use": true}]`,
+			wantErr: `catalog "a" has an invalid domain: must be lowercase`},
+		{name: "a local file", json: `[{"name": "a", "url": "/opt/cat/catalog.json", "use": true}]`,
+			want: []catalog{{Name: "a", URL: "/opt/cat/catalog.json", Use: true}}},
+		{name: "a relative local file", json: `[{"name": "a", "url": "cat/catalog.json", "use": true}]`,
+			wantErr: `catalog "a" has an invalid URL: must be an absolute path`},
 		{name: "url empty", json: `[{"name": "a", "url": "", "use": true}]`,
 			want: []catalog{{Name: "a", Use: true}}},
 		{name: "bad name", json: `[{"name": "My Lab", "url": "https://e.org/a.json", "use": true}]`,
@@ -207,11 +217,13 @@ func TestCatalogDir(t *testing.T) {
 		want string
 	}{
 		{name: "name and URL hash", c: catalog{Name: "neuroimaging", URL: "https://example.org/neuroimaging/apps.json"},
-			want: "/c/catalogs/neuroimaging-77a7c3e239d9"},
+			want: "/c/catalogs/neuroimaging-5e6f756747dc"},
 		{name: "same name, another URL", c: catalog{Name: "neuroimaging", URL: "https://mirror.example.org/neuroimaging/apps.json"},
-			want: "/c/catalogs/neuroimaging-b5791028df25"},
+			want: "/c/catalogs/neuroimaging-44e75bbd37c3"},
 		{name: "same URL, another name", c: catalog{Name: "neuro", URL: "https://example.org/neuroimaging/apps.json"},
-			want: "/c/catalogs/neuro-77a7c3e239d9"},
+			want: "/c/catalogs/neuro-5e6f756747dc"},
+		{name: "same URL, a domain", c: catalog{Name: "neuroimaging", URL: "https://example.org/neuroimaging/apps.json", Domain: "neuro"},
+			want: "/c/catalogs/neuroimaging-563e9873b002"},
 	}
 
 	for _, tt := range tests {

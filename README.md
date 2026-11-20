@@ -21,11 +21,14 @@ sciget starts with no catalogs. Add one, saying where its containers are,
 then download it:
 
 ```sh
-sciget catalog add neuroimaging https://apps-json.neurodesk.workers.dev/neuroimaging/apps.json \
+sciget catalog add neurodesk https://apps-catalog.scigetorg.workers.dev/domains.json \
     --dir /cvmfs/neurodesk.ardc.edu.au/containers
 sciget refresh
 sciget
 ```
+
+That link is a domains file, so it adds one catalog per domain:
+`neurodesk-neuroimaging` and `neurodesk-microscopy`.
 
 Run on a terminal with no command, sciget opens a full-screen interface:
 search, pick a container and open a shell in it or launch its applications.
@@ -33,8 +36,39 @@ Mouse and keyboard both work.
 
 Catalog URLs must use https. Plain http is allowed only to this machine,
 such as a port forwarded through an SSH tunnel
-(`http://localhost:8080/apps.json`). sciget uses the standard `HTTPS_PROXY`,
-`HTTP_PROXY` and `NO_PROXY` variables.
+(`http://localhost:8080/catalog.json`). A local file works too
+(`sciget catalog add mylab ./catalog.json`). sciget uses the standard
+`HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` variables.
+
+## Catalog files
+
+A catalog is a JSON file saying where its apps list is and which mirrors
+serve its containers. The file's name does not matter.
+
+```json
+{
+  "schemaVersion": 1,
+  "title": "Neuroimaging",
+  "description": "Neuroimaging tools and resources for research and analysis.",
+  "appJsonUrl": "apps.json",
+  "downloadUrls": [
+    "https://object-store.rc.nectar.org.au/v1/AUTH_dead991e1fa847e3afcca2d3a7041f5d/neurodesk/{file}",
+    "https://neurocontainers.s3.us-east-2.amazonaws.com/{file}"
+  ]
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `schemaVersion` | yes | 1 |
+| `appJsonUrl` | yes | The apps list: a URL, or relative to this file |
+| `downloadUrls` | yes | Mirrors for the containers, tried in order; each https with `{file}` once |
+| `title`, `description` | no | Shown in a later release |
+
+Other keys are ignored. A **domains file** holds several catalogs under
+keys, `{"schemaVersion": 1, "domains": {"neuroimaging": {...}, ...}}`;
+`sciget catalog add <name> <url>` adds one catalog per key, named
+`<name>-<key>`. Running it again adds only keys new to the file.
 
 ## Commands
 
@@ -57,8 +91,7 @@ such as a port forwarded through an SSH tunnel
 
 `sciget pull fsl/6.0.7.8` downloads a container that is not already on
 the machine (on its catalog's share, or downloaded before) into
-`container_dir` (default `~/.local/share/sciget/containers`). It tries each of `download_urls` in turn, Nectar then S3
-by default. A download counts only when its size matches what the server
+`container_dir` (default `~/.local/share/sciget/containers`). It tries each of its catalog's `downloadUrls` in turn. A download counts only when its size matches what the server
 reported, its SHA-256 matches the catalog's (when the catalog gives
 one), and Apptainer can open it. Set `warn_missing_checksum` to true to be
 told when no SHA-256 was published. Before downloading, sciget checks the
@@ -113,7 +146,7 @@ An admin, or an image's Dockerfile, sets sciget up for every user with
 user's own files:
 
 ```sh
-sudo sciget catalog add --system neuroimaging https://apps-json.neurodesk.workers.dev/neuroimaging/apps.json \
+sudo sciget catalog add --system neurodesk https://apps-catalog.scigetorg.workers.dev/domains.json \
     --dir /cvmfs/neurodesk.ardc.edu.au/containers
 sudo sciget config set --system display_start_command '["/opt/scidesktop/start_desktop.sh"]'
 ```
