@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,10 +26,15 @@ func newCatalogCommand() *cobra.Command {
 	var addLast, forceUpdate, addSystem bool
 	var dir, layout string
 	add := &cobra.Command{
-		Use:               "add <name> <url>",
-		Short:             "Add a catalog and use it first",
-		Args:              exactArgs(2),
-		ValidArgsFunction: cobra.NoFileCompletions,
+		Use:   "add <name> <url or file>",
+		Short: "Add a catalog and use it first",
+		Args:  exactArgs(2),
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			if len(args) == 1 {
+				return nil, cobra.ShellCompDirectiveDefault // a file
+			}
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("layout") && !cmd.Flags().Changed("dir") {
 				return usageError{"--layout requires --dir"}
@@ -48,7 +54,14 @@ func newCatalogCommand() *cobra.Command {
 					return fmt.Errorf("making dir absolute: %w", err)
 				}
 			}
-			c := catalog{Name: args[0], URL: args[1], Use: true, Dir: dir, Layout: layout}
+			link := args[1]
+			if !isURL(link) {
+				var err error
+				if link, err = filepath.Abs(link); err != nil {
+					return fmt.Errorf("making the file path absolute: %w", err)
+				}
+			}
+			c := catalog{Name: args[0], URL: link, Use: true, Dir: dir, Layout: layout}
 			return addCatalog(cmd.OutOrStdout(), c, addLast, forceUpdate, addSystem)
 		},
 	}
@@ -169,59 +182,138 @@ func (f catalogFile) systemCatalog(name string) (catalog, bool) {
 }
 
 // addCatalog registers the catalog c and uses it first, or last if last
-// is set. Changing an existing one's URL, dir or layout requires
-// forceUpdate. Only a URL change removes the old cache directory, and only
-// in the user's file. A user may not add a system catalog's name.
+// is set. It reads c's file first: a domains file adds one catalog per
+// key, named "<name>-<key>". Changing an existing catalog's settings
+// requires forceUpdate, and replacing its source removes its old cache
+// directory, in the user's file only. A user may not add a system
+// catalog's name. If any catalog cannot be added, none is.
 func addCatalog(w io.Writer, c catalog, last, forceUpdate, system bool) error {
 	f, err := readCatalogFile(system)
 	if err != nil {
 		return err
 	}
-	name := c.Name
-	if err := checkCatalogName(name); err != nil {
-		return usageError{fmt.Sprintf("invalid catalog name %q: %s", name, err)}
+	if err := checkCatalogName(c.Name); err != nil {
+		return usageError{fmt.Sprintf("invalid catalog name %q: %s", c.Name, err)}
 	}
-	if err := checkCatalogURL(c.URL); err != nil {
+	if err := checkLink(c.URL); err != nil {
 		return usageError{"invalid catalog URL: " + err.Error()}
 	}
-	if s, ok := f.systemCatalog(name); ok {
-		if s.URL == c.URL && s.Dir == c.Dir && s.Layout == c.Layout {
-			_, err := fmt.Fprintf(w, "Catalog %q already exists with the same settings; nothing to do.\n", name)
-			return err
-		}
-		return fmt.Errorf("catalog %q is set by %s; choose another name", name, f.layers.systemPath)
-	}
-
-	oldDir := ""
-	if i := findCatalog(f.catalogs, name); i >= 0 {
-		old := f.catalogs[i]
-		if old.URL == c.URL && old.Dir == c.Dir && old.Layout == c.Layout {
-			_, err := fmt.Fprintf(w, "Catalog %q already exists with the same settings; nothing to do.\n", name)
-			return err
-		}
-		// An entry with no URL is left from a system catalog that has gone.
-		if old.URL != "" && !forceUpdate {
-			return fmt.Errorf("catalog %q already exists with different settings; use --force-update to replace it, or choose another name",
-				name)
-		}
-		if old.URL != "" && old.URL != c.URL && !system {
-			oldDir = old.dir(f.layers.cacheDir)
-		}
-		f.catalogs = slices.Delete(f.catalogs, i, i+1)
-	}
-	f.catalogs = placeCatalog(f.catalogs, c, last)
-	if err := f.write(); err != nil {
+	catalogs, err := newCatalogs(c, system)
+	if err != nil {
 		return err
 	}
+	if !last {
+		// Each is placed first in turn, so place them in reverse.
+		slices.Reverse(catalogs)
+	}
+
+	var added, same, oldDirs []string
+	for _, c := range catalogs {
+		if s, ok := f.systemCatalog(c.Name); ok {
+			if sameSettings(s, c) {
+				same = append(same, c.Name)
+				continue
+			}
+			return fmt.Errorf("catalog %q is set by %s; choose another name", c.Name, f.layers.systemPath)
+		}
+		if i := findCatalog(f.catalogs, c.Name); i >= 0 {
+			old := f.catalogs[i]
+			if sameSettings(old, c) {
+				same = append(same, c.Name)
+				continue
+			}
+			// An entry with no URL is left from a system catalog that has gone.
+			if old.URL != "" && !forceUpdate {
+				return fmt.Errorf("catalog %q already exists with different settings; use --force-update to replace it, or choose another name",
+					c.Name)
+			}
+			if old.URL != "" && !system && old.dir(f.layers.cacheDir) != c.dir(f.layers.cacheDir) {
+				oldDirs = append(oldDirs, old.dir(f.layers.cacheDir))
+			}
+			f.catalogs = slices.Delete(f.catalogs, i, i+1)
+		}
+		f.catalogs = placeCatalog(f.catalogs, c, last)
+		added = append(added, c.Name)
+	}
+	if len(added) > 0 {
+		if err := f.write(); err != nil {
+			return err
+		}
+	}
 	// Only once the list is written, so a failed write loses nothing.
-	if oldDir != "" {
-		if err := os.RemoveAll(oldDir); err != nil {
+	for _, dir := range oldDirs {
+		if err := os.RemoveAll(dir); err != nil {
 			return fmt.Errorf("removing catalog cache: %w", err)
 		}
 	}
-	_, err = fmt.Fprintf(w, "Catalog %q added at the %s. Run 'sciget refresh' to download it.\n",
-		name, topOrBottom(last))
-	return err
+
+	slices.Sort(same)
+	for _, name := range same {
+		if _, err := fmt.Fprintf(w, "Catalog %q already exists with the same settings; nothing to do.\n", name); err != nil {
+			return err
+		}
+	}
+	slices.Sort(added)
+	for i, name := range added {
+		hint := ""
+		if i == len(added)-1 {
+			hint = " Run 'sciget refresh' to download it."
+			if len(added) > 1 {
+				hint = " Run 'sciget refresh' to download them."
+			}
+		}
+		if _, err := fmt.Fprintf(w, "Catalog %q added at the %s.%s\n", name, topOrBottom(last), hint); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// newCatalogs reads the file c names and returns the catalogs adding it
+// makes: c itself for a catalog JSON, or for a domains file one per key,
+// in key order. It checks each catalog JSON as refresh would. With system
+// set, it reads with the system's settings alone.
+func newCatalogs(c catalog, system bool) ([]catalog, error) {
+	cfg, err := readConfigFor(system)
+	if err != nil {
+		return nil, err
+	}
+	maxSize, err := cfg.getNumber("max_catalog_size")
+	if err != nil {
+		return nil, err
+	}
+	client, err := newHTTPClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	client.CheckRedirect = httpsOnly
+	data, base, err := readLink(client, c.URL, maxSize)
+	if err != nil {
+		return nil, err
+	}
+	if !isDomainsFile(data) {
+		if _, _, err := checkCatalogJSON(data, base); err != nil {
+			return nil, fmt.Errorf("%s is not a valid catalog JSON: %w", c.URL, err)
+		}
+		return []catalog{c}, nil
+	}
+	parts, err := splitDomains(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not a valid domains file: %w", c.URL, err)
+	}
+	var catalogs []catalog
+	for _, key := range slices.Sorted(maps.Keys(parts)) {
+		d := c
+		d.Name, d.Domain = c.Name+"-"+key, key
+		if err := checkCatalogName(key); err != nil {
+			return nil, fmt.Errorf("domain %q in %s is not a valid catalog name: %w", key, c.URL, err)
+		}
+		if _, _, err := checkCatalogJSON(parts[key], base); err != nil {
+			return nil, fmt.Errorf("domain %q in %s: %w", key, c.URL, err)
+		}
+		catalogs = append(catalogs, d)
+	}
+	return catalogs, nil
 }
 
 // removeCatalog unregisters a catalog. In the user's file it also deletes
@@ -245,7 +337,7 @@ func removeCatalog(w io.Writer, name string, system bool) error {
 	if err := f.write(); err != nil {
 		return err
 	}
-	if s, shared := f.systemCatalog(name); c.URL != "" && !system && !(shared && s.URL == c.URL) {
+	if s, shared := f.systemCatalog(name); c.URL != "" && !system && !(shared && s.URL == c.URL && s.Domain == c.Domain) {
 		if err := os.RemoveAll(c.dir(f.layers.cacheDir)); err != nil {
 			return fmt.Errorf("removing catalog cache: %w", err)
 		}

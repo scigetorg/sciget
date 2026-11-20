@@ -59,7 +59,6 @@ var configKeys = []configKey{
 	{name: "launch_check_seconds", kind: numberKind, check: checkSeconds},
 	{name: "network_timeout_seconds", kind: numberKind, check: checkSeconds},
 	{name: "update_url", check: checkHTTPSURL},
-	{name: "download_urls", kind: listKind, check: eachElement(checkDownloadURL)},
 	{name: "warn_missing_checksum", kind: boolKind},
 	{name: "auto_pull", kind: boolKind},
 	{name: "parallel_pulls", kind: numberKind, check: checkParallelPulls},

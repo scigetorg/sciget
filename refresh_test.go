@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"compress/gzip"
 	"errors"
 	"net/http"
@@ -17,10 +18,15 @@ import (
 const maxSize = 1024
 
 func TestRefreshCatalog(t *testing.T) {
-	const catalog = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905"}}}}`
+	const apps = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905"}}}}`
 	const other = `{"fsl": {"apps": {"fsl 6.0.4": {"version": "20210101"}}}}`
+	const domains = `{"schemaVersion": 1, "domains": {"bad": 5, "neuro": {"appJsonUrl": "apps.json", "downloadUrls": ["https://example.org/{file}"], "registry": "x"}}}`
+	const neuroJSON = `{"appJsonUrl":"apps.json","downloadUrls":["https://example.org/{file}"],"registry":"x","schemaVersion":1}`
 	tests := []struct {
 		name        string
+		catalogJSON string // served at /catalog.json; testCatalogJSON when empty
+		domain      string // the catalog's domain
+		wantJSON    string // catalog.json afterwards, when set
 		existing    string // apps.json before the refresh; no file when empty
 		blocked     bool   // the directory is read-only, so apps.json cannot be replaced
 		urlBlocked  bool   // url is a directory, so writing it fails
@@ -34,38 +40,52 @@ func TestRefreshCatalog(t *testing.T) {
 		want        string // apps.json afterwards
 		wantErr     string
 	}{
-		{name: "first refresh", body: catalog, wantChanged: true, want: catalog},
-		{name: "same catalog, so only url is written", existing: catalog, body: catalog, want: catalog},
-		{name: "different catalog", existing: catalog, body: other, wantChanged: true, want: other},
-		{name: "damaged local copy is replaced", existing: "{}", body: catalog, wantChanged: true,
-			want: catalog},
-		{name: "compressed", body: catalog, gzip: true, wantChanged: true, want: catalog},
-		{name: "not found", existing: catalog, status: http.StatusNotFound, want: catalog,
+		{name: "first refresh", body: apps, wantChanged: true, want: apps},
+		{name: "same catalog, so only url is written", existing: apps, body: apps, want: apps},
+		{name: "different catalog", existing: apps, body: other, wantChanged: true, want: other},
+		{name: "damaged local copy is replaced", existing: "{}", body: apps, wantChanged: true,
+			want: apps},
+		{name: "compressed", body: apps, gzip: true, wantChanged: true, want: apps},
+		{name: "not found", existing: apps, status: http.StatusNotFound, want: apps,
 			wantErr: "returned 404 Not Found"},
-		{name: "server error", existing: catalog, status: http.StatusInternalServerError, want: catalog,
+		{name: "server error", existing: apps, status: http.StatusInternalServerError, want: apps,
 			wantErr: "returned 500 Internal Server Error"},
-		{name: "not modified", existing: catalog, status: http.StatusNotModified, want: catalog,
+		{name: "not modified", existing: apps, status: http.StatusNotModified, want: apps,
 			wantErr: "returned 304 Not Modified"},
-		{name: "invalid JSON", existing: catalog, body: "{", want: catalog,
+		{name: "invalid JSON", existing: apps, body: "{", want: apps,
 			wantErr: "downloaded catalog is invalid: unexpected end of JSON input"},
-		{name: "no containers", existing: catalog, body: "{}", want: catalog,
+		{name: "no containers", existing: apps, body: "{}", want: apps,
 			wantErr: "downloaded catalog is invalid: no containers"},
-		{name: "write fails", existing: catalog, body: other, blocked: true, want: catalog,
+		{name: "write fails", existing: apps, body: other, blocked: true, want: apps,
 			wantErr: "writing catalog: "},
-		{name: "url write fails", existing: catalog, body: other, urlBlocked: true, want: catalog,
+		{name: "url write fails", existing: apps, body: other, urlBlocked: true, want: apps,
 			wantErr: "writing catalog: "},
-		{name: "larger than the cap", existing: catalog, large: true, want: catalog,
+		{name: "larger than the cap", existing: apps, large: true, want: apps,
 			wantErr: "is larger than max_catalog_size (1024 bytes)"},
-		{name: "body cut short", existing: catalog, body: catalog, short: true, want: catalog,
+		{name: "body cut short", existing: apps, body: apps, short: true, want: apps,
 			wantErr: "downloading catalog: unexpected EOF"},
-		{name: "server gone", existing: catalog, closed: true, want: catalog,
+		{name: "server gone", existing: apps, closed: true, want: apps,
 			wantErr: "downloading catalog: Get "},
+		{name: "a domain of a domains file", catalogJSON: domains, domain: "neuro", body: apps,
+			wantChanged: true, want: apps, wantJSON: neuroJSON},
+		{name: "a domain gone from the file", catalogJSON: domains, domain: "eeg", existing: apps, body: other,
+			want: apps, wantErr: `domain "eeg" is no longer in http://`},
+		{name: "a domain that is not an object", catalogJSON: domains, domain: "bad", existing: apps, body: other,
+			want: apps, wantErr: "is not a valid catalog JSON: json: cannot unmarshal number"},
+		{name: "an invalid catalog JSON", catalogJSON: `{"appJsonUrl": "apps.json"}`, existing: apps, body: other,
+			want: apps, wantErr: "is not a valid catalog JSON: schemaVersion must be 1"},
+		{name: "a domains file with no domain", catalogJSON: domains, existing: apps, body: other,
+			want: apps, wantErr: "is not a valid catalog JSON: no appJsonUrl"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var requests []*http.Request
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/catalog.json" {
+					w.Write([]byte(cmp.Or(tt.catalogJSON, testCatalogJSON)))
+					return
+				}
 				requests = append(requests, r)
 				switch {
 				case tt.status != 0:
@@ -92,8 +112,12 @@ func TestRefreshCatalog(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "apps.json")
 			old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			jsonPath := filepath.Join(dir, "catalog.json")
 			if tt.existing != "" {
 				if err := os.WriteFile(path, []byte(tt.existing), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(jsonPath, []byte(cmp.Or(tt.catalogJSON, testCatalogJSON)), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.Chtimes(path, old, old); err != nil {
@@ -120,14 +144,15 @@ func TestRefreshCatalog(t *testing.T) {
 				}
 			}
 
-			catalogURL := srv.URL + "/apps.json"
-			changed, err := refreshCatalog(srv.Client(), catalogURL, dir, maxSize)
+			catalogURL := srv.URL + "/catalog.json"
+			cat := catalog{Name: "neuro", URL: catalogURL, Domain: tt.domain}
+			changed, err := refreshCatalog(onceReader(srv.Client(), maxSize), cat, dir)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
 				}
-				if tt.status != 0 && (err == nil || !strings.Contains(err.Error(), catalogURL)) {
-					t.Errorf("error = %v, want it to name %s", err, catalogURL)
+				if tt.status != 0 && (err == nil || !strings.Contains(err.Error(), srv.URL+"/apps.json")) {
+					t.Errorf("error = %v, want it to name %s", err, srv.URL+"/apps.json")
 				}
 			} else if err != nil {
 				t.Fatal(err)
@@ -159,7 +184,15 @@ func TestRefreshCatalog(t *testing.T) {
 					t.Errorf("apps.json rewritten: %v", err)
 				}
 			}
-			if left, _ := filepath.Glob(filepath.Join(dir, "apps.json.*.incomplete")); len(left) > 0 {
+			if tt.wantJSON != "" {
+				if data, err := os.ReadFile(jsonPath); err != nil || string(data) != tt.wantJSON {
+					t.Errorf("catalog.json = %q, %v, want %q", data, err, tt.wantJSON)
+				}
+			}
+			if info, err := os.Stat(jsonPath); tt.wantChanged && runtime.GOOS != "windows" && (err != nil || info.Mode().Perm() != 0o600) {
+				t.Errorf("catalog.json mode = %v, %v, want 0600", info, err)
+			}
+			if left, _ := filepath.Glob(filepath.Join(dir, "*.incomplete")); len(left) > 0 {
 				t.Errorf("temporary files left behind: %v", left)
 			}
 			if tt.wantChanged {
@@ -168,7 +201,7 @@ func TestRefreshCatalog(t *testing.T) {
 				if err := os.Chtimes(path, old, old); err != nil {
 					t.Fatal(err)
 				}
-				changed, err := refreshCatalog(srv.Client(), catalogURL, dir, maxSize)
+				changed, err := refreshCatalog(onceReader(srv.Client(), maxSize), cat, dir)
 				if err != nil || changed {
 					t.Errorf("second refresh: changed = %v, error = %v, want no change", changed, err)
 				}
@@ -178,7 +211,7 @@ func TestRefreshCatalog(t *testing.T) {
 			}
 			wantRequests := 1
 			switch {
-			case tt.closed:
+			case tt.closed, tt.catalogJSON != "" && tt.wantErr != "": // apps.json is never asked for
 				wantRequests = 0
 			case tt.wantChanged:
 				wantRequests = 2 // the second refresh above

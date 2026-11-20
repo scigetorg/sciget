@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,7 +64,7 @@ func TestPullContainer(t *testing.T) {
 					}
 				}))
 				defer srv.Close()
-				urls = append(urls, `"`+srv.URL+`/{file}"`)
+				urls = append(urls, srv.URL+"/{file}")
 			}
 			// The fake Apptainer opens only images that start with "a good".
 			apptainer := tt.apptainer
@@ -80,7 +81,7 @@ func TestPullContainer(t *testing.T) {
 			base := filepath.Dir(store)
 			if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
 				"cache_dir": filepath.Join(base, "cache"), "container_dir": store,
-				"apptainer_path": apptainer, "download_urls": "[" + strings.Join(urls, ",") + "]",
+				"apptainer_path":        apptainer,
 				"warn_missing_checksum": strconv.FormatBool(tt.warnMissing),
 			}); err != nil {
 				t.Fatal(err)
@@ -101,6 +102,7 @@ func TestPullContainer(t *testing.T) {
 			}
 
 			var warnings []string
+			c.mirrors = urls
 			loc, downloaded, err := pullContainer(context.Background(), cfg, c, nil, func(s string) { warnings = append(warnings, s) })
 			if tt.wantErr != nil {
 				if err == nil {
@@ -146,15 +148,33 @@ func TestPullContainer(t *testing.T) {
 }
 
 func TestDownloadURLs(t *testing.T) {
-	cfg := config{overrides: map[string]string{"download_urls": `["https://a.example/c/{file}","https://b.example/{file}?x=1"]`}}
-	c := container{tool: "fsl", version: "6.0.3", image: "fsl_6.0.3", buildDate: "20200905"}
-	got, err := downloadURLs(cfg, c)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		mirrors []string
+		want    []string
+		wantErr string
+	}{
+		{name: "each mirror", mirrors: []string{"https://a.example/c/{file}", "https://b.example/{file}?x=1"},
+			want: []string{"https://a.example/c/fsl_6.0.3_20200905.simg", "https://b.example/fsl_6.0.3_20200905.simg?x=1"}},
+		{name: "none", wantErr: `catalog "neuro" has no download mirrors; run 'sciget refresh'`},
 	}
-	want := []string{"https://a.example/c/fsl_6.0.3_20200905.simg", "https://b.example/fsl_6.0.3_20200905.simg?x=1"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Errorf("got %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := container{tool: "fsl", version: "6.0.3", image: "fsl_6.0.3", buildDate: "20200905", catalog: "neuro", mirrors: tt.mirrors}
+			got, err := downloadURLs(c)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Errorf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -240,8 +260,8 @@ func TestPullOnRun(t *testing.T) {
 			path := os.Getenv("SCIGET_CONFIG")
 			if err := writeConfig(path, map[string]string{
 				"cache_dir": filepath.Join(filepath.Dir(store), "cache"), "container_dir": store,
-				"apptainer_path": apptainer, "download_urls": `["` + srv.URL + `/{file}"]`,
-				"auto_pull": strconv.FormatBool(tt.auto),
+				"apptainer_path": apptainer,
+				"auto_pull":      strconv.FormatBool(tt.auto),
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -251,6 +271,7 @@ func TestPullOnRun(t *testing.T) {
 			}
 
 			var stderr strings.Builder
+			c.mirrors = []string{srv.URL + "/{file}"}
 			loc, err := pullOnRun(cfg, c, tt.in, &stderr, tt.interactive)
 			var missing notOnMachineError
 			if tt.wantPull && (err != nil || loc.share != "") || !tt.wantPull && !errors.As(err, &missing) {
@@ -290,7 +311,7 @@ func TestPullContainerCancel(t *testing.T) {
 	defer srv.Close()
 	if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
 		"cache_dir": filepath.Join(filepath.Dir(store), "cache"), "container_dir": store,
-		"apptainer_path": "true", "download_urls": `["` + srv.URL + `/{file}","` + srv.URL + `/again/{file}"]`,
+		"apptainer_path": "true",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -298,6 +319,7 @@ func TestPullContainerCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.mirrors = []string{srv.URL + "/{file}", srv.URL + "/again/{file}"}
 	_, _, err = pullContainer(ctx, cfg, c, func(string, int64, int64) { cancel() }, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
@@ -346,7 +368,7 @@ func TestPullAll(t *testing.T) {
 	defer srv.Close()
 	if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
 		"cache_dir": filepath.Join(filepath.Dir(store), "cache"), "container_dir": store,
-		"apptainer_path": "true", "download_urls": `["` + srv.URL + `/{file}"]`, "parallel_pulls": "2",
+		"apptainer_path": "true", "parallel_pulls": "2",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -358,6 +380,9 @@ func TestPullAll(t *testing.T) {
 	makeContainerPath(t, store, layout, cs[0], false) // fsl/1 is already there
 
 	var stdout, stderr strings.Builder
+	for i := range cs {
+		cs[i].mirrors = []string{srv.URL + "/{file}"}
+	}
 	err = pullAll(context.Background(), &stdout, &stderr, cfg, cs)
 	if err == nil || !strings.Contains(err.Error(), "1 of 4 containers failed") || !strings.Contains(err.Error(), "fsl/4") {
 		t.Errorf("err = %v, want fsl/4 to fail", err)
