@@ -13,7 +13,9 @@ import (
 )
 
 // catalogJSON is a catalog's own file: where its apps list is and which
-// mirrors serve its containers. Other keys are ignored.
+// mirrors serve its containers. Without an apps list it is an empty
+// catalog; without mirrors its containers come only from a share (--dir).
+// Other keys are ignored.
 type catalogJSON struct {
 	SchemaVersion int      `json:"schemaVersion"`
 	Title         string   `json:"title"`
@@ -33,10 +35,6 @@ func parseCatalogJSON(data []byte) (catalogJSON, error) {
 		return catalogJSON{}, fmt.Errorf("schemaVersion %d needs a newer sciget", c.SchemaVersion)
 	case c.SchemaVersion != 1:
 		return catalogJSON{}, errors.New("schemaVersion must be 1")
-	case c.AppJSONURL == "":
-		return catalogJSON{}, errors.New("no appJsonUrl")
-	case len(c.DownloadURLs) == 0:
-		return catalogJSON{}, errors.New("no downloadUrls")
 	}
 	for _, u := range c.DownloadURLs {
 		if err := checkDownloadURL(u); err != nil {
@@ -47,11 +45,11 @@ func parseCatalogJSON(data []byte) (catalogJSON, error) {
 }
 
 // checkCatalogJSON returns the catalog JSON in data, read from base, and
-// the link to its apps list.
+// the link to its apps list, or "" for an empty catalog.
 func checkCatalogJSON(data []byte, base string) (catalogJSON, string, error) {
 	c, err := parseCatalogJSON(data)
-	if err != nil {
-		return catalogJSON{}, "", err
+	if err != nil || c.AppJSONURL == "" {
+		return c, "", err
 	}
 	apps, err := resolveLink(base, c.AppJSONURL)
 	if err != nil {

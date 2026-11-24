@@ -33,6 +33,9 @@ func newRefreshCommand() *cobra.Command {
 				if r.changed {
 					result = "updated."
 				}
+				if r.empty {
+					result += " It has no apps list yet."
+				}
 				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Catalog %q %s\n", r.name, result); err != nil {
 					return err
 				}
@@ -59,11 +62,12 @@ func newRefreshCommand() *cobra.Command {
 	}
 }
 
-// refreshResult is one catalog's refresh: whether its copy changed, or
-// why it failed.
+// refreshResult is one catalog's refresh: whether its copy changed and
+// whether it is an empty catalog, or why it failed.
 type refreshResult struct {
 	name    string
 	changed bool
+	empty   bool
 	err     error
 }
 
@@ -91,8 +95,8 @@ func refreshCatalogs() ([]refreshResult, error) {
 	read := onceReader(client, maxSize)
 	var results []refreshResult
 	for _, cat := range used {
-		changed, err := refreshCatalog(read, cat, cat.dir(cacheDir))
-		results = append(results, refreshResult{name: cat.Name, changed: changed, err: err})
+		changed, empty, err := refreshCatalog(read, cat, cat.dir(cacheDir))
+		results = append(results, refreshResult{name: cat.Name, changed: changed, empty: empty, err: err})
 	}
 	return results, nil
 }
@@ -109,45 +113,55 @@ func newHTTPClient(cfg config) (*http.Client, error) {
 
 // refreshCatalog reads cat's catalog JSON with read (taking its domain
 // from a domains file), then its apps list, and if either differs from the
-// copy in dir, replaces it there: apps.json, then catalog.json. It reports
-// whether it did. Any failure leaves the copy as it was. Each success also
-// writes the URL to dir's url file.
-func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog, dir string) (bool, error) {
+// copy in dir, replaces it there: apps.json, then catalog.json. An empty
+// catalog's apps list is {}. It reports whether it replaced either and
+// whether the catalog is empty. Any failure leaves the copy as it was.
+// Each success also writes the URL to dir's url file.
+func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog, dir string) (changed, empty bool, err error) {
 	data, base, err := read(cat.URL)
 	if err != nil {
-		return false, err
+		return false, false, err
+	}
+	if cat.Domain == "" && isDomainsFile(data) {
+		return false, false, fmt.Errorf("%s is a domains file; run 'sciget catalog add' again for it", cat.URL)
 	}
 	if cat.Domain != "" {
 		parts, err := splitDomains(data)
 		if err != nil {
-			return false, fmt.Errorf("%s is not a valid domains file: %w", cat.URL, err)
+			return false, false, fmt.Errorf("%s is not a valid domains file: %w", cat.URL, err)
 		}
 		var ok bool
 		if data, ok = parts[cat.Domain]; !ok {
-			return false, fmt.Errorf("domain %q is no longer in %s", cat.Domain, cat.URL)
+			return false, false, fmt.Errorf("domain %q is no longer in %s", cat.Domain, cat.URL)
 		}
 	}
 	_, appsLink, err := checkCatalogJSON(data, base)
 	if err != nil {
-		return false, fmt.Errorf("%s is not a valid catalog JSON: %w", cat.URL, err)
+		return false, false, fmt.Errorf("%s is not a valid catalog JSON: %w", cat.URL, err)
 	}
-	apps, _, err := read(appsLink)
-	if err != nil {
-		return false, err
-	}
-	if _, err := parseCatalog(apps); err != nil {
-		return false, fmt.Errorf("downloaded catalog is invalid: %w", err)
+	empty = appsLink == ""
+	apps := []byte("{}")
+	if !empty {
+		if apps, _, err = read(appsLink); err != nil {
+			return false, false, err
+		}
+		containers, err := parseCatalog(apps)
+		if err == nil && len(containers) == 0 {
+			err = errors.New("no containers")
+		}
+		if err != nil {
+			return false, false, fmt.Errorf("downloaded catalog is invalid: %w", err)
+		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false, fmt.Errorf("writing catalog: %w", err)
+		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
 	// 0o600, as catalogs.json: a query string may carry a token.
 	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
-		return false, fmt.Errorf("writing catalog: %w", err)
+		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
 	// The two files are not replaced as one: if the second write fails, the
 	// next refresh puts it right.
-	changed := false
 	for _, file := range []struct {
 		name string
 		data []byte
@@ -158,11 +172,11 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			continue
 		}
 		if err := writeCatalog(path, file.data, file.mode); err != nil {
-			return changed, fmt.Errorf("writing catalog: %w", err)
+			return changed, empty, fmt.Errorf("writing catalog: %w", err)
 		}
 		changed = true
 	}
-	return changed, nil
+	return changed, empty, nil
 }
 
 // downloadCatalog returns the body of a GET of catalogURL, which must

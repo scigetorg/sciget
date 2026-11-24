@@ -45,6 +45,8 @@ func TestPullContainer(t *testing.T) {
 			wantErr: []string{"could not download fsl/6.0.3:", "404", "apptainer cannot open the download", "not a SIF"}, wantGets: 1},
 		{name: "no Apptainer", sources: []source{{body: good}}, apptainer: "no-such-apptainer",
 			wantErr: []string{"apptainer not found"}},
+		{name: "no mirrors, before no Apptainer", apptainer: "no-such-apptainer",
+			wantErr: []string{`catalog "neuro" has no download mirrors`}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -156,7 +158,7 @@ func TestDownloadURLs(t *testing.T) {
 	}{
 		{name: "each mirror", mirrors: []string{"https://a.example/c/{file}", "https://b.example/{file}?x=1"},
 			want: []string{"https://a.example/c/fsl_6.0.3_20200905.simg", "https://b.example/fsl_6.0.3_20200905.simg?x=1"}},
-		{name: "none", wantErr: `catalog "neuro" has no download mirrors; run 'sciget refresh'`},
+		{name: "none", wantErr: `catalog "neuro" has no download mirrors`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -211,9 +213,11 @@ func TestPullOnRun(t *testing.T) {
 		interactive bool
 		in          io.Reader
 		share       string // "missing" (the default), "present" or "none"
+		noMirrors   bool   // the catalog has no download mirrors
 		wantPull    bool
 		wantAuto    bool     // auto_pull in the file afterwards
 		wantAsked   []string // in the question
+		wantErr     string   // asks nothing and fails with this
 	}{
 		{name: "not interactive", in: strings.NewReader("\n")},
 		{name: "auto_pull set", auto: true, wantPull: true, wantAuto: true},
@@ -228,6 +232,11 @@ func TestPullOnRun(t *testing.T) {
 			wantAsked: []string{"is not on the neuro share", "and hasn't been downloaded", "check CVMFS first"}},
 		{name: "no share", interactive: true, in: strings.NewReader("n\n"), share: "none",
 			wantAsked: []string{"fsl/6.0.3 hasn't been downloaded.\n"}},
+		{name: "no mirrors, so nothing to ask", interactive: true, in: strings.NewReader("y\n"), noMirrors: true,
+			wantErr: `is not mounted. If it should be, fix CVMFS first. Catalog "neuro" has no download mirrors, so there is nothing to run`},
+		{name: "no mirrors, with auto_pull set", auto: true, wantAuto: true, noMirrors: true,
+			wantErr: `has no download mirrors, so there is nothing to run`},
+		{name: "no mirrors, not interactive", noMirrors: true, wantErr: `has no download mirrors, so there is nothing to run`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -272,7 +281,16 @@ func TestPullOnRun(t *testing.T) {
 
 			var stderr strings.Builder
 			c.mirrors = []string{srv.URL + "/{file}"}
+			if tt.noMirrors {
+				c.mirrors = nil
+			}
 			loc, err := pullOnRun(cfg, c, tt.in, &stderr, tt.interactive)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || stderr.Len() > 0 || gets > 0 {
+					t.Errorf("error = %v, asked %q, GETs %d; want %q, nothing asked or fetched", err, stderr.String(), gets, tt.wantErr)
+				}
+				return
+			}
 			var missing notOnMachineError
 			if tt.wantPull && (err != nil || loc.share != "") || !tt.wantPull && !errors.As(err, &missing) {
 				t.Errorf("got %+v, %v; want pulled: %v", loc, err, tt.wantPull)

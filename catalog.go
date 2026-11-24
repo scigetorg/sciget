@@ -257,10 +257,6 @@ func parseCatalog(data []byte) ([]container, error) {
 			}
 		}
 	}
-	if len(byName) == 0 {
-		return nil, errors.New("no containers")
-	}
-
 	containers := make([]container, 0, len(byName))
 	for _, c := range byName {
 		c.licences = slices.Compact(slices.Sorted(slices.Values(c.licences)))

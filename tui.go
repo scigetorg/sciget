@@ -756,8 +756,9 @@ func (m *model) lookUpLocation() tea.Cmd {
 
 // moduleText describes c's module: how to load it, or why it has none.
 func moduleText(cfg config, c container) string {
+	loc, locErr := locate(cfg, c)
 	// As install: a share that is also the caller's container_dir is theirs.
-	if loc, err := locate(cfg, c); err == nil && loc.share != "" {
+	if locErr == nil && loc.share != "" {
 		if path, err := storePath(cfg, c); err != nil || path == "" {
 			return "the " + loc.share + " share's own modules"
 		}
@@ -767,12 +768,21 @@ func moduleText(cfg config, c container) string {
 		return "none"
 	}
 	file, wrappers := modulePaths(moduleDir, c)
+	// As the Install button: it needs this build here, or mirrors to get it.
+	install := len(c.mirrors) > 0 || locErr == nil && !loc.older
 	if _, err := os.Stat(file); err != nil {
+		if !install {
+			return "none"
+		}
 		return "none · Install makes one"
 	}
 	text := shellJoin([]string{"module", "load", c.name()})
 	if _, err := os.Stat(wrappers); err != nil {
-		text += " (from an older build · Install updates it)"
+		hint := ""
+		if install {
+			hint = " · Install updates it"
+		}
+		text += " (from an older build" + hint + ")"
 	}
 	if line, err := moduleUseLine(cfg, c.catalog); err == nil && line != "" {
 		text += " · first: " + line

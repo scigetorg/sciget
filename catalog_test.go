@@ -25,8 +25,9 @@ func TestLoadCatalog(t *testing.T) {
 		{name: "missing file", wantErr: "no catalog at "},
 		{name: "path is a directory", dir: true, wantErr: "reading catalog: "},
 		{name: "invalid JSON", json: "{", wantErr: "unexpected end of JSON input"},
-		{name: "null", json: "null", wantErr: "no containers"},
-		{name: "no entries", json: `{"fsl": {"apps": {}}}`, wantErr: "no containers"},
+		{name: "an empty catalog", json: "{}"},
+		{name: "null", json: "null"},
+		{name: "no entries", json: `{"fsl": {"apps": {}}}`},
 		{name: "graphical entry shares the container",
 			json: `{"fsl": {"categories": ["a", "b"], "apps": {
 				"fsl 6.0.3": {"version": "20200905", "exec": ""},

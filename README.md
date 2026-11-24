@@ -61,8 +61,8 @@ serve its containers. The file's name does not matter.
 | Field | Required | Meaning |
 |---|---|---|
 | `schemaVersion` | yes | 1 |
-| `appJsonUrl` | yes | The apps list: a URL, or relative to this file |
-| `downloadUrls` | yes | Mirrors for the containers, tried in order; each https with `{file}` once |
+| `appJsonUrl` | no | The apps list: a URL, or relative to this file. Without it the catalog is empty until a later `sciget refresh` finds one |
+| `downloadUrls` | no | Mirrors for the containers, tried in order; each https with `{file}` once. Without them, containers come only from a share (`--dir`) |
 | `title`, `description` | no | Shown in a later release |
 
 Other keys are ignored. A **domains file** holds several catalogs under

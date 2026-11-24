@@ -20,7 +20,7 @@ const maxSize = 1024
 func TestRefreshCatalog(t *testing.T) {
 	const apps = `{"fsl": {"apps": {"fsl 6.0.3": {"version": "20200905"}}}}`
 	const other = `{"fsl": {"apps": {"fsl 6.0.4": {"version": "20210101"}}}}`
-	const domains = `{"schemaVersion": 1, "domains": {"bad": 5, "neuro": {"appJsonUrl": "apps.json", "downloadUrls": ["https://example.org/{file}"], "registry": "x"}}}`
+	const domains = `{"schemaVersion": 1, "domains": {"bad": 5, "neuro": {"appJsonUrl": "apps.json", "downloadUrls": ["https://example.org/{file}"], "registry": "x"}, "soon": {"registry": "y"}}}`
 	const neuroJSON = `{"appJsonUrl":"apps.json","downloadUrls":["https://example.org/{file}"],"registry":"x","schemaVersion":1}`
 	tests := []struct {
 		name        string
@@ -28,6 +28,7 @@ func TestRefreshCatalog(t *testing.T) {
 		domain      string // the catalog's domain
 		wantJSON    string // catalog.json afterwards, when set
 		existing    string // apps.json before the refresh; no file when empty
+		oldJSON     string // catalog.json before the refresh, with existing; the served one when empty
 		blocked     bool   // the directory is read-only, so apps.json cannot be replaced
 		urlBlocked  bool   // url is a directory, so writing it fails
 		status      int    // the server's status; 200 when zero
@@ -37,6 +38,7 @@ func TestRefreshCatalog(t *testing.T) {
 		large       bool // the server sends one byte more than maxSize
 		closed      bool // the server is gone before the request
 		wantChanged bool
+		wantEmpty   bool   // an empty catalog, so apps.json is never asked for
 		want        string // apps.json afterwards
 		wantErr     string
 	}{
@@ -75,7 +77,21 @@ func TestRefreshCatalog(t *testing.T) {
 		{name: "an invalid catalog JSON", catalogJSON: `{"appJsonUrl": "apps.json"}`, existing: apps, body: other,
 			want: apps, wantErr: "is not a valid catalog JSON: schemaVersion must be 1"},
 		{name: "a domains file with no domain", catalogJSON: domains, existing: apps, body: other,
-			want: apps, wantErr: "is not a valid catalog JSON: no appJsonUrl"},
+			want: apps, wantErr: "is a domains file; run 'sciget catalog add' again for it"},
+		{name: "an empty catalog", catalogJSON: `{"schemaVersion": 1}`, wantChanged: true, wantEmpty: true,
+			want: "{}", wantJSON: `{"schemaVersion": 1}`},
+		{name: "an empty appJsonUrl", catalogJSON: `{"schemaVersion": 1, "appJsonUrl": ""}`, wantChanged: true,
+			wantEmpty: true, want: "{}"},
+		{name: "a null appJsonUrl", catalogJSON: `{"schemaVersion": 1, "appJsonUrl": null}`, wantChanged: true,
+			wantEmpty: true, want: "{}"},
+		{name: "a catalog emptied", catalogJSON: `{"schemaVersion": 1}`, existing: apps, wantChanged: true,
+			wantEmpty: true, want: "{}"},
+		{name: "an empty catalog gains an apps list", existing: "{}", oldJSON: `{"schemaVersion": 1}`, body: apps,
+			wantChanged: true, want: apps, wantJSON: testCatalogJSON},
+		{name: "an empty domain", catalogJSON: domains, domain: "soon", wantChanged: true, wantEmpty: true,
+			want: "{}", wantJSON: `{"registry":"y","schemaVersion":1}`},
+		{name: "an empty catalog with a bad mirror", catalogJSON: `{"schemaVersion": 1, "downloadUrls": ["https://a.example/"]}`,
+			existing: apps, want: apps, wantErr: "must contain {file} exactly once"},
 	}
 
 	for _, tt := range tests {
@@ -117,7 +133,7 @@ func TestRefreshCatalog(t *testing.T) {
 				if err := os.WriteFile(path, []byte(tt.existing), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(jsonPath, []byte(cmp.Or(tt.catalogJSON, testCatalogJSON)), 0o600); err != nil {
+				if err := os.WriteFile(jsonPath, []byte(cmp.Or(tt.oldJSON, tt.catalogJSON, testCatalogJSON)), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.Chtimes(path, old, old); err != nil {
@@ -146,7 +162,7 @@ func TestRefreshCatalog(t *testing.T) {
 
 			catalogURL := srv.URL + "/catalog.json"
 			cat := catalog{Name: "neuro", URL: catalogURL, Domain: tt.domain}
-			changed, err := refreshCatalog(onceReader(srv.Client(), maxSize), cat, dir)
+			changed, empty, err := refreshCatalog(onceReader(srv.Client(), maxSize), cat, dir)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
@@ -157,8 +173,8 @@ func TestRefreshCatalog(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			if changed != tt.wantChanged {
-				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
+			if changed != tt.wantChanged || empty != tt.wantEmpty {
+				t.Errorf("changed, empty = %v, %v, want %v, %v", changed, empty, tt.wantChanged, tt.wantEmpty)
 			}
 			// url is written once the download validates, before apps.json.
 			urlData, urlErr := os.ReadFile(urlPath)
@@ -201,7 +217,7 @@ func TestRefreshCatalog(t *testing.T) {
 				if err := os.Chtimes(path, old, old); err != nil {
 					t.Fatal(err)
 				}
-				changed, err := refreshCatalog(onceReader(srv.Client(), maxSize), cat, dir)
+				changed, _, err := refreshCatalog(onceReader(srv.Client(), maxSize), cat, dir)
 				if err != nil || changed {
 					t.Errorf("second refresh: changed = %v, error = %v, want no change", changed, err)
 				}
@@ -211,7 +227,7 @@ func TestRefreshCatalog(t *testing.T) {
 			}
 			wantRequests := 1
 			switch {
-			case tt.closed, tt.catalogJSON != "" && tt.wantErr != "": // apps.json is never asked for
+			case tt.closed, tt.wantEmpty, tt.catalogJSON != "" && tt.wantErr != "": // apps.json is never asked for
 				wantRequests = 0
 			case tt.wantChanged:
 				wantRequests = 2 // the second refresh above
