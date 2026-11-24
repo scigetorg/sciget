@@ -135,13 +135,17 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			return false, false, fmt.Errorf("domain %q is no longer in %s", cat.Domain, cat.URL)
 		}
 	}
-	_, appsLink, err := checkCatalogJSON(data, base)
+	parsedCatalog, appsLink, err := checkCatalogJSON(data, base)
 	if err != nil {
 		return false, false, fmt.Errorf("%s is not a valid catalog JSON: %w", cat.URL, err)
 	}
-	empty = appsLink == ""
+	eessiLink, err := resolveEESSILink(parsedCatalog, base)
+	if err != nil {
+		return false, false, fmt.Errorf("%s is not a valid catalog JSON: %w", cat.URL, err)
+	}
+	empty = appsLink == "" && eessiLink == ""
 	apps := []byte("{}")
-	if !empty {
+	if appsLink != "" {
 		if apps, _, err = read(appsLink); err != nil {
 			return false, false, err
 		}
@@ -153,6 +157,15 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			return false, false, fmt.Errorf("downloaded catalog is invalid: %w", err)
 		}
 	}
+	var eessiData []byte
+	if eessiLink != "" {
+		if eessiData, _, err = read(eessiLink); err != nil {
+			return false, false, err
+		}
+		if _, err := parseEESSICatalog(eessiData); err != nil {
+			return false, false, fmt.Errorf("downloaded EESSI catalog is invalid: %w", err)
+		}
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
@@ -160,13 +173,21 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
 		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
-	// The two files are not replaced as one: if the second write fails, the
-	// next refresh puts it right.
-	for _, file := range []struct {
+	// The files are not replaced as one: if a later write fails, the next
+	// refresh puts it right.
+	files := []struct {
 		name string
 		data []byte
 		mode os.FileMode
-	}{{"apps.json", apps, 0o644}, {"catalog.json", data, 0o600}} {
+	}{{"apps.json", apps, 0o644}, {"catalog.json", data, 0o600}}
+	if eessiLink != "" {
+		files = append(files, struct {
+			name string
+			data []byte
+			mode os.FileMode
+		}{"eessi.json", eessiData, 0o644})
+	}
+	for _, file := range files {
 		path := filepath.Join(dir, file.name)
 		if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, file.data) {
 			continue
@@ -175,6 +196,14 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			return changed, empty, fmt.Errorf("writing catalog: %w", err)
 		}
 		changed = true
+	}
+	if eessiLink == "" {
+		eessiPath := filepath.Join(dir, "eessi.json")
+		if err := os.Remove(eessiPath); err == nil {
+			changed = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return changed, empty, fmt.Errorf("removing stale EESSI catalog: %w", err)
+		}
 	}
 	return changed, empty, nil
 }

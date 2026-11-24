@@ -92,6 +92,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newInstallCommand())
 	root.AddCommand(newDoctorCommand())
 	root.AddCommand(newApptainerCommand())
+	root.AddCommand(newEESSICommand())
 	root.AddCommand(newUICommand())
 	return root
 }

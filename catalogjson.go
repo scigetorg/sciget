@@ -17,11 +17,13 @@ import (
 // catalog; without mirrors its containers come only from a share (--dir).
 // Other keys are ignored.
 type catalogJSON struct {
-	SchemaVersion int      `json:"schemaVersion"`
-	Title         string   `json:"title"`
-	Description   string   `json:"description"`
-	AppJSONURL    string   `json:"appJsonUrl"`
-	DownloadURLs  []string `json:"downloadUrls"`
+	SchemaVersion   int      `json:"schemaVersion"`
+	Title           string   `json:"title"`
+	Description     string   `json:"description"`
+	AppJSONURL      string   `json:"appJsonUrl"`
+	EESSICatalogURL string   `json:"eessiCatalogUrl"`
+	EESSIStacks     []string `json:"eessi_stacks"`
+	DownloadURLs    []string `json:"downloadUrls"`
 }
 
 // parseCatalogJSON returns the catalog JSON in data, checked.
@@ -41,6 +43,11 @@ func parseCatalogJSON(data []byte) (catalogJSON, error) {
 			return catalogJSON{}, fmt.Errorf("download URL %q %w", u, err)
 		}
 	}
+	for _, stack := range c.EESSIStacks {
+		if !eessiStackPattern.MatchString(stack) {
+			return catalogJSON{}, fmt.Errorf("invalid eessi_stacks entry %q", stack)
+		}
+	}
 	return c, nil
 }
 
@@ -48,14 +55,35 @@ func parseCatalogJSON(data []byte) (catalogJSON, error) {
 // the link to its apps list, or "" for an empty catalog.
 func checkCatalogJSON(data []byte, base string) (catalogJSON, string, error) {
 	c, err := parseCatalogJSON(data)
-	if err != nil || c.AppJSONURL == "" {
-		return c, "", err
+	if err != nil {
+		return catalogJSON{}, "", err
+	}
+	if c.EESSICatalogURL != "" {
+		if _, err := resolveLink(base, c.EESSICatalogURL); err != nil {
+			return catalogJSON{}, "", fmt.Errorf("eessiCatalogUrl: %w", err)
+		}
+	}
+	if c.AppJSONURL == "" {
+		return c, "", nil
 	}
 	apps, err := resolveLink(base, c.AppJSONURL)
 	if err != nil {
 		return catalogJSON{}, "", fmt.Errorf("appJsonUrl: %w", err)
 	}
 	return c, apps, nil
+}
+
+// resolveEESSILink returns the resolved link for c.EESSICatalogURL relative to
+// base, or "" when no EESSI catalog is configured.
+func resolveEESSILink(c catalogJSON, base string) (string, error) {
+	if c.EESSICatalogURL == "" {
+		return "", nil
+	}
+	link, err := resolveLink(base, c.EESSICatalogURL)
+	if err != nil {
+		return "", fmt.Errorf("eessiCatalogUrl: %w", err)
+	}
+	return link, nil
 }
 
 // isURL reports whether link is a URL rather than a local path.

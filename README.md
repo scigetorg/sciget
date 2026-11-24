@@ -61,7 +61,9 @@ serve its containers. The file's name does not matter.
 | Field | Required | Meaning |
 |---|---|---|
 | `schemaVersion` | yes | 1 |
-| `appJsonUrl` | no | The apps list: a URL, or relative to this file. Without it the catalog is empty until a later `sciget refresh` finds one |
+| `appJsonUrl` | no | The apps list: a URL, or relative to this file. Without it (and without `eessiCatalogUrl`) the catalog is empty until a later `sciget refresh` finds one |
+| `eessiCatalogUrl` | no | Sibling curated EESSI CVMFS Lmod module catalog (`eessi.json`), refreshed alongside `apps.json` and browsed explicitly via `sciget eessi` |
+| `eessi_stacks` | no | EESSI stack versions (`YYYY.MM`) enabled for the domain |
 | `downloadUrls` | no | Mirrors for the containers, tried in order; each https with `{file}` once. Without them, containers come only from a share (`--dir`) |
 | `title`, `description` | no | Shown in a later release |
 
@@ -79,6 +81,7 @@ keys, `{"schemaVersion": 1, "domains": {"neuroimaging": {...}, ...}}`;
 | `sciget refresh` | Download the latest catalogs in use |
 | `sciget find [words...]` | List the containers in the catalogs in use (`--all` includes hidden ones) |
 | `sciget info <tool/version>` | Show a container's details and where it is |
+| `sciget eessi [find\|info\|launch]` | Browse and launch curated EESSI CVMFS modules (explicit opt-in; no DOI) |
 | `sciget pull <tool/version>...` | Download containers into `container_dir`, `parallel_pulls` (3) at a time |
 | `sciget install <tool/version>...` | Download containers, then make a module for each, so `module load` works |
 | `sciget doctor` | Report problems, such as stopped downloads, and the commands that fix them |
