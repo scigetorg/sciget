@@ -47,6 +47,10 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 		return location{}, false, err
 	}
 	dest := filepath.Join(dir, relative)
+	urls, err := downloadURLs(c)
+	if err != nil {
+		return location{}, false, err
+	}
 	apptainer, _, err := cfg.get("apptainer_path")
 	if err != nil {
 		return location{}, false, err
@@ -61,10 +65,6 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 		return location{}, false, err
 	}
 	warnMissing, err := cfg.getBool("warn_missing_checksum")
-	if err != nil {
-		return location{}, false, err
-	}
-	urls, err := downloadURLs(c)
 	if err != nil {
 		return location{}, false, err
 	}
@@ -118,7 +118,7 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 // with {file} replaced by the image's file name.
 func downloadURLs(c container) ([]string, error) {
 	if len(c.mirrors) == 0 {
-		return nil, fmt.Errorf("catalog %q has no download mirrors; run 'sciget refresh'", c.catalog)
+		return nil, fmt.Errorf("catalog %q has no download mirrors", c.catalog)
 	}
 	file := url.PathEscape(c.fileName() + ".simg")
 	urls := make([]string, len(c.mirrors))
@@ -178,6 +178,11 @@ func pullWithProgress(ctx context.Context, stderr io.Writer, cfg config, c conta
 // stops the pull cleanly; while the question waits, it ends sciget as
 // usual, since nothing has been written yet.
 func pullOnRun(cfg config, c container, in io.Reader, stderr io.Writer, interactive bool) (location, error) {
+	if len(c.mirrors) == 0 {
+		// Nothing to download from, whatever auto_pull says.
+		_, err := pullQuestion(cfg, c)
+		return location{}, err
+	}
 	auto, err := cfg.getBool("auto_pull")
 	if err != nil {
 		return location{}, err
@@ -222,6 +227,7 @@ func pullOnRun(cfg config, c container, in io.Reader, stderr io.Writer, interact
 
 // pullQuestion returns the question asked before pulling c: where it was
 // looked for, what may be wrong with the share, and where it would go.
+// When c's catalog has no mirrors, it returns that as an error instead.
 func pullQuestion(cfg config, c container) (string, error) {
 	store, _, err := cfg.get("container_dir")
 	if err != nil {
@@ -245,6 +251,11 @@ func pullQuestion(cfg config, c container) (string, error) {
 	var lines []string
 	for _, line := range strings.Split(strings.TrimSuffix(where, "\n"), "\n") {
 		lines = append(lines, printable(line))
+	}
+	if len(c.mirrors) == 0 {
+		// Nothing to download from, so nothing to ask.
+		return "", fmt.Errorf("%s Catalog %q has no download mirrors, so there is nothing to run until the share has it or the catalog adds downloadUrls.",
+			strings.Join(lines, " "), c.catalog)
 	}
 	return strings.Join(lines, "\n") + "\nDownload it to " + printable(store) + "?\n" +
 		"[y]es, [n]o, [A]lways (yes, saved as the default): ", nil

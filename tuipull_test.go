@@ -40,6 +40,34 @@ func TestTUIPull(t *testing.T) {
 			}
 		}
 	})
+	t.Run("without mirrors", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		t.Setenv("SCIGET_CONFIG", path)
+		containers := slices.Clone(tuiContainers)
+		containers[len(containers)-1].mirrors = nil // itksnap
+		withoutMirrors := func(location, module string) model {
+			m := testModel(t, 160, 45, containers)
+			m.selectName("itksnap", "4.4.0")
+			m.locFor, m.location, m.module = "itksnap/4.4.0", location, module
+			return m
+		}
+		for _, tt := range []struct{ location, module, want string }{
+			{location: notHere, want: "gui"},
+			{location: onHere + " (an older build)", module: "module load itksnap/4.4.0", want: "gui"},
+			{location: onHere + " (downloaded)", module: "none · Install makes one", want: "install"},
+			{location: "couldn't check: permission denied", module: "none · Install makes one", want: "gui"},
+		} {
+			if kinds := buttonKinds(withoutMirrors(tt.location, tt.module)); kinds[len(kinds)-1] != tt.want {
+				t.Errorf("%s, %s: buttons %v, want %s last", tt.location, tt.module, kinds, tt.want)
+			}
+		}
+		m := withoutMirrors(notHere, "")
+		m.s.cfg = config{path: path, overrides: map[string]string{"auto_pull": "true"}}
+		if cmd := m.launch(1); cmd != nil || m.asking != "" || len(m.pulls) != 0 ||
+			!strings.Contains(m.statusFor().detail, "nothing to run") {
+			t.Errorf("command %v, asking %q, pulls %d, status %+v", cmd != nil, m.asking, len(m.pulls), m.statusFor())
+		}
+	})
 	t.Run("Install of an older build asks first", func(t *testing.T) {
 		m := pullModel(t)
 		m.location, m.module = onHere+" (an older build)", "module load itksnap/4.4.0"

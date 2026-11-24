@@ -19,6 +19,7 @@ var tuiContainers = []container{
 	{tool: "fsl", version: "6.0.7", categories: []string{"imaging"}, catalog: "other", shadowed: true},
 	{tool: "hidden", version: "1", hidden: true},
 	{tool: "itksnap", version: "4.4.0", categories: []string{"imaging", "segmentation"}, catalog: "neuro",
+		mirrors: []string{"https://example.org/{file}"},
 		entries: []entry{{key: "itksnapGUI-itksnap 4.4.0", label: "itksnapGUI", exec: "itksnap"}}},
 }
 

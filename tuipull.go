@@ -55,7 +55,8 @@ func (m model) buttons() []button {
 			bs[i].col = m.th.muted.GetForeground()
 		}
 	}
-	if missing || older || noModule {
+	// Without mirrors, Install can only make a module for what is here.
+	if len(c.mirrors) > 0 && (missing || older) || noModule && strings.HasPrefix(m.location, onHere) && !older {
 		bs = append(bs, button{kind: "install", label: "▼  Install", caption: "download if needed, and make its module", col: m.th.accent.GetForeground()})
 	}
 	return bs
@@ -124,7 +125,7 @@ func (m model) pullOf(name string) *pullRun {
 // launched afterwards: a download can take minutes, and the user starts
 // what they want once it is done.
 func (m *model) requestPull(c container) tea.Cmd {
-	if auto, _ := m.s.cfg.getBool("auto_pull"); auto {
+	if auto, _ := m.s.cfg.getBool("auto_pull"); auto && len(c.mirrors) > 0 {
 		return m.startPull(c)
 	}
 	where, err := pullQuestion(m.s.cfg, c)

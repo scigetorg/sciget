@@ -24,6 +24,8 @@ type testCatalog struct {
 	dir    string
 	layout string
 	unused bool // registered with "use": false
+	// noMirrors leaves downloadUrls out of its cached catalog.json.
+	noMirrors bool
 }
 
 // exampleDir holds the catalog JSONs exampleURL writes.
@@ -123,6 +125,17 @@ func TestRun(t *testing.T) {
 	domainsURL := exampleDomains(labCatalogJSONApps, fslCatalogJSONApps)
 	badURL := filepath.Join(exampleDir, "bad.json")
 	if err := os.WriteFile(badURL, []byte(`{"appJsonUrl": "apps.json"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	emptyURL := filepath.Join(exampleDir, "empty.json")
+	if err := os.WriteFile(emptyURL, []byte(`{"schemaVersion": 1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Beside domainsURL, so neuro's apps list is there; soon has none yet.
+	placeholderURL := filepath.Join(filepath.Dir(domainsURL), "placeholder.json")
+	if err := os.WriteFile(placeholderURL, []byte(`{"schemaVersion": 1, "domains": {
+		"neuro": {"appJsonUrl": "neuro/apps.json", "downloadUrls": ["https://example.org/{file}"]},
+		"soon": {"source_repositories": ["x"]}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	relativeURL, err := filepath.Rel(cwd, exampleURL("relative"))
@@ -287,6 +300,12 @@ func TestRun(t *testing.T) {
 		{name: "apptainer alone shows help", args: []string{"apptainer"}, wantStdoutHas: "Run containers with Apptainer"},
 		{name: "apptainer exec not on this machine", args: []string{"apptainer", "exec", "fsl/6.0.3", "bet"},
 			catalogs: neuroimaging, wantCode: 1, wantStderr: "sciget: fsl/6.0.3 is not on this machine; to download it, run: sciget pull fsl/6.0.3, or let sciget download when needed: sciget config set auto_pull true\n"},
+		{name: "apptainer exec not on this machine, no mirrors", args: []string{"apptainer", "exec", "fsl/6.0.3", "bet"},
+			catalogs: []testCatalog{{name: "neuroimaging", apps: fslCatalog, noMirrors: true}}, wantCode: 1,
+			wantStderr: "sciget: fsl/6.0.3 hasn't been downloaded. Catalog \"neuroimaging\" has no download mirrors, so there is nothing to run until the share has it or the catalog adds downloadUrls.\n"},
+		{name: "apptainer dry run not on this machine, no mirrors", args: []string{"apptainer", "exec", "--dry-run", "fsl/6.0.3", "bet"},
+			catalogs: []testCatalog{{name: "neuroimaging", apps: fslCatalog, noMirrors: true}}, wantCode: 1,
+			wantStderrHas: "has no download mirrors, so there is nothing to run"},
 		{name: "apptainer not found", args: []string{"apptainer", "shell", "fsl/6.0.3"},
 			catalogs: neuroimaging, config: `{"apptainer_path": "no-such-apptainer"}`, stored: []string{fslStored},
 			wantCode: 1, wantStderr: "sciget: apptainer not found: \"no-such-apptainer\"; install Apptainer or set apptainer_path\n"},
@@ -529,6 +548,23 @@ func TestRun(t *testing.T) {
 		{name: "catalog add a domains file with a system name", args: []string{"catalog", "add", "sci", domainsURL},
 			list: "[]", systemCatalogs: []testCatalog{{name: "sci-neuro"}}, wantCode: 1, wantListSame: true,
 			wantStderrHas: "sciget: catalog \"sci-neuro\" is set by "},
+		{name: "catalog add a domains file with an empty domain", args: []string{"catalog", "add", "sci", placeholderURL},
+			wantStdout: "Catalog \"sci-neuro\" added at the top.\n" +
+				"Catalog \"sci-soon\" added at the top. It has no apps list yet. Run 'sciget refresh' to download them.\n",
+			wantList: []catalog{{Name: "sci-neuro", URL: placeholderURL, Domain: "neuro", Use: true},
+				{Name: "sci-soon", URL: placeholderURL, Domain: "soon", Use: true}}},
+		{name: "catalog add an empty catalog", args: []string{"catalog", "add", "soon", emptyURL},
+			wantStdout: "Catalog \"soon\" added at the top. It has no apps list yet. Run 'sciget refresh' to download it.\n",
+			wantList:   []catalog{{Name: "soon", URL: emptyURL, Use: true}}},
+		{name: "refresh an empty domain", args: []string{"refresh"},
+			catalogs: []testCatalog{{name: "sci-neuro", url: placeholderURL, domain: "neuro"},
+				{name: "sci-soon", url: placeholderURL, domain: "soon"}},
+			wantStdout: "Catalog \"sci-neuro\" updated.\nCatalog \"sci-soon\" updated. It has no apps list yet.\n"},
+		{name: "find beside an empty catalog", args: []string{"find", "fsl"},
+			before: [][]string{{"refresh"}},
+			catalogs: []testCatalog{{name: "sci-soon", url: placeholderURL, domain: "soon"},
+				{name: "sci-neuro", url: placeholderURL, domain: "neuro"}},
+			wantStdoutHas: "fsl/6.0.3"},
 		{name: "catalog add an invalid catalog JSON", args: []string{"catalog", "add", "bad", badURL}, wantCode: 1,
 			wantStderr: "sciget: " + badURL + " is not a valid catalog JSON: schemaVersion must be 1\n"},
 		{name: "catalog add a relative file", args: []string{"catalog", "add", "rel", relativeURL},
@@ -830,7 +866,11 @@ func TestRun(t *testing.T) {
 						if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(tc.apps), 0o644); err != nil {
 							t.Fatal(err)
 						}
-						if err := os.WriteFile(filepath.Join(dir, "catalog.json"), []byte(testCatalogJSON), 0o600); err != nil {
+						catalogJSON := testCatalogJSON
+						if tc.noMirrors {
+							catalogJSON = `{"schemaVersion": 1, "appJsonUrl": "apps.json"}`
+						}
+						if err := os.WriteFile(filepath.Join(dir, "catalog.json"), []byte(catalogJSON), 0o600); err != nil {
 							t.Fatal(err)
 						}
 					}

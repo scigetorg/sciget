@@ -359,6 +359,7 @@ func TestModuleText(t *testing.T) {
 		shareStore bool   // container_dir is the share's folder, as an admin's is
 		buildDate  string // the module's build; no module when empty
 		modulePath bool   // module_dir/neuro is in MODULEPATH
+		noMirrors  bool   // the catalog has no download mirrors
 		want       string // {modules} is module_dir
 	}{
 		{name: "share", onShare: true, want: "the neuro share's own modules"},
@@ -373,10 +374,18 @@ func TestModuleText(t *testing.T) {
 			want: "module load fsl/6.0.3 · first: module use {modules}/neuro"},
 		{name: "module of an older build", buildDate: "20190101", modulePath: true,
 			want: "module load fsl/6.0.3 (from an older build · Install updates it)"},
+		{name: "no module or mirrors", noMirrors: true, want: "none"},
+		{name: "module of an older build, no mirrors", buildDate: "20190101", modulePath: true, noMirrors: true,
+			want: "module load fsl/6.0.3 (from an older build)"},
+		{name: "no module or mirrors, container here", onShare: true, shareStore: true, noMirrors: true,
+			want: "none · Install makes one"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c, cat, store := localCatalog(t)
+			if !tt.noMirrors {
+				c.mirrors = []string{"https://example.org/{file}"}
+			}
 			base := filepath.Dir(store)
 			moduleDir := filepath.Join(base, "modules")
 			if tt.shareStore {

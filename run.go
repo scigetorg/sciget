@@ -419,7 +419,8 @@ func newApptainerVerbCommand(verb string) *cobra.Command {
 			}
 			loc, err := locate(cfg, c)
 			var missing notOnMachineError
-			if errors.As(err, &missing) && !dryRun {
+			// With no mirrors, pullOnRun only explains, so a dry run shows it too.
+			if errors.As(err, &missing) && (!dryRun || len(c.mirrors) == 0) {
 				stderr := cmd.ErrOrStderr()
 				loc, err = pullOnRun(cfg, c, os.Stdin, stderr, isTerminal(os.Stdin) && isTerminal(stderr))
 			}

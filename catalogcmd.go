@@ -198,7 +198,7 @@ func addCatalog(w io.Writer, c catalog, last, forceUpdate, system bool) error {
 	if err := checkLink(c.URL); err != nil {
 		return usageError{"invalid catalog URL: " + err.Error()}
 	}
-	catalogs, err := newCatalogs(c, system)
+	catalogs, empty, err := newCatalogs(c, system)
 	if err != nil {
 		return err
 	}
@@ -256,10 +256,14 @@ func addCatalog(w io.Writer, c catalog, last, forceUpdate, system bool) error {
 	slices.Sort(added)
 	for i, name := range added {
 		hint := ""
+		if slices.Contains(empty, name) {
+			hint = " It has no apps list yet."
+		}
 		if i == len(added)-1 {
-			hint = " Run 'sciget refresh' to download it."
 			if len(added) > 1 {
-				hint = " Run 'sciget refresh' to download them."
+				hint += " Run 'sciget refresh' to download them."
+			} else {
+				hint += " Run 'sciget refresh' to download it."
 			}
 		}
 		if _, err := fmt.Fprintf(w, "Catalog %q added at the %s.%s\n", name, topOrBottom(last), hint); err != nil {
@@ -271,49 +275,57 @@ func addCatalog(w io.Writer, c catalog, last, forceUpdate, system bool) error {
 
 // newCatalogs reads the file c names and returns the catalogs adding it
 // makes: c itself for a catalog JSON, or for a domains file one per key,
-// in key order. It checks each catalog JSON as refresh would. With system
-// set, it reads with the system's settings alone.
-func newCatalogs(c catalog, system bool) ([]catalog, error) {
+// in key order, and the names of those that are empty catalogs. It checks
+// each catalog JSON as refresh would. With system set, it reads with the
+// system's settings alone.
+func newCatalogs(c catalog, system bool) (catalogs []catalog, empty []string, err error) {
 	cfg, err := readConfigFor(system)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	maxSize, err := cfg.getNumber("max_catalog_size")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	client, err := newHTTPClient(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	client.CheckRedirect = httpsOnly
 	data, base, err := readLink(client, c.URL, maxSize)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !isDomainsFile(data) {
-		if _, _, err := checkCatalogJSON(data, base); err != nil {
-			return nil, fmt.Errorf("%s is not a valid catalog JSON: %w", c.URL, err)
+		_, apps, err := checkCatalogJSON(data, base)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s is not a valid catalog JSON: %w", c.URL, err)
 		}
-		return []catalog{c}, nil
+		if apps == "" {
+			empty = []string{c.Name}
+		}
+		return []catalog{c}, empty, nil
 	}
 	parts, err := splitDomains(data)
 	if err != nil {
-		return nil, fmt.Errorf("%s is not a valid domains file: %w", c.URL, err)
+		return nil, nil, fmt.Errorf("%s is not a valid domains file: %w", c.URL, err)
 	}
-	var catalogs []catalog
 	for _, key := range slices.Sorted(maps.Keys(parts)) {
 		d := c
 		d.Name, d.Domain = c.Name+"-"+key, key
 		if err := checkCatalogName(key); err != nil {
-			return nil, fmt.Errorf("domain %q in %s is not a valid catalog name: %w", key, c.URL, err)
+			return nil, nil, fmt.Errorf("domain %q in %s is not a valid catalog name: %w", key, c.URL, err)
 		}
-		if _, _, err := checkCatalogJSON(parts[key], base); err != nil {
-			return nil, fmt.Errorf("domain %q in %s: %w", key, c.URL, err)
+		_, apps, err := checkCatalogJSON(parts[key], base)
+		if err != nil {
+			return nil, nil, fmt.Errorf("domain %q in %s: %w", key, c.URL, err)
+		}
+		if apps == "" {
+			empty = append(empty, d.Name)
 		}
 		catalogs = append(catalogs, d)
 	}
-	return catalogs, nil
+	return catalogs, empty, nil
 }
 
 // removeCatalog unregisters a catalog. In the user's file it also deletes
