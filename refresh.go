@@ -189,11 +189,13 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		if _, err := os.Stat(dir); err != nil {
 			return false, false, errors.New("downloaded catalog is invalid: no containers")
 		}
-		unlock, err := lockCatalogDir(dir)
-		if err != nil {
-			return false, false, fmt.Errorf("writing catalog: %w", err)
-		}
-		defer unlock()
+	}
+	unlock, err := lockCatalogDir(dir)
+	if err != nil {
+		return false, false, fmt.Errorf("writing catalog: %w", err)
+	}
+	defer unlock()
+	if needsEmptyAppsCheck {
 		if !cachedAppsIsEmpty(dir) {
 			return false, false, errors.New("downloaded catalog is invalid: no containers")
 		}
@@ -206,13 +208,6 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	// 0o600, as catalogs.json: a query string may carry a token.
 	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
 		return false, false, fmt.Errorf("writing catalog: %w", err)
-	}
-	if !needsEmptyAppsCheck {
-		unlock, err := lockCatalogDir(dir)
-		if err != nil {
-			return false, false, fmt.Errorf("writing catalog: %w", err)
-		}
-		defer unlock()
 	}
 	// Stage every changed file and back up replaced files first so a mid-commit
 	// rename failure rolls back earlier renames instead of leaving a mixed cache.

@@ -142,11 +142,11 @@ func (b eessiBuild) moduleRoot() string {
 }
 
 func (b eessiBuild) loadCommand() string {
-	prefix := ""
-	if b.cvmfsRepo != "" && b.cvmfsRepo != "software.eessi.io" {
-		prefix = fmt.Sprintf("module use /cvmfs/%s/init/modules && ", b.cvmfsRepo)
+	repo := b.cvmfsRepo
+	if repo == "" {
+		repo = "software.eessi.io"
 	}
-	return fmt.Sprintf("%smodule load EESSI/%s && module load %s", prefix, b.stack, b.module)
+	return fmt.Sprintf("module use /cvmfs/%s/init/modules && module load EESSI/%s && module load %s", repo, b.stack, b.module)
 }
 
 func (b eessiBuild) launchCommand(query, catalogFlag, launcherFlag string) string {

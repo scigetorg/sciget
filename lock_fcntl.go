@@ -15,14 +15,18 @@ import (
 var catalogDirLocks sync.Map
 
 // lockCatalogDir acquires both an in-process mutex and a POSIX fcntl write
-// lock on dir for Unix platforms without BSD flock (such as Solaris/illumos).
+// lock for dir on Unix platforms without BSD flock (such as Solaris/illumos).
 func lockCatalogDir(dir string) (func(), error) {
-	key := filepath.Clean(dir)
-	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
+	lockPath := catalogLockPath(dir)
+	v, _ := catalogDirLocks.LoadOrStore(lockPath, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
 	mu.Lock()
 
-	f, err := os.OpenFile(filepath.Join(dir, ".refresh.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		mu.Unlock()
+		return nil, err
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		mu.Unlock()
 		return nil, err
@@ -53,15 +57,15 @@ func lockCatalogDir(dir string) (func(), error) {
 }
 
 // lockCatalogDirShared acquires both an in-process mutex and a shared POSIX
-// fcntl read lock when a refresh lock file exists. When the lock file does not
-// exist yet, it returns ok=false so the caller skips the uncommitted directory.
+// fcntl read lock when a lock file exists. When the lock file does not exist
+// yet, it returns ok=false.
 func lockCatalogDirShared(dir string) (func(), bool, error) {
-	key := filepath.Clean(dir)
-	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
+	lockPath := catalogLockPath(dir)
+	v, _ := catalogDirLocks.LoadOrStore(lockPath, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
 	mu.Lock()
 
-	f, err := os.Open(filepath.Join(dir, ".refresh.lock"))
+	f, err := os.Open(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		mu.Unlock()
 		return func() {}, false, nil

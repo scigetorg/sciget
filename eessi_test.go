@@ -254,7 +254,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		"software.eessi.io",
 		"ParaView/6.0.1-foss-2025b",
 		"(none — EESSI CVMFS module)",
-		"module load EESSI/2025.06 && module load ParaView/6.0.1-foss-2025b",
+		"module use /cvmfs/software.eessi.io/init/modules && module load EESSI/2025.06 && module load ParaView/6.0.1-foss-2025b",
 		"sciget eessi launch --stack 2025.06 ParaView/6.0.1-foss-2025b",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -262,20 +262,35 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		}
 	}
 
+	// Library-only tool gives a clear module use + load hint instead of failing obscurely.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"eessi", "launch", "biopython"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("expected exit 1 for library-only tool, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "module use /cvmfs/software.eessi.io/init/modules && module load EESSI/2025.06 && module load Biopython/1.86-gfbf-2025b") {
+		t.Fatalf("missing module load hint in stderr: %s", stderr.String())
+	}
+
 	// Strict EESSI launch via real bash + mock Lmod: loads exact stack & module,
 	// passes tool flags without requiring `--`, and FAILS instead of falling
 	// back when an explicitly selected exact module is missing.
-	modRoot := filepath.Join(tmp, "modroot")
-	binDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(modRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mockLmod := filepath.Join(tmp, "mock-lmod.sh")
-	lmodLog := filepath.Join(tmp, "lmod.log")
-	if err := os.WriteFile(mockLmod, []byte(`module() {
+	t.Run("launch", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("EESSI Lmod launcher requires a Unix shell")
+		}
+		var stdout, stderr bytes.Buffer
+		modRoot := filepath.Join(tmp, "modroot")
+		binDir := filepath.Join(tmp, "bin")
+		if err := os.MkdirAll(modRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mockLmod := filepath.Join(tmp, "mock-lmod.sh")
+		lmodLog := filepath.Join(tmp, "lmod.log")
+		if err := os.WriteFile(mockLmod, []byte(`module() {
     if [ "$1" = "--force" ] && [ "$2" = "purge" ]; then
         LOADEDMODULES=""
         return 0
@@ -306,143 +321,134 @@ func TestRefreshAndEESSICommands(t *testing.T) {
     return 0
 }
 `), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	staleBinDir := filepath.Join(tmp, "stale-bin")
-	if err := os.MkdirAll(staleBinDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(staleBinDir, "paraview"), []byte("#!/bin/sh\necho STALE_SITE_BINARY\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(staleBinDir, "gmx"), []byte("#!/bin/sh\necho STALE_SITE_GMX\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MODULEPATH", "/site/other/modules")
-	t.Setenv("LD_LIBRARY_PATH", "/site/stale/lib")
-	t.Setenv("EESSI_MODULE_ROOT", modRoot)
-	t.Setenv("EESSI_LMOD_INIT", mockLmod)
-	t.Setenv("MOCK_LMOD_LOG", lmodLog)
-	t.Setenv("MOCK_EESSI_BIN", binDir)
-	t.Setenv("PATH", staleBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Fatal(err)
+		}
+		staleBinDir := filepath.Join(tmp, "stale-bin")
+		if err := os.MkdirAll(staleBinDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(staleBinDir, "paraview"), []byte("#!/bin/sh\necho STALE_SITE_BINARY\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(staleBinDir, "gmx"), []byte("#!/bin/sh\necho STALE_SITE_GMX\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("MODULEPATH", "/site/other/modules")
+		t.Setenv("LD_LIBRARY_PATH", "/site/stale/lib")
+		t.Setenv("EESSI_MODULE_ROOT", modRoot)
+		t.Setenv("EESSI_LMOD_INIT", mockLmod)
+		t.Setenv("MOCK_LMOD_LOG", lmodLog)
+		t.Setenv("MOCK_EESSI_BIN", binDir)
+		t.Setenv("PATH", staleBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	// Tool flags (--version, --gpu) after <tool> pass through to the binary without `--`,
-	// inherited MODULEPATH is replaced by modroot, stale LD_LIBRARY_PATH and stale
-	// PATH entries left by an incomplete purge are scrubbed, and LMOD_EXACT_MATCH=yes is enforced.
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version", "--gpu"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("eessi launch failed (%d): %s", code, stderr.String())
-	}
-	if got := strings.TrimSpace(stdout.String()); got != "PARAVIEW:--version --gpu|LD:" {
-		t.Fatalf("got %q, want %q", got, "PARAVIEW:--version --gpu|LD:")
-	}
-	logBytes, err := os.ReadFile(lmodLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:ParaView/6.0.1-foss-2025b|MP:" + modRoot + "|EXACT:yes\n"
-	if string(logBytes) != wantLog {
-		t.Fatalf("lmod log = %q, want %q", string(logBytes), wantLog)
-	}
+		// Tool flags (--version, --gpu) after <tool> pass through to the binary without `--`,
+		// inherited MODULEPATH is replaced by modroot, stale LD_LIBRARY_PATH and stale
+		// PATH entries left by an incomplete purge are scrubbed, and LMOD_EXACT_MATCH=yes is enforced.
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version", "--gpu"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi launch failed (%d): %s", code, stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "PARAVIEW:--version --gpu|LD:" {
+			t.Fatalf("got %q, want %q", got, "PARAVIEW:--version --gpu|LD:")
+		}
+		logBytes, err := os.ReadFile(lmodLog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:ParaView/6.0.1-foss-2025b|MP:" + modRoot + "|EXACT:yes\n"
+		if string(logBytes) != wantLog {
+			t.Fatalf("lmod log = %q, want %q", string(logBytes), wantLog)
+		}
 
-	// If the EESSI module does not provide the binary on PATH, neither stale
-	// site PATH entries nor host /usr/bin:/bin binaries may satisfy the exec.
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "gromacs", "--version"}, &stdout, &stderr); code == 0 || strings.Contains(stdout.String(), "STALE_SITE_GMX") {
-		t.Fatalf("stale site PATH must not satisfy missing EESSI binary: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
-	}
+		// If the EESSI module does not provide the binary on PATH, neither stale
+		// site PATH entries nor host /usr/bin:/bin binaries may satisfy the exec.
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "gromacs", "--version"}, &stdout, &stderr); code == 0 || strings.Contains(stdout.String(), "STALE_SITE_GMX") {
+			t.Fatalf("stale site PATH must not satisfy missing EESSI binary: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+		}
 
-	// Even when the loaded EESSI module adds an EESSI bin directory to PATH,
-	// a binary that exists only in host /bin or /usr/bin (e.g. "uname") must be
-	// refused with exit 127 by the filtered type -P lookup.
-	hostOnlyBuild := eessiBuild{
-		id:        "hostcheck",
-		pkg:       "HostCheck",
-		cvmfsRepo: "software.eessi.io",
-		stack:     "2025.06",
-		module:    "HostCheck/1.0-foss-2025b",
-		version:   "1.0",
-		exec:      []string{"uname"},
-	}
-	stdout.Reset()
-	stderr.Reset()
-	err = runEESSILaunch(hostOnlyBuild, nil, strings.NewReader(""), &stdout, &stderr)
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 127 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "refusing host fallback") {
-		t.Fatalf("host /usr/bin/uname must be refused with exit 127 and fallback diagnostic: err=%v out=%q errOut=%q", err, stdout.String(), stderr.String())
-	}
+		// Even when the loaded EESSI module adds an EESSI bin directory to PATH,
+		// a binary that exists only in host /bin or /usr/bin (e.g. "uname") must be
+		// refused with exit 127 by the filtered type -P lookup.
+		hostOnlyBuild := eessiBuild{
+			id:        "hostcheck",
+			pkg:       "HostCheck",
+			cvmfsRepo: "software.eessi.io",
+			stack:     "2025.06",
+			module:    "HostCheck/1.0-foss-2025b",
+			version:   "1.0",
+			exec:      []string{"uname"},
+		}
+		stdout.Reset()
+		stderr.Reset()
+		err = runEESSILaunch(hostOnlyBuild, nil, strings.NewReader(""), &stdout, &stderr)
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 127 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "refusing host fallback") {
+			t.Fatalf("host /usr/bin/uname must be refused with exit 127 and fallback diagnostic: err=%v out=%q errOut=%q", err, stdout.String(), stderr.String())
+		}
 
-	// If Lmod still resolves a prefix-matched module despite LMOD_EXACT_MATCH,
-	// post-load LOADEDMODULES verification aborts instead of executing.
-	if err := os.WriteFile(lmodLog, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MOCK_LMOD_PREFIX_TARGET", "ParaView/6.0.1-foss-2025b")
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 {
-		t.Fatalf("expected failure when Lmod loads prefix-matched module; stdout=%q", stdout.String())
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("prefix-matched module must not execute binary: stdout=%q", stdout.String())
-	}
-	t.Setenv("MOCK_LMOD_PREFIX_TARGET", "")
+		// If Lmod still resolves a prefix-matched module despite LMOD_EXACT_MATCH,
+		// post-load LOADEDMODULES verification aborts instead of executing.
+		if err := os.WriteFile(lmodLog, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("MOCK_LMOD_PREFIX_TARGET", "ParaView/6.0.1-foss-2025b")
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 {
+			t.Fatalf("expected failure when Lmod loads prefix-matched module; stdout=%q", stdout.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("prefix-matched module must not execute binary: stdout=%q", stdout.String())
+		}
+		t.Setenv("MOCK_LMOD_PREFIX_TARGET", "")
 
-	// If EESSI/2025.06 resolves via an alias to EESSI/2023.06, or LOADEDMODULES
-	// is left empty, launch must abort instead of running under the wrong stack.
-	t.Setenv("MOCK_LMOD_ALIAS_STACK", "EESSI/2025.06")
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 {
-		t.Fatalf("aliased EESSI stack must be rejected: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
-	}
-	t.Setenv("MOCK_LMOD_ALIAS_STACK", "")
+		// If EESSI/2025.06 resolves via an alias to EESSI/2023.06, or LOADEDMODULES
+		// is left empty, launch must abort instead of running under the wrong stack.
+		t.Setenv("MOCK_LMOD_ALIAS_STACK", "EESSI/2025.06")
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 {
+			t.Fatalf("aliased EESSI stack must be rejected: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+		}
+		t.Setenv("MOCK_LMOD_ALIAS_STACK", "")
 
-	t.Setenv("MOCK_LMOD_EMPTY_LOADED", "1")
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 {
-		t.Fatalf("empty LOADEDMODULES must be rejected: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
-	}
-	t.Setenv("MOCK_LMOD_EMPTY_LOADED", "")
+		t.Setenv("MOCK_LMOD_EMPTY_LOADED", "1")
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 {
+			t.Fatalf("empty LOADEDMODULES must be rejected: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+		}
+		t.Setenv("MOCK_LMOD_EMPTY_LOADED", "")
 
-	// Missing exact GPU module MUST fail and NEVER fall back to unversioned GROMACS.
-	if err := os.WriteFile(lmodLog, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MOCK_LMOD_FAIL", "GROMACS/2026.2-foss-2025b-CUDA-12.9.1")
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"eessi", "launch", "--gpu", "gromacs", "--version"}, &stdout, &stderr); code == 0 {
-		t.Fatalf("expected failure when exact GPU module is missing; stdout=%q", stdout.String())
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("missing exact module must not execute fallback binary: stdout=%q", stdout.String())
-	}
-	logBytes, err = os.ReadFile(lmodLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantFailLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:GROMACS/2026.2-foss-2025b-CUDA-12.9.1|MP:" + modRoot + "|EXACT:yes\n"
-	if string(logBytes) != wantFailLog {
-		t.Fatalf("failed launch must not attempt fallback load; log=%q want=%q", string(logBytes), wantFailLog)
-	}
-	t.Setenv("MOCK_LMOD_FAIL", "")
-
-	// Library-only tool gives a clear module load hint instead of failing obscurely.
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"eessi", "launch", "biopython"}, &stdout, &stderr); code != 1 {
-		t.Fatalf("expected exit 1 for library-only tool, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "module load EESSI/2025.06 && module load Biopython/1.86-gfbf-2025b") {
-		t.Fatalf("missing module load hint in stderr: %s", stderr.String())
-	}
+		// Missing exact GPU module MUST fail and NEVER fall back to unversioned GROMACS.
+		if err := os.WriteFile(lmodLog, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("MOCK_LMOD_FAIL", "GROMACS/2026.2-foss-2025b-CUDA-12.9.1")
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "launch", "--gpu", "gromacs", "--version"}, &stdout, &stderr); code == 0 {
+			t.Fatalf("expected failure when exact GPU module is missing; stdout=%q", stdout.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("missing exact module must not execute fallback binary: stdout=%q", stdout.String())
+		}
+		logBytes, err = os.ReadFile(lmodLog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantFailLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:GROMACS/2026.2-foss-2025b-CUDA-12.9.1|MP:" + modRoot + "|EXACT:yes\n"
+		if string(logBytes) != wantFailLog {
+			t.Fatalf("failed launch must not attempt fallback load; log=%q want=%q", string(logBytes), wantFailLog)
+		}
+		t.Setenv("MOCK_LMOD_FAIL", "")
+	})
 
 	// Malformed eessi.json fails refresh without clobbering the cached copy.
 	if err := os.WriteFile(eessiFile, []byte(`{"schemaVersion": 1, "backend": "eessi", "explicitSelectionRequired": false}`), 0o644); err != nil {
@@ -898,6 +904,18 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 	}
 	t.Cleanup(closeAppsRenamed)
+	readerEntering := make(chan struct{})
+	oldBeforeLock := beforeCatalogSharedLock
+	t.Cleanup(func() { beforeCatalogSharedLock = oldBeforeLock })
+	beforeCatalogSharedLock = func(dir string) {
+		if dir == cacheDir {
+			select {
+			case <-readerEntering:
+			default:
+				close(readerEntering)
+			}
+		}
+	}
 	type readResult struct {
 		containers []container
 		err        error
@@ -914,9 +932,14 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if err == nil {
 				appsRenamed = true
 				closeAppsRenamed()
-				// Give the concurrent readContainers goroutine time to hit the
-				// shared lock while apps.json on disk temporarily holds v2.
-				time.Sleep(50 * time.Millisecond)
+				// Wait deterministically until the concurrent reader reaches
+				// the shared lock, and assert it blocks rather than reading v2.
+				<-readerEntering
+				select {
+				case r := <-readerDone:
+					t.Errorf("concurrent readContainers bypassed lock during commit: %+v", r)
+				case <-time.After(25 * time.Millisecond):
+				}
 			}
 			return err
 		}
@@ -939,6 +962,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 
 	// Concurrent container reader must wait for the rollback and never observe v2 (fsl/6.0.8).
 	res := <-readerDone
+	beforeCatalogSharedLock = oldBeforeLock
 	if res.err != nil {
 		t.Fatalf("concurrent readContainers failed: %v", res.err)
 	}
@@ -962,14 +986,102 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		t.Fatalf("eessi.json should remain at v1 after failed rename")
 	}
 
-	// Older caches without .refresh.lock remain readable by container commands.
-	lockPath := filepath.Join(cacheDir, ".refresh.lock")
+	// Catalog removal uses the external lock so it blocks while a refresh is
+	// in progress; a re-added catalog's newer cache cannot be deleted by an
+	// earlier refresh rolling back.
+	inRefresh := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	closeInRefresh := func() {
+		select {
+		case <-inRefresh:
+		default:
+			close(inRefresh)
+		}
+	}
+	closeReleaseRefresh := func() {
+		select {
+		case <-releaseRefresh:
+		default:
+			close(releaseRefresh)
+		}
+	}
+	t.Cleanup(closeInRefresh)
+	t.Cleanup(closeReleaseRefresh)
+	renameCatalogFile = func(oldpath, newpath string) error {
+		if newpath == appsPath {
+			err := os.Rename(oldpath, newpath)
+			if err == nil {
+				closeInRefresh()
+				<-releaseRefresh
+			}
+			return err
+		}
+		if newpath == eessiPath {
+			return os.ErrPermission
+		}
+		return os.Rename(oldpath, newpath)
+	}
+	refreshDone := make(chan int, 1)
+	go func() {
+		var rOut, rErr bytes.Buffer
+		refreshDone <- run([]string{"refresh"}, &rOut, &rErr)
+	}()
+	<-inRefresh
+	removeDone := make(chan int, 1)
+	go func() {
+		var rmOut, rmErr bytes.Buffer
+		removeDone <- run([]string{"catalog", "remove", "neuro"}, &rmOut, &rmErr)
+	}()
+	select {
+	case code := <-removeDone:
+		closeReleaseRefresh()
+		t.Fatalf("catalog remove bypassed active refresh lock (exit %d)", code)
+	case <-time.After(25 * time.Millisecond):
+	}
+	closeReleaseRefresh()
+	if code := <-refreshDone; code == 0 {
+		t.Fatalf("expected interrupted refresh to fail and roll back")
+	}
+	if code := <-removeDone; code != 0 {
+		t.Fatalf("catalog remove failed after refresh released lock: exit %d", code)
+	}
+	renameCatalogFile = oldRename
+	if _, err := os.Stat(cacheDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("catalog cache should be removed after remove completes, stat err=%v", err)
+	}
+	// Re-add and refresh cleanly back to v1 for subsequent subtests.
+	if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "eessi.json"), []byte(testEESSIJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"catalog", "add", "neuro", catFile}, &stdout, &stderr); code != 0 {
+		t.Fatalf("re-add failed (%d): %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("re-refresh failed (%d): %s", code, stderr.String())
+	}
+	// Restore v2 in srcDir for the unreadable-file subtest below.
+	if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "eessi.json"), []byte(eessiV2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Older caches without an external lock file remain readable by container commands.
+	lockPath := catalogLockPath(cacheDir)
 	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
 	legacyContainers, err := readContainers()
 	if err != nil || len(legacyContainers) != 1 || legacyContainers[0].name() != "fsl/6.0.7" {
-		t.Fatalf("older cache without .refresh.lock must stay readable: err=%v containers=%+v", err, legacyContainers)
+		t.Fatalf("older cache without lock file must stay readable: err=%v containers=%+v", err, legacyContainers)
 	}
 
 	// Preserve unreadable existing apps.json when staging/backup cannot read it.

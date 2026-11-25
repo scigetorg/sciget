@@ -9,10 +9,14 @@ import (
 	"syscall"
 )
 
-// lockCatalogDir acquires an exclusive advisory flock on dir so concurrent
-// refreshes cannot interleave commits or rollbacks.
+// lockCatalogDir acquires an exclusive advisory flock for dir so concurrent
+// refreshes and cache removals cannot interleave commits, rollbacks, or deletes.
 func lockCatalogDir(dir string) (func(), error) {
-	f, err := os.OpenFile(filepath.Join(dir, ".refresh.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lockPath := catalogLockPath(dir)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -32,13 +36,12 @@ func lockCatalogDir(dir string) (func(), error) {
 	}, nil
 }
 
-// lockCatalogDirShared acquires a shared advisory flock on dir when a refresh
-// lock file exists, so readers wait for any in-progress refresh commit or
-// rollback to finish. When the lock file does not exist yet, it returns ok=false
-// so the caller skips the uncommitted catalog directory instead of racing a
-// first refresh.
+// lockCatalogDirShared acquires a shared advisory flock for dir when a lock
+// file exists, so readers wait for any in-progress refresh commit, rollback,
+// or cache removal to finish. When the lock file does not exist yet, it
+// returns ok=false.
 func lockCatalogDirShared(dir string) (func(), bool, error) {
-	f, err := os.Open(filepath.Join(dir, ".refresh.lock"))
+	f, err := os.Open(catalogLockPath(dir))
 	if errors.Is(err, os.ErrNotExist) {
 		return func() {}, false, nil
 	}

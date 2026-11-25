@@ -242,7 +242,7 @@ func addCatalog(w io.Writer, c catalog, last, forceUpdate, system bool) error {
 	}
 	// Only once the list is written, so a failed write loses nothing.
 	for _, dir := range oldDirs {
-		if err := os.RemoveAll(dir); err != nil {
+		if err := removeCatalogCache(dir); err != nil {
 			return fmt.Errorf("removing catalog cache: %w", err)
 		}
 	}
@@ -352,12 +352,24 @@ func removeCatalog(w io.Writer, name string, system bool) error {
 		return err
 	}
 	if s, shared := f.systemCatalog(name); c.URL != "" && !system && !(shared && s.URL == c.URL && s.Domain == c.Domain) {
-		if err := os.RemoveAll(c.dir(f.layers.cacheDir)); err != nil {
+		if err := removeCatalogCache(c.dir(f.layers.cacheDir)); err != nil {
 			return fmt.Errorf("removing catalog cache: %w", err)
 		}
 	}
 	_, err = fmt.Fprintf(w, "Catalog %q removed.\n", name)
 	return err
+}
+
+// removeCatalogCache deletes a catalog's cache directory under its external
+// lock so a concurrent refresh cannot race cache removal or roll back into a
+// newly recreated directory of the same path.
+func removeCatalogCache(dir string) error {
+	unlock, err := lockCatalogDir(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return os.RemoveAll(dir)
 }
 
 // useCatalog puts a catalog in use, moving it first or (last) last, or with

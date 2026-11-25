@@ -97,6 +97,24 @@ func readContainers() ([]container, error) {
 	return all, nil
 }
 
+// catalogLockPath returns the advisory lock file path for cache directory dir.
+// The lock lives outside dir (in a sibling locks/ directory under cache_dir
+// when dir is under catalogs/, or beside dir otherwise) so deleting dir during
+// catalog removal or replacement never breaks lock identity.
+func catalogLockPath(dir string) string {
+	clean := filepath.Clean(dir)
+	parent := filepath.Dir(clean)
+	if filepath.Base(parent) == "catalogs" {
+		return filepath.Join(filepath.Dir(parent), "locks", filepath.Base(clean)+".lock")
+	}
+	return clean + ".lock"
+}
+
+// beforeCatalogSharedLock runs immediately before readCatalogSnapshot acquires
+// the shared lock; tests may set it to synchronize concurrent readers with an
+// in-progress refresh.
+var beforeCatalogSharedLock = func(dir string) {}
+
 // checkCatalogClean returns an error if dir has leftover refresh backup or
 // staged files from an incomplete rollback.
 func checkCatalogClean(dir string) error {
@@ -137,12 +155,14 @@ func readCatalogSnapshotLocked(dir string) ([]container, []string, error) {
 }
 
 // readCatalogSnapshot reads apps.json and catalog.json consistently. When dir
-// has a .refresh.lock, it holds the shared lock across both reads so an
-// in-progress refresh commit or rollback is never observed. Older caches
-// without a .refresh.lock are still read unlocked, then re-checked for a
+// has a catalog lock file, it holds the shared lock across both reads so an
+// in-progress refresh commit, rollback, or removal is never observed. Older
+// caches without a lock file are still read unlocked, then re-checked for a
 // concurrently created lock so a first refresh cannot slip uncommitted files
 // into the read.
 func readCatalogSnapshot(dir string) ([]container, []string, error) {
+	beforeCatalogSharedLock(dir)
+	lockPath := catalogLockPath(dir)
 	unlock, locked, err := lockCatalogDirShared(dir)
 	if err != nil {
 		return nil, nil, err
@@ -163,26 +183,26 @@ func readCatalogSnapshot(dir string) ([]container, []string, error) {
 		return containers, mirrors, nil
 	}
 	if err := checkCatalogClean(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		if _, statErr := os.Stat(filepath.Join(dir, ".refresh.lock")); statErr == nil {
+		if _, statErr := os.Stat(lockPath); statErr == nil {
 			return readCatalogSnapshotLocked(dir)
 		}
 		return nil, nil, err
 	}
 	containers, err := loadCatalog(filepath.Join(dir, "apps.json"))
 	if err != nil {
-		if _, statErr := os.Stat(filepath.Join(dir, ".refresh.lock")); statErr == nil {
+		if _, statErr := os.Stat(lockPath); statErr == nil {
 			return readCatalogSnapshotLocked(dir)
 		}
 		return nil, nil, err
 	}
 	mirrors, err := loadMirrors(filepath.Join(dir, "catalog.json"))
 	if err != nil {
-		if _, statErr := os.Stat(filepath.Join(dir, ".refresh.lock")); statErr == nil {
+		if _, statErr := os.Stat(lockPath); statErr == nil {
 			return readCatalogSnapshotLocked(dir)
 		}
 		return nil, nil, err
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, ".refresh.lock")); statErr == nil {
+	if _, statErr := os.Stat(lockPath); statErr == nil {
 		return readCatalogSnapshotLocked(dir)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return nil, nil, statErr
