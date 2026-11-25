@@ -262,38 +262,20 @@ func resolveCanonicalPath(path string, forFile bool) (string, bool) {
 	return resolved, true
 }
 
-// isCatalogsDir reports whether parent is a "catalogs" directory, either
-// literally named "catalogs" or referring to the same directory as sibling
-// "catalogs" on a case-insensitive filesystem (e.g. macOS APFS or Windows NTFS).
-func isCatalogsDir(parent string) bool {
-	base := filepath.Base(parent)
-	if base == "catalogs" {
-		return true
-	}
-	if !strings.EqualFold(base, "catalogs") {
-		return false
-	}
-	pInfo, err1 := os.Stat(parent)
-	if err1 == nil {
-		cInfo, err2 := os.Stat(filepath.Join(filepath.Dir(parent), "catalogs"))
-		return err2 == nil && os.SameFile(pInfo, cInfo)
-	}
-	return runtime.GOOS == "windows" || runtime.GOOS == "darwin"
-}
-
 // catalogLockPath returns the advisory lock file path for cache directory dir.
 // It resolves symlinks and Windows junctions along dir first so two cache
 // roots sharing a catalogs/ subtree serialize on the same lock file, and
 // places the lock outside dir (in a sibling locks/ directory under cache_dir
-// when dir is under catalogs/, or beside dir otherwise) so deleting dir never
-// breaks lock identity.
+// when dir is under a "catalogs" directory, matched case-insensitively so
+// lock placement never shifts across directory creation or case-insensitive
+// volumes, or beside dir otherwise) so deleting dir never breaks lock identity.
 func catalogLockPath(dir string) string {
 	clean, ok := resolveCanonicalPath(dir, false)
 	if !ok {
 		clean = filepath.Clean(dir)
 	}
 	parent := filepath.Dir(clean)
-	if isCatalogsDir(parent) {
+	if strings.EqualFold(filepath.Base(parent), "catalogs") {
 		return filepath.Join(filepath.Dir(parent), "locks", filepath.Base(clean)+".lock")
 	}
 	return clean + ".lock"
