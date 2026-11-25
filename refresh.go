@@ -135,11 +135,15 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			return false, false, fmt.Errorf("domain %q is no longer in %s", cat.Domain, cat.URL)
 		}
 	}
-	parsedCatalog, appsLink, err := checkCatalogJSON(data, base)
+	_, appsLink, err := checkCatalogJSON(data, base)
 	if err != nil {
 		return false, false, fmt.Errorf("%s is not a valid catalog JSON: %w", cat.URL, err)
 	}
-	eessiLink, err := resolveEESSILink(parsedCatalog, base)
+	eessiMeta, err := parseCatalogEESSI(data)
+	if err != nil {
+		return false, false, fmt.Errorf("%s is not a valid catalog JSON: %w", cat.URL, err)
+	}
+	eessiLink, err := resolveEESSILink(eessiMeta, base)
 	if err != nil {
 		return false, false, fmt.Errorf("%s is not a valid catalog JSON: %w", cat.URL, err)
 	}
@@ -162,7 +166,7 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		if eessiData, _, err = read(eessiLink); err != nil {
 			return false, false, err
 		}
-		if _, err := parseEESSICatalog(eessiData, parsedCatalog.EESSIStacks); err != nil {
+		if _, err := parseEESSICatalog(eessiData, eessiMeta.EESSIStacks); err != nil {
 			return false, false, fmt.Errorf("downloaded EESSI catalog is invalid: %w", err)
 		}
 	}
@@ -173,9 +177,8 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
 		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
-	// Stage every changed file as a temporary file first and remove stale
-	// eessi.json before committing apps.json, eessi.json, and catalog.json last,
-	// so a failed write or removal never leaves mixed cache generations.
+	// Stage every changed file and back up replaced files first so a mid-commit
+	// rename failure rolls back earlier renames instead of leaving a mixed cache.
 	type pendingFile struct {
 		name string
 		data []byte
@@ -189,17 +192,26 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 
 	type stagedFile struct {
 		tmp  string
+		bak  string
 		dest string
 	}
 	var staged []stagedFile
 	cleanupStaged := func() {
 		for _, s := range staged {
-			os.Remove(s.tmp)
+			if s.tmp != "" {
+				os.Remove(s.tmp)
+			}
+			if s.bak != "" {
+				os.Remove(s.bak)
+			}
 		}
 	}
 	for _, file := range files {
 		path := filepath.Join(dir, file.name)
-		if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, file.data) {
+		var old []byte
+		var oldErr error
+		old, oldErr = os.ReadFile(path)
+		if oldErr == nil && bytes.Equal(old, file.data) {
 			continue
 		}
 		tmpPath, err := stageCatalog(path, file.data, file.mode)
@@ -207,26 +219,70 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			cleanupStaged()
 			return false, empty, fmt.Errorf("writing catalog: %w", err)
 		}
-		staged = append(staged, stagedFile{tmp: tmpPath, dest: path})
+		var bakPath string
+		if oldErr == nil {
+			bakPath, err = stageCatalog(path+".bak", old, file.mode)
+			if err != nil {
+				os.Remove(tmpPath)
+				cleanupStaged()
+				return false, empty, fmt.Errorf("writing catalog: %w", err)
+			}
+		}
+		staged = append(staged, stagedFile{tmp: tmpPath, bak: bakPath, dest: path})
 	}
+
+	var staleEESSIBak string
+	eessiPath := filepath.Join(dir, "eessi.json")
 	if eessiLink == "" {
-		eessiPath := filepath.Join(dir, "eessi.json")
-		if err := os.Remove(eessiPath); err == nil {
-			changed = true
+		if _, err := os.Lstat(eessiPath); err == nil {
+			f, err := os.CreateTemp(dir, "eessi.json.*.bak")
+			if err != nil {
+				cleanupStaged()
+				return false, empty, fmt.Errorf("removing stale EESSI catalog: %w", err)
+			}
+			staleEESSIBak = f.Name()
+			f.Close()
+			if err := os.Rename(eessiPath, staleEESSIBak); err != nil {
+				os.Remove(staleEESSIBak)
+				cleanupStaged()
+				return false, empty, fmt.Errorf("removing stale EESSI catalog: %w", err)
+			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			cleanupStaged()
 			return false, empty, fmt.Errorf("removing stale EESSI catalog: %w", err)
 		}
 	}
+
 	for i, s := range staged {
 		if err := os.Rename(s.tmp, s.dest); err != nil {
-			for _, rem := range staged[i:] {
-				os.Remove(rem.tmp)
+			// Roll back every file already renamed in this refresh.
+			for j := i - 1; j >= 0; j-- {
+				if staged[j].bak != "" {
+					_ = os.Rename(staged[j].bak, staged[j].dest)
+					staged[j].bak = ""
+				} else {
+					_ = os.Remove(staged[j].dest)
+				}
 			}
-			return changed, empty, fmt.Errorf("writing catalog: %w", err)
+			if staleEESSIBak != "" {
+				_ = os.Rename(staleEESSIBak, eessiPath)
+				staleEESSIBak = ""
+			}
+			for j := i; j < len(staged); j++ {
+				os.Remove(staged[j].tmp)
+				staged[j].tmp = ""
+			}
+			cleanupStaged()
+			return false, empty, fmt.Errorf("writing catalog: %w", err)
 		}
+		staged[i].tmp = ""
 		changed = true
 	}
+	if staleEESSIBak != "" {
+		os.Remove(staleEESSIBak)
+		changed = true
+	}
+	cleanupStaged()
 	return changed, empty, nil
 }
 

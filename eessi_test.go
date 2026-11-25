@@ -263,11 +263,20 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	mockLmod := filepath.Join(tmp, "mock-lmod.sh")
 	lmodLog := filepath.Join(tmp, "lmod.log")
 	if err := os.WriteFile(mockLmod, []byte(`module() {
-    echo "LOAD:$2" >> "${MOCK_LMOD_LOG}"
+    if [ "$1" = "purge" ]; then
+        LOADEDMODULES=""
+        return 0
+    fi
+    echo "LOAD:$2|MP:${MODULEPATH}|EXACT:${LMOD_EXACT_MATCH:-}" >> "${MOCK_LMOD_LOG}"
     if [ "$2" = "${MOCK_LMOD_FAIL:-}" ]; then
         echo "Lmod error: module not found: $2" >&2
         return 1
     fi
+    if [ "$2" = "${MOCK_LMOD_PREFIX_TARGET:-}" ]; then
+        export LOADEDMODULES="${LOADEDMODULES:+${LOADEDMODULES}:}${2}-extra"
+        return 0
+    fi
+    export LOADEDMODULES="${LOADEDMODULES:+${LOADEDMODULES}:}$2"
     return 0
 }
 `), 0o644); err != nil {
@@ -279,12 +288,14 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "gmx"), []byte("#!/bin/sh\necho \"GMX:$*\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("MODULEPATH", "/site/other/modules")
 	t.Setenv("EESSI_MODULE_ROOT", modRoot)
 	t.Setenv("EESSI_LMOD_INIT", mockLmod)
 	t.Setenv("MOCK_LMOD_LOG", lmodLog)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	// Tool flags (--help, --gpu) after <tool> pass through to the binary without `--`.
+	// Tool flags (--version, --gpu) after <tool> pass through to the binary without `--`,
+	// inherited MODULEPATH is replaced by modroot, and LMOD_EXACT_MATCH=yes is enforced.
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version", "--gpu"}, &stdout, &stderr); code != 0 {
@@ -297,10 +308,26 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantLog := "LOAD:EESSI/2025.06\nLOAD:ParaView/6.0.1-foss-2025b\n"
+	wantLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:ParaView/6.0.1-foss-2025b|MP:" + modRoot + "|EXACT:yes\n"
 	if string(logBytes) != wantLog {
 		t.Fatalf("lmod log = %q, want %q", string(logBytes), wantLog)
 	}
+
+	// If Lmod still resolves a prefix-matched module despite LMOD_EXACT_MATCH,
+	// post-load LOADEDMODULES verification aborts instead of executing.
+	if err := os.WriteFile(lmodLog, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MOCK_LMOD_PREFIX_TARGET", "ParaView/6.0.1-foss-2025b")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("expected failure when Lmod loads prefix-matched module; stdout=%q", stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("prefix-matched module must not execute binary: stdout=%q", stdout.String())
+	}
+	t.Setenv("MOCK_LMOD_PREFIX_TARGET", "")
 
 	// Missing exact GPU module MUST fail and NEVER fall back to unversioned GROMACS.
 	if err := os.WriteFile(lmodLog, nil, 0o644); err != nil {
@@ -319,7 +346,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantFailLog := "LOAD:EESSI/2025.06\nLOAD:GROMACS/2026.2-foss-2025b-CUDA-12.9.1\n"
+	wantFailLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:GROMACS/2026.2-foss-2025b-CUDA-12.9.1|MP:" + modRoot + "|EXACT:yes\n"
 	if string(logBytes) != wantFailLog {
 		t.Fatalf("failed launch must not attempt fallback load; log=%q want=%q", string(logBytes), wantFailLog)
 	}
@@ -521,8 +548,56 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	if code := run([]string{"eessi", "info", "--launcher", "suite-gui", "suite"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("eessi info --launcher suite-gui failed (%d): %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Suite/2.0-foss-2025b") {
-		t.Fatalf("unexpected info output: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "Suite/2.0-foss-2025b") ||
+		!strings.Contains(stdout.String(), "sciget eessi launch --stack 2025.06 --launcher 'Suite GUI' Suite/2.0-foss-2025b") {
+		t.Fatalf("multi-launcher info must print disambiguated --launcher command:\n%s", stdout.String())
+	}
+
+	// Labels differing only by case with a shared executable remain uniquely addressable.
+	caseEESSI := `{
+	  "schemaVersion": 1,
+	  "backend": "eessi",
+	  "explicitSelectionRequired": true,
+	  "cvmfsRepo": "software.eessi.io",
+	  "stacks": ["2025.06"],
+	  "tools": {
+	    "cased": {
+	      "package": "Cased",
+	      "categories": ["analysis"],
+	      "apps": {
+	        "Cased": {
+	          "backend": "eessi",
+	          "stack": "2025.06",
+	          "module": "Cased/1.0-foss-2025b",
+	          "software_version": "1.0",
+	          "arch": ["x86_64"],
+	          "gpu": false,
+	          "exec": ["cased", "--upper"]
+	        },
+	        "cased": {
+	          "backend": "eessi",
+	          "stack": "2025.06",
+	          "module": "Cased/1.0-foss-2025b",
+	          "software_version": "1.0",
+	          "arch": ["x86_64"],
+	          "gpu": false,
+	          "exec": ["cased", "--lower"]
+	        }
+	      }
+	    }
+	  }
+	}`
+	builds, err := parseEESSICatalog([]byte(caseEESSI), []string{"2025.06"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper, err := lookupEESSIBuild(builds, "cased", "", false, "Cased")
+	if err != nil || strings.Join(upper.exec, " ") != "cased --upper" {
+		t.Fatalf("exact-case --launcher Cased failed: err=%v exec=%v", err, upper.exec)
+	}
+	lower, err := lookupEESSIBuild(builds, "cased", "", false, "cased")
+	if err != nil || strings.Join(lower.exec, " ") != "cased --lower" {
+		t.Fatalf("exact-case --launcher cased failed: err=%v exec=%v", err, lower.exec)
 	}
 }
 
@@ -554,14 +629,14 @@ func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
 		t.Fatalf("refresh failed: %s", stderr.String())
 	}
 
-	// Simulate an older cached catalog.json with an invalid eessi_stacks field
-	// and a stale leftover eessi.json without eessiCatalogUrl.
+	// Simulate an older cached catalog.json with wrong-type EESSI fields
+	// ("eessi_stacks": "bad", "eessiCatalogUrl": {}) plus a stale eessi.json.
 	cacheRoot, used, err := usedCatalogs()
 	if err != nil || len(used) != 1 {
 		t.Fatalf("usedCatalogs failed: %v (%d)", err, len(used))
 	}
 	cacheDir := used[0].dir(cacheRoot)
-	if err := os.WriteFile(filepath.Join(cacheDir, "catalog.json"), []byte(`{"schemaVersion": 1, "appJsonUrl": "apps.json", "eessi_stacks": ["bad"]}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cacheDir, "catalog.json"), []byte(`{"schemaVersion": 1, "appJsonUrl": "apps.json", "eessi_stacks": "bad", "eessiCatalogUrl": {}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cacheDir, "eessi.json"), []byte(testEESSIJSON), 0o644); err != nil {
@@ -572,13 +647,82 @@ func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"find", "fsl"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "fsl/6.0.7") {
-		t.Fatalf("container find should ignore invalid EESSI fields in old cache: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+		t.Fatalf("container find should ignore malformed EESSI fields in old cache: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
 	}
 
-	// EESSI commands ignore leftover eessi.json when catalog.json has no eessiCatalogUrl.
+	// EESSI commands ignore leftover eessi.json when catalog.json omits eessiCatalogUrl.
+	if err := os.WriteFile(filepath.Join(cacheDir, "catalog.json"), []byte(`{"schemaVersion": 1, "appJsonUrl": "apps.json"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"eessi", "find"}, &stdout, &stderr); code != 0 || stdout.Len() != 0 {
 		t.Fatalf("eessi find should ignore stale eessi.json when catalog.json omits eessiCatalogUrl: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestRefreshRollbackOnRenameFailure(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
+
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appsV1 := `{"fsl":{"categories":["structural imaging"],"apps":{"fsl 6.0.7":{"image":"fsl_6.0.7","version":"20260101","exec":"bet"}}}}`
+	appsV2 := `{"fsl":{"categories":["structural imaging"],"apps":{"fsl 6.0.8":{"image":"fsl_6.0.8","version":"20260201","exec":"bet"}}}}`
+	if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "eessi.json"), []byte(testEESSIJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catFile := filepath.Join(srcDir, "cat.json")
+	if err := os.WriteFile(catFile, []byte(`{"schemaVersion": 1, "appJsonUrl": "apps.json", "eessiCatalogUrl": "eessi.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"catalog", "add", "neuro", catFile}, &stdout, &stderr); code != 0 {
+		t.Fatalf("catalog add failed: %s", stderr.String())
+	}
+	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("initial refresh failed: %s", stderr.String())
+	}
+
+	// Update apps.json to v2 and force eessi.json rename to fail by replacing
+	// the cached eessi.json with a non-empty directory.
+	if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cacheRoot, used, err := usedCatalogs()
+	if err != nil || len(used) != 1 {
+		t.Fatalf("usedCatalogs failed: %v", err)
+	}
+	cacheDir := used[0].dir(cacheRoot)
+	eessiPath := filepath.Join(cacheDir, "eessi.json")
+	if err := os.Remove(eessiPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(eessiPath, "blocker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("expected refresh to fail when eessi.json rename fails")
+	}
+
+	// apps.json must have been rolled back to v1 (never mixed v2 apps + v1 catalog).
+	gotApps, err := os.ReadFile(filepath.Join(cacheDir, "apps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotApps) != appsV1 {
+		t.Fatalf("apps.json was not rolled back on eessi.json rename failure: got %s, want %s", string(gotApps), appsV1)
 	}
 }

@@ -25,8 +25,10 @@ var (
 )
 
 // eessiStrictLaunchScript loads the exact requested EESSI stack and exact
-// module from the declared CVMFS repository without falling back to an
-// unversioned package name, then execs the validated command with `--`.
+// module from the declared CVMFS repository alone (clearing any inherited
+// MODULEPATH and enforcing LMOD_EXACT_MATCH=yes plus LOADEDMODULES verification)
+// without falling back to an unversioned or prefix-matched module, then execs
+// the validated command with `--`.
 const eessiStrictLaunchScript = `set -euo pipefail
 modroot="$1"
 stack="$2"
@@ -51,13 +53,21 @@ if [ -z "${lmod_init}" ] || [ ! -r "${lmod_init}" ]; then
 fi
 export FPATH="${FPATH:-}"
 source "${lmod_init}"
-case ":${MODULEPATH:-}:" in
-*":${modroot}:"*) ;;
-*) export MODULEPATH="${modroot}${MODULEPATH:+:${MODULEPATH}}" ;;
-esac
+module purge >/dev/null 2>&1 || true
+export MODULEPATH="${modroot}"
+export LMOD_EXACT_MATCH=yes
 export EESSI_MODULE_QUIET_LOAD=1
 module load "EESSI/${stack}" >/dev/null
 module load "${mod}" >/dev/null
+if [ -n "${LOADEDMODULES:-}" ]; then
+    case ":${LOADEDMODULES}:" in
+    *":${mod}:"*) ;;
+    *)
+        echo "sciget eessi: Lmod loaded ${LOADEDMODULES} instead of exact module ${mod}" >&2
+        exit 1
+        ;;
+    esac
+fi
 exec -- "$@"
 `
 
@@ -104,13 +114,16 @@ func (b eessiBuild) loadCommand() string {
 	return fmt.Sprintf("%smodule load EESSI/%s && module load %s", prefix, b.stack, b.module)
 }
 
-func (b eessiBuild) launchCommand() string {
+func (b eessiBuild) launchCommand(includeLauncher bool) string {
 	if len(b.exec) == 0 {
 		return ""
 	}
 	parts := []string{"sciget", "eessi", "launch", "--stack", b.stack}
 	if b.gpu {
 		parts = append(parts, "--gpu")
+	}
+	if includeLauncher {
+		parts = append(parts, "--launcher", b.label)
 	}
 	parts = append(parts, b.module)
 	return shellJoin(parts)
@@ -316,15 +329,15 @@ func readEESSIBuilds() ([]eessiBuild, error) {
 		var allowedStacks []string
 		catData, err := os.ReadFile(filepath.Join(dir, "catalog.json"))
 		if err == nil {
-			meta, err := parseCatalogJSON(catData)
+			if _, err := parseCatalogJSON(catData); err != nil {
+				return nil, &catalogError{name: cat.Name, err: err}
+			}
+			meta, err := parseCatalogEESSI(catData)
 			if err != nil {
 				return nil, &catalogError{name: cat.Name, err: err}
 			}
 			if meta.EESSICatalogURL == "" {
 				continue
-			}
-			if err := checkEESSIStacks(meta.EESSIStacks); err != nil {
-				return nil, &catalogError{name: cat.Name, err: err}
 			}
 			allowedStacks = meta.EESSIStacks
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -512,6 +525,19 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, launch
 			sameBuild = append(sameBuild, b)
 		}
 	}
+	if len(sameBuild) > 1 && launcher != "" {
+		// Prefer an exact case-sensitive label match so labels differing only by
+		// case with a shared executable remain uniquely addressable.
+		var exact []eessiBuild
+		for _, b := range sameBuild {
+			if b.label == launcher {
+				exact = append(exact, b)
+			}
+		}
+		if len(exact) == 1 {
+			return exact[0], nil
+		}
+	}
 	if len(sameBuild) > 1 {
 		var choices []string
 		for _, b := range sameBuild {
@@ -525,6 +551,25 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, launch
 			query, best.module, strings.Join(choices, ", "))
 	}
 	return best, nil
+}
+
+func hasSiblingLaunchers(builds []eessiBuild, target eessiBuild) bool {
+	count := 0
+	for _, b := range builds {
+		if b.shadowed {
+			continue
+		}
+		if b.catalogOrder == target.catalogOrder &&
+			b.stack == target.stack &&
+			b.gpu == target.gpu &&
+			b.module == target.module {
+			count++
+			if count > 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func newEESSIInfoCommand() *cobra.Command {
@@ -580,7 +625,7 @@ func newEESSIInfoCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if lc := b.launchCommand(); lc != "" {
+			if lc := b.launchCommand(hasSiblingLaunchers(builds, b)); lc != "" {
 				_, err = fmt.Fprintf(out, "%-13s%s\n", "Launch:", lc)
 			}
 			return err
