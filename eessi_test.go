@@ -2989,12 +2989,26 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if gotNFC, gotNFD := hashLockPath(normDir, "Caf\u00e9"), hashLockPath(normDir, "Cafe\u0301"); gotNFC != gotNFD {
 			t.Fatalf("pre-creation NFC vs NFD target basenames hashed to different lock paths: %q != %q", gotNFC, gotNFD)
 		}
+		// Canonical equivalence before case folding: U+0130 ("İ"), "I\u0307",
+		// and "i\u0307" must all hash identically both before and after creation.
+		if gotPre, gotDecomp, gotLower := hashLockPath(normDir, "\u0130"), hashLockPath(normDir, "I\u0307"), hashLockPath(normDir, "i\u0307"); gotPre != gotDecomp || gotPre != gotLower {
+			t.Fatalf("pre-creation canonically equivalent dotted-I basenames hashed differently: pre=%q decomp=%q lower=%q", gotPre, gotDecomp, gotLower)
+		}
+		if gotAng, gotRing := hashLockPath(normDir, "\u212b"), hashLockPath(normDir, "a\u030a"); gotAng != gotRing {
+			t.Fatalf("pre-creation canonically equivalent Angstrom basenames hashed differently: %q != %q", gotAng, gotRing)
+		}
 		nfcDirEntry := filepath.Join(normDir, "Caf\u00e9")
 		if err := os.MkdirAll(nfcDirEntry, 0o755); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.MkdirAll(filepath.Join(normDir, "\u0130"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if gotNFC, gotNFD := hashLockPath(normDir, "Caf\u00e9"), hashLockPath(normDir, "Cafe\u0301"); gotNFC != gotNFD {
 			t.Fatalf("post-creation NFC vs NFD target basenames hashed to different lock paths: %q != %q", gotNFC, gotNFD)
+		}
+		if gotPre, gotDecomp, gotLower := hashLockPath(normDir, "\u0130"), hashLockPath(normDir, "I\u0307"), hashLockPath(normDir, "i\u0307"); gotPre != gotDecomp || gotPre != gotLower {
+			t.Fatalf("post-creation canonically equivalent dotted-I basenames hashed differently: pre=%q decomp=%q lower=%q", gotPre, gotDecomp, gotLower)
 		}
 		// Hard-linked symlinks are distinct directory entries; removing one
 		// catalog must unlink its symlink while keeping the other registered
@@ -3137,6 +3151,27 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 		if k := lockOrderKey(catalogTargetLockPath(danglingAlias)); k.kind != 1 {
 			t.Fatalf("expected existing-parent lockOrderKey kind=1 after pre-creation, got %+v", k)
+		}
+		// Exhausting shared-lock retry attempts must return an error rather
+		// than falling through to lock only the slot lock and bypassing target.
+		extOrder := catalogExternalLockPaths(danglingAlias)
+		if len(extOrder) != 2 {
+			t.Fatalf("expected 2 external lock paths for alias, got %v", extOrder)
+		}
+		secondExclLk, err := lockFileExclusive(extOrder[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		prevMaxShared := maxSharedLockAttempts
+		maxSharedLockAttempts = 1
+		exhaustUnlock, _, exhaustLocked, _, exhaustErr := lockCatalogDirSharedWithMissing(danglingAlias)
+		maxSharedLockAttempts = prevMaxShared
+		secondExclLk.unlock()
+		if exhaustUnlock != nil {
+			exhaustUnlock()
+		}
+		if exhaustErr == nil || !strings.Contains(exhaustErr.Error(), "catalog locks busy during read") || exhaustLocked {
+			t.Fatalf("exhausting shared lock retries must fail without bypassing second lock: locked=%v err=%v", exhaustLocked, exhaustErr)
 		}
 		hlDir := filepath.Join(tmp, "lock-identity")
 		if err := os.MkdirAll(hlDir, 0o755); err != nil {

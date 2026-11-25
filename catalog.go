@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -583,7 +584,7 @@ func canonicalOnDiskBase(parent, base string) string {
 
 func hashLockPath(parent, base string) string {
 	base = canonicalOnDiskBase(parent, base)
-	normalized := norm.NFC.String(strings.ToLower(base))
+	normalized := norm.NFD.String(cases.Fold().String(norm.NFD.String(base)))
 	sum := sha256.Sum256([]byte(normalized))
 	return filepath.Join(parent, ".sciget-lock-"+hex.EncodeToString(sum[:16])+".lock")
 }
@@ -993,13 +994,18 @@ func lockCatalogDirShared(dir string) (func(), catalogGen, bool, error) {
 // set it to reproduce reader-vs-writer lock-order transitions.
 var beforeSecondSharedLock = func(dir string) {}
 
+// maxSharedLockAttempts bounds lockCatalogDirSharedWithMissing retries; tests
+// may reduce it to verify contention exhaustion returns an error rather than
+// bypassing the target lock.
+var maxSharedLockAttempts = 64
+
 func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []string, error) {
 	slotPath := catalogLockPath(dir)
 	targetPath := catalogTargetLockPath(dir)
 	slotSameAsTarget := sameLockFile(slotPath, targetPath)
 	clean := canonicalCatalogDir(dir)
 	var waitFirst string
-	for attempt := range 64 {
+	for attempt := range maxSharedLockAttempts {
 		extPaths := catalogExternalLockPaths(dir)
 		if waitFirst != "" && len(extPaths) == 2 && sameLockFile(extPaths[1], waitFirst) {
 			extPaths = []string{extPaths[1], extPaths[0]}
@@ -1128,12 +1134,7 @@ func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []st
 		}
 		return inUnlock, gen, true, nil, nil
 	}
-	u, g, ok, err := lockFileShared(slotPath)
-	gen := catalogGen{slot: g}
-	if slotSameAsTarget {
-		gen.target = g
-	}
-	return u, gen, ok, nil, err
+	return nil, catalogGen{}, false, nil, errors.New("catalog locks busy during read; run again")
 }
 
 // beforeCatalogSharedLock runs immediately before readCatalogSnapshot acquires
