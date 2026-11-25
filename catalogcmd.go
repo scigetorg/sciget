@@ -372,7 +372,7 @@ func removeCatalogCache(dir string) error {
 	beforeRemoveCatalogCache(dir)
 	lk, err := lockCatalogDirForRemove(dir)
 	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
+		if isReadOnlyOrPermError(err) {
 			if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
 				return nil
 			}
@@ -380,13 +380,9 @@ func removeCatalogCache(dir string) error {
 		return err
 	}
 	defer lk.unlock()
-	isSymlinkLeaf := false
-	if info, statErr := os.Lstat(filepath.Clean(dir)); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
-		isSymlinkLeaf = true
-	}
 	var registered bool
-	if isSymlinkLeaf {
-		registered, err = catalogDirRegistered(dir)
+	if isLinkLeaf(dir) {
+		registered, err = catalogSlotReferenced(dir)
 	} else {
 		registered, err = catalogTargetRegistered(dir)
 	}

@@ -15,6 +15,10 @@ import (
 
 var catalogDirLocks sync.Map
 
+func isReadOnlyOrPermError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
+}
+
 // lockFileExclusive acquires both an in-process inode mutex and a POSIX fcntl
 // write lock on lockPath for Unix platforms without BSD flock (such as
 // Solaris/illumos).

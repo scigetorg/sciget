@@ -2081,8 +2081,8 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if _, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, existingWritableDir); err != nil {
 				t.Fatalf("refresh after restoring 0755 catalogs/ failed: %v", err)
 			}
-			if gen, err := readCatalogLockGen(existingWritableDir); err != nil || gen < 4 {
-				t.Fatalf("expected migrated external lock generation >= 4, got gen=%d err=%v", gen, err)
+			if gen, err := readCatalogLockGen(existingWritableDir); err != nil || gen.target < 4 {
+				t.Fatalf("expected migrated external lock generation >= 4, got gen=%+v err=%v", gen, err)
 			}
 
 			// Removing a never-refreshed catalog when cache/catalogs is 0555
@@ -2383,8 +2383,8 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			preAliasGen, err := readCatalogLockGen(roAliasLink)
-			if err != nil || preAliasGen != 2 {
-				t.Fatalf("expected alias generation 2 before removal, got gen=%d err=%v", preAliasGen, err)
+			if err != nil || preAliasGen != (catalogGen{slot: 0, target: 2}) {
+				t.Fatalf("expected alias generation {0 2} before removal, got gen=%+v err=%v", preAliasGen, err)
 			}
 			if err := removeCatalogCache(roAliasLink); err != nil {
 				t.Fatalf("removeCatalogCache on alias with 0555 target parent failed: %v", err)
@@ -2392,27 +2392,51 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(roAliasTargetDir, ".lock")); err != nil {
 				t.Fatalf("removing alias must preserve target in-dir .lock: %v", err)
 			}
-			if gen, err := readCatalogLockGen(roAliasTargetDir); err != nil || gen != 2 {
-				t.Fatalf("target generation must remain 2 after alias removal, got gen=%d err=%v", gen, err)
+			if gen, err := readCatalogLockGen(roAliasTargetDir); err != nil || gen != (catalogGen{slot: 2, target: 2}) {
+				t.Fatalf("target generation must remain {2 2} after alias removal, got gen=%+v err=%v", gen, err)
 			}
-			if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "direct", URL: catFile}, roAliasTargetDir, 0, nil); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
+			if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "direct", URL: catFile}, roAliasTargetDir, catalogGen{}, nil); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
 				t.Fatalf("delayed refresh on target must still see generation 2, got err=%v", err)
 			}
 			// Recreating the alias symlink must still reject a delayed alias
-			// refresh captured before removal (slotPath bumped to 3 > 2).
+			// refresh captured before removal (slot bumped 0 -> 1).
 			if err := os.Symlink(roAliasTargetDir, roAliasLink); err != nil {
 				t.Fatal(err)
 			}
 			if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "alias", URL: catFile}, roAliasLink, preAliasGen, nil); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
 				t.Fatalf("delayed refresh after alias remove+recreate must fail on generation mismatch, got err=%v", err)
 			}
+			// Advance alias slot generation to 3 (higher than target's 2): a
+			// subsequent direct refresh advancing target 2 -> 3 must still make
+			// a delayed alias refresh (captured at {3, 2}) fail rather than
+			// being masked by max(3, 3) == max(3, 2).
+			for range 2 {
+				if err := removeCatalogCache(roAliasLink); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(roAliasTargetDir, roAliasLink); err != nil {
+					t.Fatal(err)
+				}
+			}
+			aliasBeforeDirect, err := readCatalogLockGen(roAliasLink)
+			if err != nil || aliasBeforeDirect != (catalogGen{slot: 3, target: 2}) {
+				t.Fatalf("expected alias gen {3 2}, got %+v err=%v", aliasBeforeDirect, err)
+			}
+			if _, _, err := refreshCatalog(fileRead, catalog{Name: "direct", URL: catFile}, roAliasTargetDir); err != nil {
+				t.Fatalf("direct refresh advancing target 2 -> 3 failed: %v", err)
+			}
+			if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "alias", URL: catFile}, roAliasLink, aliasBeforeDirect, nil); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
+				t.Fatalf("delayed alias refresh {3 2} must fail after direct refresh bumped target 2 -> 3, got err=%v", err)
+			}
 		}
 
 		// Two enabled catalogs sharing a cache directory via symlink must both
-		// refresh cleanly on consecutive 'sciget refresh' runs, and removing
-		// the direct registration must preserve the shared cache while the
+		// refresh cleanly on consecutive 'sciget refresh' runs (even when the
+		// first fails commit and rolls back after bumping), removing an
+		// intermediate symlink must preserve it while an outer alias traverses
+		// it, and removing direct must preserve the shared cache while any
 		// alias remains registered.
-		t.Run("shared cache refresh and direct removal with remaining alias", func(t *testing.T) {
+		t.Run("shared cache refresh, rollback propagation, and chained alias removal", func(t *testing.T) {
 			subTmp := t.TempDir()
 			isolateTestEnv(t, subTmp)
 			layers, err := readCatalogLayers()
@@ -2420,17 +2444,25 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			directCat := catalog{Name: "direct", URL: catFile, Use: true}
-			aliasCat := catalog{Name: "alias", URL: catFile, Use: true}
-			if err := writeCatalogList(layers.userPath, []catalog{directCat, aliasCat}, false); err != nil {
+			middleCat := catalog{Name: "middle", URL: catFile, Use: true}
+			outerCat := catalog{Name: "outer", URL: catFile, Use: true}
+			if err := writeCatalogList(layers.userPath, []catalog{directCat, middleCat, outerCat}, false); err != nil {
 				t.Fatal(err)
 			}
 			directDir := directCat.dir(layers.cacheDir)
-			aliasDir := aliasCat.dir(layers.cacheDir)
+			middleDir := middleCat.dir(layers.cacheDir)
+			outerDir := outerCat.dir(layers.cacheDir)
 			if err := os.MkdirAll(directDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(directDir, aliasDir); err != nil {
+			if err := os.Symlink(directDir, middleDir); err != nil {
 				t.Fatal(err)
+			}
+			if err := os.Symlink(middleDir, outerDir); err != nil {
+				t.Fatal(err)
+			}
+			if !isLinkLeaf(middleDir) || !isLinkLeaf(outerDir) || isLinkLeaf(directDir) {
+				t.Fatalf("isLinkLeaf misclassified links: middle=%v outer=%v direct=%v", isLinkLeaf(middleDir), isLinkLeaf(outerDir), isLinkLeaf(directDir))
 			}
 			for pass := 1; pass <= 2; pass++ {
 				var out, errBuf bytes.Buffer
@@ -2438,25 +2470,67 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 					t.Fatalf("sciget refresh pass %d with shared cache failed: code=%d stdout=%q stderr=%q", pass, code, out.String(), errBuf.String())
 				}
 			}
+			// Inject a commit failure on the first catalog (after lk.bump() and
+			// clean rollback) and verify later aliases in the same refresh
+			// invocation do not fail with "catalog cache changed during refresh".
+			// Modify apps.json in the cache so the first catalog stages a rename.
+			if err := os.WriteFile(filepath.Join(directDir, "apps.json"), []byte(`{"old":{"apps":{"old 1":{"version":"1"}}}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			prevRename := renameCatalogFile
+			failedFirst := false
+			renameCatalogFile = func(oldpath, newpath string) error {
+				if !failedFirst && filepath.Base(newpath) == "apps.json" {
+					failedFirst = true
+					return errors.New("injected first-catalog commit failure")
+				}
+				return prevRename(oldpath, newpath)
+			}
+			t.Cleanup(func() { renameCatalogFile = prevRename })
+			results, err := refreshCatalogs()
+			renameCatalogFile = prevRename
+			if err != nil {
+				t.Fatalf("refreshCatalogs returned top-level err=%v", err)
+			}
+			if len(results) != 3 || results[0].err == nil || results[1].err != nil || results[2].err != nil {
+				t.Fatalf("expected first catalog to fail and later shared-cache aliases to succeed, got %+v", results)
+			}
+
+			// Removing middle while outer -> middle -> direct is registered
+			// must preserve middle so outer does not become dangling.
 			var out, errBuf bytes.Buffer
+			if code := run([]string{"catalog", "remove", "middle"}, &out, &errBuf); code != 0 {
+				t.Fatalf("catalog remove middle failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+			}
+			if _, err := os.Lstat(middleDir); err != nil {
+				t.Fatalf("removing middle must preserve intermediate symlink while outer traverses it: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(outerDir, "apps.json")); err != nil {
+				t.Fatalf("outer must still resolve through preserved middle symlink: %v", err)
+			}
+			// Removing direct while outer still resolves to direct must also
+			// keep direct intact.
+			out.Reset()
+			errBuf.Reset()
 			if code := run([]string{"catalog", "remove", "direct"}, &out, &errBuf); code != 0 {
 				t.Fatalf("catalog remove direct failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
 			}
-			if _, err := os.Stat(filepath.Join(aliasDir, "apps.json")); err != nil {
-				t.Fatalf("removing direct must preserve shared cache for remaining alias: %v", err)
+			if _, err := os.Stat(filepath.Join(outerDir, "apps.json")); err != nil {
+				t.Fatalf("removing direct must preserve shared cache for remaining outer alias: %v", err)
 			}
 			out.Reset()
 			errBuf.Reset()
 			if code := run([]string{"find"}, &out, &errBuf); code != 0 || !strings.Contains(out.String(), "fsl") {
-				t.Fatalf("sciget find via remaining alias failed after direct removal: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+				t.Fatalf("sciget find via remaining outer alias failed after direct removal: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
 			}
+			// Removing outer unlinks only outer's symlink cleanly.
 			out.Reset()
 			errBuf.Reset()
-			if code := run([]string{"catalog", "remove", "alias"}, &out, &errBuf); code != 0 {
-				t.Fatalf("catalog remove alias failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+			if code := run([]string{"catalog", "remove", "outer"}, &out, &errBuf); code != 0 {
+				t.Fatalf("catalog remove outer failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
 			}
-			if _, err := os.Lstat(aliasDir); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("removing alias must unlink its symlink, lstat err=%v", err)
+			if _, err := os.Lstat(outerDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("removing outer must unlink its symlink, lstat err=%v", err)
 			}
 		})
 	}

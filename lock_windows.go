@@ -10,6 +10,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func isReadOnlyOrPermError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, windows.ERROR_WRITE_PROTECT)
+}
+
 // lockFileExclusive acquires an exclusive Windows file lock on lockPath so
 // concurrent writers cannot interleave updates, commits, rollbacks, or deletes.
 func lockFileExclusive(lockPath string) (*catalogLock, error) {

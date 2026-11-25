@@ -9,6 +9,10 @@ import (
 	"syscall"
 )
 
+func isReadOnlyOrPermError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
+}
+
 // lockFileExclusive acquires an exclusive advisory flock on lockPath so
 // concurrent writers cannot interleave updates, commits, rollbacks, or deletes.
 func lockFileExclusive(lockPath string) (*catalogLock, error) {
