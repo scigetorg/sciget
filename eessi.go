@@ -19,7 +19,7 @@ var (
 	eessiStackPattern   = regexp.MustCompile(`^\d{4}\.\d{2}$`)
 	eessiToolIDPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,63}$`)
 	eessiModulePattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*/[A-Za-z0-9][A-Za-z0-9._+-]*$`)
-	eessiExecBinPattern = regexp.MustCompile(`^[A-Za-z0-9._/@:+=][A-Za-z0-9._/@:+=-]{0,127}$`)
+	eessiExecBinPattern = regexp.MustCompile(`^[A-Za-z0-9._@:+=][A-Za-z0-9._@:+=-]{0,127}$`)
 	eessiExecArgPattern = regexp.MustCompile(`^[A-Za-z0-9._/@:+=-]{1,128}$`)
 	eessiRepoPattern    = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$`)
 )
@@ -78,7 +78,32 @@ case ":${LOADEDMODULES:-}:" in
     exit 1
     ;;
 esac
-exec -- "$@"
+cmd_name="$1"
+shift
+case "${cmd_name}" in
+*/*)
+    echo "sciget eessi: refusing path-qualified executable ${cmd_name}" >&2
+    exit 1
+    ;;
+esac
+eessi_path=""
+IFS=':' read -r -a path_parts <<<"${PATH}"
+for p in "${path_parts[@]+"${path_parts[@]}"}"; do
+    case "${p}" in
+    ""|/usr/bin|/bin) continue ;;
+    *) eessi_path="${eessi_path:+${eessi_path}:}${p}" ;;
+    esac
+done
+if [ -z "${eessi_path}" ]; then
+    echo "sciget eessi: loaded module ${mod} did not add any EESSI bin directory to PATH" >&2
+    exit 127
+fi
+resolved_bin="$(PATH="${eessi_path}" type -P -- "${cmd_name}" || true)"
+if [ -z "${resolved_bin}" ]; then
+    echo "sciget eessi: executable ${cmd_name} not found in loaded EESSI modules (refusing host fallback)" >&2
+    exit 127
+fi
+exec -- "${resolved_bin}" "$@"
 `
 
 // eessiBuild is one curated EESSI Lmod module entry across catalogs in use.
@@ -259,7 +284,7 @@ func parseEESSICatalog(data []byte, allowedStacks []string) ([]eessiBuild, error
 			}
 			for i, arg := range app.Exec {
 				if i == 0 {
-					if !eessiExecBinPattern.MatchString(arg) {
+					if arg == "." || arg == ".." || !eessiExecBinPattern.MatchString(arg) {
 						return nil, fmt.Errorf("tool %q app %q has invalid executable %q", id, label, arg)
 					}
 				} else if !eessiExecArgPattern.MatchString(arg) {

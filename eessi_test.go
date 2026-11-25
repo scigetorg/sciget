@@ -124,6 +124,14 @@ func TestParseEESSICatalog(t *testing.T) {
 			json: strings.Replace(testEESSIJSON, `"exec": ["paraview"]`, `"exec": ["-a", "paraview"]`, 1),
 		},
 		{
+			name: "path-qualified executable",
+			json: strings.Replace(testEESSIJSON, `"exec": ["paraview"]`, `"exec": ["/usr/bin/paraview"]`, 1),
+		},
+		{
+			name: "dot executable",
+			json: strings.Replace(testEESSIJSON, `"exec": ["paraview"]`, `"exec": ["."]`, 1),
+		},
+		{
 			name: "invalid stack",
 			json: strings.Replace(testEESSIJSON, `"stack": "2025.06"`, `"stack": "bad"`, 1),
 		},
@@ -335,12 +343,29 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		t.Fatalf("lmod log = %q, want %q", string(logBytes), wantLog)
 	}
 
-	// If the EESSI module does not provide the binary on PATH, stale PATH entries
-	// must NOT satisfy the exec (launch must fail instead of running STALE_SITE_GMX).
+	// If the EESSI module does not provide the binary on PATH, neither stale
+	// site PATH entries nor host /usr/bin:/bin binaries may satisfy the exec.
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "gromacs", "--version"}, &stdout, &stderr); code == 0 || strings.Contains(stdout.String(), "STALE_SITE_GMX") {
 		t.Fatalf("stale site PATH must not satisfy missing EESSI binary: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+
+	// Even a binary that exists in host /bin or /usr/bin (e.g. "uname") must be
+	// refused when not provided by the loaded EESSI module.
+	hostOnlyBuild := eessiBuild{
+		id:        "hostcheck",
+		pkg:       "HostCheck",
+		cvmfsRepo: "software.eessi.io",
+		stack:     "2025.06",
+		module:    "HostCheck/1.0-foss-2025b",
+		version:   "1.0",
+		exec:      []string{"uname"},
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runEESSILaunch(hostOnlyBuild, nil, strings.NewReader(""), &stdout, &stderr); err == nil || stdout.Len() != 0 {
+		t.Fatalf("host /usr/bin/uname must not satisfy missing EESSI binary: err=%v out=%q errOut=%q", err, stdout.String(), stderr.String())
 	}
 
 	// If Lmod still resolves a prefix-matched module despite LMOD_EXACT_MATCH,
