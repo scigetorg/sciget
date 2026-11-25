@@ -119,7 +119,7 @@ func (b eessiBuild) loadCommand() string {
 	return fmt.Sprintf("%smodule load EESSI/%s && module load %s", prefix, b.stack, b.module)
 }
 
-func (b eessiBuild) launchCommand(launcherFlag string) string {
+func (b eessiBuild) launchCommand(query, catalogFlag, launcherFlag string) string {
 	if len(b.exec) == 0 {
 		return ""
 	}
@@ -127,10 +127,13 @@ func (b eessiBuild) launchCommand(launcherFlag string) string {
 	if b.gpu {
 		parts = append(parts, "--gpu")
 	}
+	if catalogFlag != "" {
+		parts = append(parts, "--catalog", catalogFlag)
+	}
 	if launcherFlag != "" {
 		parts = append(parts, "--launcher", launcherFlag)
 	}
-	parts = append(parts, b.module)
+	parts = append(parts, query)
 	return shellJoin(parts)
 }
 
@@ -476,14 +479,17 @@ func matchesLauncher(b eessiBuild, launcher string) bool {
 	return len(b.exec) > 0 && b.exec[0] == launcher
 }
 
-func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, launcher string) (eessiBuild, error) {
+func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, catalogName, launcher string) (eessiBuild, error) {
 	if stack != "" && !eessiStackPattern.MatchString(stack) {
 		return eessiBuild{}, usageError{fmt.Sprintf("invalid --stack %q (expected YYYY.MM)", stack)}
 	}
 	toolQuery, verQuery, hasSlash := strings.Cut(query, "/")
 	var matched []eessiBuild
 	for _, b := range builds {
-		if b.shadowed {
+		if b.shadowed && catalogName == "" {
+			continue
+		}
+		if catalogName != "" && b.catalog != catalogName {
 			continue
 		}
 		if stack != "" && b.stack != stack {
@@ -576,25 +582,46 @@ func sameEESSIBuild(a, b eessiBuild) bool {
 		slices.Equal(a.exec, b.exec)
 }
 
-// launchSelector returns the --launcher flag value (or "" when none is needed)
-// so that `sciget eessi launch` resolves back to target.
-func launchSelector(builds []eessiBuild, target eessiBuild) string {
-	if resolved, err := lookupEESSIBuild(builds, target.module, target.stack, target.gpu, ""); err == nil && sameEESSIBuild(resolved, target) {
+// formatLaunchCommand returns a `sciget eessi launch` command that is verified
+// to resolve back to target, or "" if no CLI selector uniquely identifies it.
+func formatLaunchCommand(builds []eessiBuild, target eessiBuild) string {
+	if len(target.exec) == 0 {
 		return ""
 	}
-	if resolved, err := lookupEESSIBuild(builds, target.module, target.stack, target.gpu, target.label); err == nil && sameEESSIBuild(resolved, target) {
-		return target.label
+	type candidate struct {
+		query    string
+		catalog  string
+		launcher string
 	}
-	if len(target.exec) > 0 {
-		if resolved, err := lookupEESSIBuild(builds, target.module, target.stack, target.gpu, target.exec[0]); err == nil && sameEESSIBuild(resolved, target) {
-			return target.exec[0]
+	candidates := []candidate{
+		{target.module, "", ""},
+		{target.module, "", target.label},
+		{target.module, "", target.exec[0]},
+		{target.name(), "", ""},
+		{target.name(), "", target.label},
+		{target.name(), "", target.exec[0]},
+	}
+	if target.catalog != "" {
+		candidates = append(candidates,
+			candidate{target.module, target.catalog, ""},
+			candidate{target.module, target.catalog, target.label},
+			candidate{target.module, target.catalog, target.exec[0]},
+			candidate{target.name(), target.catalog, ""},
+			candidate{target.name(), target.catalog, target.label},
+			candidate{target.name(), target.catalog, target.exec[0]},
+		)
+	}
+	for _, c := range candidates {
+		resolved, err := lookupEESSIBuild(builds, c.query, target.stack, target.gpu, c.catalog, c.launcher)
+		if err == nil && sameEESSIBuild(resolved, target) {
+			return target.launchCommand(c.query, c.catalog, c.launcher)
 		}
 	}
-	return target.label
+	return ""
 }
 
 func newEESSIInfoCommand() *cobra.Command {
-	var stack, launcher string
+	var stack, catalogName, launcher string
 	var gpu bool
 	cmd := &cobra.Command{
 		Use:   "info <tool[/version]|module>",
@@ -605,7 +632,7 @@ func newEESSIInfoCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := lookupEESSIBuild(builds, args[0], stack, gpu, launcher)
+			b, err := lookupEESSIBuild(builds, args[0], stack, gpu, catalogName, launcher)
 			if err != nil {
 				return err
 			}
@@ -646,7 +673,7 @@ func newEESSIInfoCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if lc := b.launchCommand(launchSelector(builds, b)); lc != "" {
+			if lc := formatLaunchCommand(builds, b); lc != "" {
 				_, err = fmt.Fprintf(out, "%-13s%s\n", "Launch:", lc)
 			}
 			return err
@@ -654,6 +681,7 @@ func newEESSIInfoCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&stack, "stack", "", "require a specific EESSI stack (YYYY.MM)")
 	cmd.Flags().BoolVar(&gpu, "gpu", false, "select a GPU-enabled build")
+	cmd.Flags().StringVar(&catalogName, "catalog", "", "restrict selection to a specific catalog in use")
 	cmd.Flags().StringVar(&launcher, "launcher", "", "select a specific launcher label or command when a module exposes multiple")
 	return cmd
 }
@@ -672,7 +700,7 @@ func runEESSILaunch(b eessiBuild, extraArgs []string, stdin io.Reader, stdout, s
 }
 
 func newEESSILaunchCommand() *cobra.Command {
-	var stack, launcher string
+	var stack, catalogName, launcher string
 	var gpu bool
 	cmd := &cobra.Command{
 		Use:   "launch [flags] <tool[/version]|module> [args...]",
@@ -688,7 +716,7 @@ func newEESSILaunchCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := lookupEESSIBuild(builds, args[0], stack, gpu, launcher)
+			b, err := lookupEESSIBuild(builds, args[0], stack, gpu, catalogName, launcher)
 			if err != nil {
 				return err
 			}
@@ -700,6 +728,7 @@ func newEESSILaunchCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&stack, "stack", "", "require a specific EESSI stack (YYYY.MM)")
 	cmd.Flags().BoolVar(&gpu, "gpu", false, "select a GPU-enabled build")
+	cmd.Flags().StringVar(&catalogName, "catalog", "", "restrict selection to a specific catalog in use")
 	cmd.Flags().StringVar(&launcher, "launcher", "", "select a specific launcher label or command when a module exposes multiple")
 	// Stop flag parsing at the first positional argument so tool flags
 	// (such as --help or --gpu) pass straight to the launched EESSI binary.

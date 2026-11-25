@@ -404,8 +404,9 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		t.Fatalf("cached eessi.json should stay intact after failed refresh: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
 	}
 
-	// Removing eessiCatalogUrl from the domains removes stale eessi.json on refresh.
-	if err := os.WriteFile(domainsFile, []byte(`{"schemaVersion": 1, "domains": {"preclinical": {}, "molecular": {}}}`), 0o644); err != nil {
+	// Removing eessiCatalogUrl while preclinical still links an empty {} apps.json
+	// retires EESSI cleanly instead of failing with "no containers".
+	if err := os.WriteFile(domainsFile, []byte(`{"schemaVersion": 1, "domains": {"preclinical": {"appJsonUrl": "preclinical-apps.json"}, "molecular": {}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Reset()
@@ -413,8 +414,8 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("refresh after removing eessiCatalogUrl failed (%d): %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "updated.") {
-		t.Fatalf("expected refresh to report updated when stale eessi.json removed: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "updated.") || !strings.Contains(stdout.String(), "no apps list yet") {
+		t.Fatalf("expected refresh to report updated + empty when EESSI-only domain retires EESSI: %s", stdout.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
@@ -618,19 +619,19 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	upper, err := lookupEESSIBuild(builds, "cased", "", false, "Cased")
+	upper, err := lookupEESSIBuild(builds, "cased", "", false, "", "Cased")
 	if err != nil || strings.Join(upper.exec, " ") != "cased --upper" {
 		t.Fatalf("exact-case --launcher Cased failed: err=%v exec=%v", err, upper.exec)
 	}
-	lower, err := lookupEESSIBuild(builds, "cased", "", false, "cased")
+	lower, err := lookupEESSIBuild(builds, "cased", "", false, "", "cased")
 	if err != nil || strings.Join(lower.exec, " ") != "cased --lower" {
 		t.Fatalf("exact-case --launcher cased failed: err=%v exec=%v", err, lower.exec)
 	}
 
-	// Cross-catalog sibling launchers, including labels differing only by case
-	// ("Open GUI" in higher-priority catalog vs "open gui" in lower-priority catalog)
-	// and identical labels with different executables: the printed Launch command
-	// must resolve back to the exact entry shown by info.
+	// Cross-catalog sibling launchers, including labels differing only by case,
+	// identical labels with distinct executables, AND identical module+label+exec[0]
+	// with different exec args: formatLaunchCommand must always round-trip to
+	// the exact build or omit the command.
 	cross1 := `{
 	  "schemaVersion": 1,
 	  "backend": "eessi",
@@ -664,18 +665,10 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b1[0].catalogOrder = 0
-	b2[0].catalogOrder = 1
+	b1[0].catalog, b1[0].catalogOrder = "cat-a", 0
+	b2[0].catalog, b2[0].catalogOrder = "cat-b", 1
 	combined := append(b1, b2...)
-	sel := launchSelector(combined, b2[0])
-	if sel != "open gui" {
-		t.Fatalf("expected launchSelector to choose exact label 'open gui', got %q", sel)
-	}
-	resolved, err := lookupEESSIBuild(combined, b2[0].module, b2[0].stack, b2[0].gpu, sel)
-	if err != nil || !sameEESSIBuild(resolved, b2[0]) {
-		t.Fatalf("launchSelector %q resolved to %+v (err=%v), want %+v", sel, resolved, err, b2[0])
-	}
-	if got := b2[0].launchCommand(sel); !strings.Contains(got, "--launcher 'open gui'") {
+	if got := formatLaunchCommand(combined, b2[0]); !strings.Contains(got, "--launcher 'open gui'") {
 		t.Fatalf("cross-catalog Launch command missing --launcher 'open gui': %s", got)
 	}
 
@@ -685,15 +678,27 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b3[0].catalogOrder = 1
+	b3[0].catalog, b3[0].catalogOrder = "cat-b", 1
 	combinedSame := append(slices.Clone(b1), b3...)
-	selSame := launchSelector(combinedSame, b3[0])
-	if selSame != "low" {
-		t.Fatalf("expected launchSelector to fall back to exec[0] 'low', got %q", selSame)
+	if got := formatLaunchCommand(combinedSame, b3[0]); !strings.Contains(got, "--launcher low") {
+		t.Fatalf("expected --launcher low for identical-label distinct-exec sibling, got %q", got)
 	}
-	resolvedSame, err := lookupEESSIBuild(combinedSame, b3[0].module, b3[0].stack, b3[0].gpu, selSame)
-	if err != nil || !sameEESSIBuild(resolvedSame, b3[0]) {
-		t.Fatalf("launchSelector %q resolved to %+v (err=%v), want %+v", selSame, resolvedSame, err, b3[0])
+
+	// Identical module, label, and exec[0] differing only in exec[1:] across
+	// two catalogs uses --catalog so the printed command launches cat-b, not cat-a.
+	crossDiffArgs := strings.ReplaceAll(cross1, `"exec": ["high"]`, `"exec": ["high", "--alt"]`)
+	b4, err := parseEESSICatalog([]byte(crossDiffArgs), []string{"2025.06"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b4[0].catalog, b4[0].catalogOrder = "cat-b", 1
+	combinedArgs := append(slices.Clone(b1), b4...)
+	if got := formatLaunchCommand(combinedArgs, b4[0]); !strings.Contains(got, "--catalog cat-b") {
+		t.Fatalf("expected --catalog cat-b for identical module/label/exec[0], got %q", got)
+	}
+	resolvedAlt, err := lookupEESSIBuild(combinedArgs, b4[0].module, b4[0].stack, b4[0].gpu, "cat-b", "")
+	if err != nil || !sameEESSIBuild(resolvedAlt, b4[0]) {
+		t.Fatalf("--catalog cat-b resolved to %+v (err=%v), want %+v", resolvedAlt, err, b4[0])
 	}
 }
 
@@ -809,12 +814,17 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	oldRename := renameCatalogFile
 	t.Cleanup(func() { renameCatalogFile = oldRename })
 	appsRenamed := false
+	eessiInjected := false
 	renameCatalogFile = func(oldpath, newpath string) error {
 		if newpath == appsPath {
-			appsRenamed = true
-			return os.Rename(oldpath, newpath)
+			err := os.Rename(oldpath, newpath)
+			if err == nil {
+				appsRenamed = true
+			}
+			return err
 		}
 		if newpath == eessiPath {
+			eessiInjected = true
 			return os.ErrPermission
 		}
 		return os.Rename(oldpath, newpath)
@@ -825,8 +835,8 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
 		t.Fatalf("expected refresh to fail when eessi.json rename fails")
 	}
-	if !appsRenamed {
-		t.Fatalf("test did not exercise post-rename rollback: apps.json was never renamed")
+	if !appsRenamed || !eessiInjected {
+		t.Fatalf("test did not exercise post-rename rollback: appsRenamed=%v eessiInjected=%v", appsRenamed, eessiInjected)
 	}
 	renameCatalogFile = oldRename
 

@@ -159,7 +159,11 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		}
 		containers, err := parseCatalog(apps)
 		if err == nil && len(containers) == 0 && eessiLink == "" {
-			err = errors.New("no containers")
+			if cachedWasEESSIOnly(dir) {
+				empty = true
+			} else {
+				err = errors.New("no containers")
+			}
 		}
 		if err != nil {
 			return false, false, fmt.Errorf("downloaded catalog is invalid: %w", err)
@@ -181,6 +185,11 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
 		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
+	unlock, err := lockCatalogDir(dir)
+	if err != nil {
+		return false, false, fmt.Errorf("writing catalog: %w", err)
+	}
+	defer unlock()
 	// Stage every changed file and back up replaced files first so a mid-commit
 	// rename failure rolls back earlier renames instead of leaving a mixed cache.
 	type pendingFile struct {
@@ -319,6 +328,32 @@ func downloadCatalog(client *http.Client, catalogURL string, maxSize int64) ([]b
 			catalogURL, maxSize)
 	}
 	return data, resp.Request.URL.String(), nil
+}
+
+// cachedWasEESSIOnly reports whether dir currently caches an EESSI-only
+// generation (has eessi.json or eessiCatalogUrl and zero cached containers), so
+// removing eessiCatalogUrl while apps.json remains {} retires EESSI cleanly.
+func cachedWasEESSIOnly(dir string) bool {
+	hasEESSI := false
+	if _, err := os.Stat(filepath.Join(dir, "eessi.json")); err == nil {
+		hasEESSI = true
+	} else if catData, err := os.ReadFile(filepath.Join(dir, "catalog.json")); err == nil {
+		if meta, err := parseCatalogEESSI(catData); err == nil && meta.EESSICatalogURL != "" {
+			hasEESSI = true
+		}
+	}
+	if !hasEESSI {
+		return false
+	}
+	appsData, err := os.ReadFile(filepath.Join(dir, "apps.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	containers, err := parseCatalog(appsData)
+	return err == nil && len(containers) == 0
 }
 
 // stageCatalog writes data, with mode, to a new temporary file beside path
