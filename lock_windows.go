@@ -44,6 +44,13 @@ func lockFileExclusive(lockPath string) (*catalogLock, error) {
 		lk.gen++
 		return writeLockFileGen(f, lk.gen)
 	}
+	lk.syncGen = func(minGen uint64) error {
+		if minGen <= lk.gen {
+			return nil
+		}
+		lk.gen = minGen
+		return writeLockFileGen(f, lk.gen)
+	}
 	return lk, nil
 }
 

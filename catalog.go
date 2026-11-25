@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -105,9 +107,10 @@ func readContainers() ([]container, error) {
 // bump increments it in place before the lock is released so any delayed
 // refresh that started against an older generation detects the change.
 type catalogLock struct {
-	gen    uint64
-	bump   func() error
-	unlock func()
+	gen     uint64
+	bump    func() error
+	syncGen func(uint64) error
+	unlock  func()
 }
 
 func readLockFileGen(f *os.File) (uint64, error) {
@@ -262,26 +265,120 @@ func resolveCanonicalPath(path string, forFile bool) (string, bool) {
 	return resolved, true
 }
 
-// catalogLockPath returns the advisory lock file path for cache directory dir.
-// It resolves symlinks and Windows junctions along dir first so two cache
-// roots sharing a catalogs/ subtree serialize on the same lock file, and
-// places the lock beside dir (outside dir, inside its resolved parent) so
-// deleting dir never breaks lock identity and refresh only needs write access
-// to the resolved catalog cache tree.
-func catalogLockPath(dir string) string {
+func canonicalCatalogDir(dir string) string {
 	clean, ok := resolveCanonicalPath(dir, false)
 	if !ok {
 		clean = filepath.Clean(dir)
 	}
-	return clean + ".lock"
+	return clean
+}
+
+// catalogLockPath returns the advisory lock file path for cache directory dir.
+// It resolves symlinks and Windows junctions along dir first so two cache
+// roots sharing a catalogs/ subtree serialize on the same lock file, places
+// the lock beside dir (outside dir, inside its resolved parent) so deleting
+// dir never breaks lock identity and refresh does not need write access
+// outside the resolved catalogs tree, and hashes the lowercased basename so
+// the lock filename stays bounded well under filesystem 255-byte name limits
+// even for maximum-length catalog names.
+func catalogLockPath(dir string) string {
+	clean := canonicalCatalogDir(dir)
+	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Base(clean))))
+	return filepath.Join(filepath.Dir(clean), ".sciget-lock-"+hex.EncodeToString(sum[:16])+".lock")
+}
+
+func catalogLockExists(dir string) (bool, error) {
+	extPath := catalogLockPath(dir)
+	if _, err := os.Stat(extPath); err == nil {
+		return true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	clean := canonicalCatalogDir(dir)
+	if info, err := os.Stat(clean); err == nil && info.IsDir() {
+		if _, err := os.Stat(filepath.Join(clean, ".lock")); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogLock, error) {
+	clean := canonicalCatalogDir(dir)
+	extPath := catalogLockPath(dir)
+	inDirPath := filepath.Join(clean, ".lock")
+	extLk, err := lockFileExclusive(extPath)
+	if err != nil {
+		if allowInDirFallback && errors.Is(err, os.ErrPermission) {
+			if _, extStatErr := os.Stat(extPath); errors.Is(extStatErr, os.ErrNotExist) {
+				if info, dirStatErr := os.Stat(clean); dirStatErr == nil && info.IsDir() {
+					inLk, inErr := lockFileExclusive(inDirPath)
+					if inErr != nil {
+						return nil, inErr
+					}
+					if _, postStatErr := os.Stat(extPath); postStatErr == nil {
+						inLk.unlock()
+						return lockCatalogDirWithMode(dir, false)
+					}
+					return inLk, nil
+				}
+			}
+		}
+		return nil, err
+	}
+	// If an earlier refresh fell back to the in-dir lock while the parent
+	// directory was read-only, drain and retire it under the external lock so
+	// any concurrent holders finish and monotonic generation is preserved.
+	if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
+		if _, inStatErr := os.Stat(inDirPath); inStatErr == nil {
+			inLk, inErr := lockFileExclusive(inDirPath)
+			if inErr != nil {
+				extLk.unlock()
+				return nil, inErr
+			}
+			if syncErr := extLk.syncGen(inLk.gen); syncErr != nil {
+				inLk.unlock()
+				extLk.unlock()
+				return nil, syncErr
+			}
+			if runtime.GOOS != "windows" {
+				// Unlink while holding both locks so no new reader or writer
+				// can open the retired in-dir lock once inLk is released.
+				if rmErr := os.Remove(inDirPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+					inLk.unlock()
+					extLk.unlock()
+					return nil, rmErr
+				}
+				inLk.unlock()
+			} else {
+				inLk.unlock()
+				_ = os.Remove(inDirPath)
+			}
+		}
+	}
+	return extLk, nil
 }
 
 func lockCatalogDir(dir string) (*catalogLock, error) {
-	return lockFileExclusive(catalogLockPath(dir))
+	return lockCatalogDirWithMode(dir, true)
+}
+
+func lockCatalogDirForRemove(dir string) (*catalogLock, error) {
+	return lockCatalogDirWithMode(dir, false)
 }
 
 func lockCatalogDirShared(dir string) (func(), uint64, bool, error) {
-	return lockFileShared(catalogLockPath(dir))
+	unlock, gen, locked, err := lockFileShared(catalogLockPath(dir))
+	if err != nil || locked {
+		return unlock, gen, locked, err
+	}
+	clean := canonicalCatalogDir(dir)
+	if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
+		return lockFileShared(filepath.Join(clean, ".lock"))
+	}
+	return func() {}, 0, false, nil
 }
 
 // beforeCatalogSharedLock runs immediately before readCatalogSnapshot acquires
@@ -336,7 +433,6 @@ func readCatalogSnapshotLocked(dir string) ([]container, []string, error) {
 // into the read.
 func readCatalogSnapshot(dir string) ([]container, []string, error) {
 	beforeCatalogSharedLock(dir)
-	lockPath := catalogLockPath(dir)
 	unlock, _, locked, err := lockCatalogDirShared(dir)
 	if err != nil {
 		return nil, nil, err
@@ -357,29 +453,29 @@ func readCatalogSnapshot(dir string) ([]container, []string, error) {
 		return containers, mirrors, nil
 	}
 	if err := checkCatalogClean(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		if _, statErr := os.Stat(lockPath); statErr == nil {
+		if exists, statErr := catalogLockExists(dir); statErr == nil && exists {
 			return readCatalogSnapshotLocked(dir)
 		}
 		return nil, nil, err
 	}
 	containers, err := loadCatalog(filepath.Join(dir, "apps.json"))
 	if err != nil {
-		if _, statErr := os.Stat(lockPath); statErr == nil {
+		if exists, statErr := catalogLockExists(dir); statErr == nil && exists {
 			return readCatalogSnapshotLocked(dir)
 		}
 		return nil, nil, err
 	}
 	mirrors, err := loadMirrors(filepath.Join(dir, "catalog.json"))
 	if err != nil {
-		if _, statErr := os.Stat(lockPath); statErr == nil {
+		if exists, statErr := catalogLockExists(dir); statErr == nil && exists {
 			return readCatalogSnapshotLocked(dir)
 		}
 		return nil, nil, err
 	}
-	if _, statErr := os.Stat(lockPath); statErr == nil {
-		return readCatalogSnapshotLocked(dir)
-	} else if !errors.Is(statErr, os.ErrNotExist) {
+	if exists, statErr := catalogLockExists(dir); statErr != nil {
 		return nil, nil, statErr
+	} else if exists {
+		return readCatalogSnapshotLocked(dir)
 	}
 	return containers, mirrors, nil
 }

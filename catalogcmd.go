@@ -370,7 +370,7 @@ var beforeRemoveCatalogCache = func(dir string) {}
 // overwrite or recreate the cache.
 func removeCatalogCache(dir string) error {
 	beforeRemoveCatalogCache(dir)
-	lk, err := lockCatalogDir(dir)
+	lk, err := lockCatalogDirForRemove(dir)
 	if err != nil {
 		return err
 	}

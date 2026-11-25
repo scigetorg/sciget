@@ -1823,8 +1823,12 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if postDirect != preDirect || postDirect != postUpper || postDirect != postAlias {
 			t.Fatalf("mixed-case Catalogs aliases shifted/split lock paths: pre=%q direct=%q upper=%q alias=%q", preDirect, postDirect, postUpper, postAlias)
 		}
-		if wantSuffix := filepath.Join("Catalogs", "neuro-1234567890ab.lock"); !strings.HasSuffix(postDirect, wantSuffix) {
-			t.Fatalf("expected lock beside catalog dir inside resolved Catalogs/ (%q), got %q", wantSuffix, postDirect)
+		wantMixedUpper, err := filepath.EvalSymlinks(mixedUpper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filepath.Dir(postDirect) != wantMixedUpper || !strings.HasPrefix(filepath.Base(postDirect), ".sciget-lock-") || !strings.HasSuffix(postDirect, ".lock") {
+			t.Fatalf("expected bounded lock beside catalog dir inside resolved Catalogs/ (%q), got %q", wantMixedUpper, postDirect)
 		}
 		if infoUpper, err1 := os.Stat(mixedUpper); err1 == nil {
 			if infoLower, err2 := os.Stat(mixedLowerSibling); err2 == nil && os.SameFile(infoUpper, infoLower) {
@@ -1834,6 +1838,25 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 					t.Fatalf("case-insensitive lock paths did not hit same inode: err1=%v err2=%v", err1, err2)
 				}
 			}
+		}
+
+		// Maximum-length catalog names (242 bytes -> 255-byte cache dir basename)
+		// must keep a bounded lock filename so refresh and read never fail with
+		// ENAMETOOLONG.
+		longCacheRoot := filepath.Join(tmp, "long-name-cache")
+		longCat := catalog{Name: strings.Repeat("a", 242), URL: catFile}
+		longCatDir := longCat.dir(longCacheRoot)
+		if gotLen := len(filepath.Base(longCatDir)); gotLen != 255 {
+			t.Fatalf("expected 255-byte catalog dir basename, got %d", gotLen)
+		}
+		if lockBaseLen := len(filepath.Base(catalogLockPath(longCatDir))); lockBaseLen > 64 {
+			t.Fatalf("expected bounded lock basename <= 64 bytes, got %d (%q)", lockBaseLen, filepath.Base(catalogLockPath(longCatDir)))
+		}
+		if changed, _, err := refreshCatalog(fileRead, longCat, longCatDir); err != nil || !changed {
+			t.Fatalf("refresh with 242-byte catalog name failed: changed=%v err=%v", changed, err)
+		}
+		if containers, _, err := readCatalogSnapshot(longCatDir); err != nil || len(containers) != 1 {
+			t.Fatalf("readCatalogSnapshot with 242-byte catalog name failed: len=%d err=%v", len(containers), err)
 		}
 
 		// Refresh through a symlink to a writable catalogs directory under a
@@ -1868,6 +1891,52 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			}
 			if roLockA != roLockB || filepath.Dir(roLockA) != wantRoCatalogs {
 				t.Fatalf("expected shared lock inside writable catalogs dir %q, got alias=%q direct=%q", wantRoCatalogs, roLockA, roLockB)
+			}
+
+			// Refresh of a pre-existing writable catalog directory inside a
+			// read-only catalogs/ parent (0555) must fall back to the in-dir
+			// lock without failing, serve readers cleanly, and migrate
+			// generation back to the external lock once the parent is writable.
+			roCatParentRoot := filepath.Join(tmp, "ro-catalogs-parent")
+			roCatParentDir := filepath.Join(roCatParentRoot, "catalogs")
+			existingWritableDir := filepath.Join(roCatParentDir, "neuro-1234567890ab")
+			if err := os.MkdirAll(existingWritableDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(existingWritableDir, "apps.json"), []byte(`{"old":{"apps":{"old 1":{"version":"1"}}}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(roCatParentDir, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(roCatParentDir, 0o755) })
+			if changed, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, existingWritableDir); err != nil || !changed {
+				t.Fatalf("refresh of pre-existing writable catalog under 0555 catalogs/ failed: changed=%v err=%v", changed, err)
+			}
+			inDirLock := filepath.Join(existingWritableDir, ".lock")
+			if _, err := os.Stat(inDirLock); err != nil {
+				t.Fatalf("expected fallback in-dir lock %q: %v", inDirLock, err)
+			}
+			if containers, _, err := readCatalogSnapshot(existingWritableDir); err != nil || len(containers) != 1 || containers[0].tool != "fsl" {
+				t.Fatalf("readCatalogSnapshot under fallback in-dir lock failed: containers=%v err=%v", containers, err)
+			}
+			// Second refresh while catalogs/ is still 0555 must keep working.
+			if changed, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, existingWritableDir); err != nil || changed {
+				t.Fatalf("second refresh under 0555 catalogs/ failed: changed=%v err=%v", changed, err)
+			}
+			// Once catalogs/ becomes writable again, refresh must migrate the
+			// generation to the external lock and retire the in-dir lock.
+			if err := os.Chmod(roCatParentDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, existingWritableDir); err != nil {
+				t.Fatalf("refresh after restoring 0755 catalogs/ failed: %v", err)
+			}
+			if _, err := os.Stat(inDirLock); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected in-dir lock %q to be retired after migration, stat err=%v", inDirLock, err)
+			}
+			if gen, err := readCatalogLockGen(existingWritableDir); err != nil || gen < 3 {
+				t.Fatalf("expected migrated external lock generation >= 3, got gen=%d err=%v", gen, err)
 			}
 		}
 	}
