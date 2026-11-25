@@ -108,46 +108,58 @@ case ":${LOADEDMODULES:-}:" in
     exit 1
     ;;
 esac
+filter_eessi_modulepath() {
+    local mp_in="$1"
+    local filtered=""
+    local accel_found="0"
+    local p p_real rel_p
+    local -a mp_parts
+    IFS=':' read -r -a mp_parts <<<"${mp_in}"
+    for p in "${mp_parts[@]+"${mp_parts[@]}"}"; do
+        p="${p%/}"
+        case "${p}" in
+        ""|*"/../"*|*"/.."|"../"*|"..") continue ;;
+        esac
+        p_real="$(canon_dir "${p}")"
+        if [ "${p_real}" = "${modroot_real}" ]; then
+            filtered="${filtered:+${filtered}:}${p_real}"
+            continue
+        fi
+        case "${p_real}" in
+        "${eessi_sw_prefix}"*)
+            rel_p="${p_real#"${eessi_sw_prefix}"}"
+            case "/${rel_p}/" in
+            */accel/*)
+                if [ "${want_gpu}" = "1" ]; then
+                    accel_found="1"
+                    filtered="${filtered:+${filtered}:}${p_real}"
+                fi
+                ;;
+            *)
+                filtered="${filtered:+${filtered}:}${p_real}"
+                ;;
+            esac
+            ;;
+        esac
+    done
+    filtered_mp="${filtered}"
+    has_accel_mp="${accel_found}"
+}
 # Restrict MODULEPATH after loading EESSI/${stack} strictly to the selected
 # EESSI repository and stack so site module directories or host_injections
 # prepended by the EESSI bootstrap cannot shadow ${mod}. For CPU builds, also
 # exclude accelerator module roots; for GPU builds, require an accelerator root.
-filtered_mp=""
-has_accel_mp="0"
-IFS=':' read -r -a mp_parts <<<"${MODULEPATH:-}"
-for p in "${mp_parts[@]+"${mp_parts[@]}"}"; do
-    p="${p%/}"
-    case "${p}" in
-    ""|*"/../"*|*"/.."|"../"*|"..") continue ;;
-    esac
-    p_real="$(canon_dir "${p}")"
-    if [ "${p_real}" = "${modroot_real}" ]; then
-        filtered_mp="${filtered_mp:+${filtered_mp}:}${p_real}"
-        continue
-    fi
-    case "${p_real}" in
-    "${eessi_sw_prefix}"*)
-        rel_p="${p_real#"${eessi_sw_prefix}"}"
-        case "/${rel_p}/" in
-        */accel/*)
-            if [ "${want_gpu}" = "1" ]; then
-                has_accel_mp="1"
-                filtered_mp="${filtered_mp:+${filtered_mp}:}${p_real}"
-            fi
-            ;;
-        *)
-            filtered_mp="${filtered_mp:+${filtered_mp}:}${p_real}"
-            ;;
-        esac
-        ;;
-    esac
-done
+filter_eessi_modulepath "${MODULEPATH:-}"
 if [ "${want_gpu}" = "1" ] && [ "${has_accel_mp}" != "1" ]; then
     echo "sciget eessi: GPU build ${mod} requires an active EESSI accelerator modulepath under ${eessi_sw_prefix}" >&2
     exit 1
 fi
 export MODULEPATH="${filtered_mp}"
 module load "${mod}" >/dev/null
+# Re-filter MODULEPATH after loading ${mod} so site hooks or aliases added
+# during tool load cannot survive into the launched process.
+filter_eessi_modulepath "${MODULEPATH:-}"
+export MODULEPATH="${filtered_mp}"
 case ":${LOADEDMODULES:-}:" in
 *":EESSI/${stack}:"*) ;;
 *)
@@ -216,6 +228,7 @@ case "${cmd_name}" in
     ;;
 esac
 eessi_path=""
+eessi_accel_path=""
 IFS=':' read -r -a path_parts <<<"${PATH}"
 for p in "${path_parts[@]+"${path_parts[@]}"}"; do
     case "${p}" in
@@ -224,17 +237,44 @@ for p in "${path_parts[@]+"${path_parts[@]}"}"; do
     p_real="$(canon_dir "${p}")"
     case "${p_real}/" in
     "${eessi_version_prefix}"*)
-        eessi_path="${eessi_path:+${eessi_path}:}${p_real}"
+        is_accel_dir="0"
+        case "${p_real}/" in
+        "${eessi_sw_prefix}"*)
+            rel_p="${p_real#"${eessi_sw_prefix}"}"
+            case "/${rel_p}/" in
+            */accel/*) is_accel_dir="1" ;;
+            esac
+            ;;
+        esac
+        if [ "${want_gpu}" = "1" ]; then
+            eessi_path="${eessi_path:+${eessi_path}:}${p_real}"
+            if [ "${is_accel_dir}" = "1" ]; then
+                eessi_accel_path="${eessi_accel_path:+${eessi_accel_path}:}${p_real}"
+            fi
+        elif [ "${is_accel_dir}" != "1" ]; then
+            eessi_path="${eessi_path:+${eessi_path}:}${p_real}"
+        fi
         ;;
     esac
 done
-if [ -z "${eessi_path}" ]; then
+lookup_path="${eessi_path}"
+if [ "${want_gpu}" = "1" ]; then
+    if [ -z "${eessi_accel_path}" ]; then
+        echo "sciget eessi: GPU module ${mod} did not add any EESSI accelerator bin directory under ${eessi_sw_prefix} to PATH" >&2
+        exit 127
+    fi
+    lookup_path="${eessi_accel_path}"
+elif [ -z "${eessi_path}" ]; then
     echo "sciget eessi: loaded module ${mod} did not add any EESSI bin directory under ${eessi_version_prefix} to PATH" >&2
     exit 127
 fi
-resolved_bin="$(PATH="${eessi_path}" type -P -- "${cmd_name}" || true)"
+resolved_bin="$(PATH="${lookup_path}" type -P -- "${cmd_name}" || true)"
 if [ -z "${resolved_bin}" ]; then
-    echo "sciget eessi: executable ${cmd_name} not found in loaded EESSI modules (refusing host fallback)" >&2
+    if [ "${want_gpu}" = "1" ]; then
+        echo "sciget eessi: GPU executable ${cmd_name} not found in loaded EESSI accelerator modules (refusing CPU or host fallback)" >&2
+    else
+        echo "sciget eessi: executable ${cmd_name} not found in loaded EESSI modules (refusing host fallback)" >&2
+    fi
     exit 127
 fi
 resolved_bin_real="$(canon_file "${resolved_bin}")"
@@ -245,6 +285,36 @@ case "${resolved_bin_real}" in
     exit 127
     ;;
 esac
+if [ "${want_gpu}" = "1" ]; then
+    case "${resolved_bin_real}" in
+    "${eessi_sw_prefix}"*)
+        rel_bin="${resolved_bin_real#"${eessi_sw_prefix}"}"
+        case "/${rel_bin}/" in
+        */accel/*) ;;
+        *)
+            echo "sciget eessi: --gpu refusing CPU executable ${resolved_bin_real} for ${cmd_name}" >&2
+            exit 127
+            ;;
+        esac
+        ;;
+    *)
+        echo "sciget eessi: --gpu refusing non-accelerator executable ${resolved_bin_real} for ${cmd_name}" >&2
+        exit 127
+        ;;
+    esac
+else
+    case "${resolved_bin_real}" in
+    "${eessi_sw_prefix}"*)
+        rel_bin="${resolved_bin_real#"${eessi_sw_prefix}"}"
+        case "/${rel_bin}/" in
+        */accel/*)
+            echo "sciget eessi: CPU build refusing accelerator executable ${resolved_bin_real} for ${cmd_name}" >&2
+            exit 127
+            ;;
+        esac
+        ;;
+    esac
+fi
 export PATH="${eessi_path}:/usr/bin:/bin"
 exec -- "${resolved_bin}" "$@"
 `

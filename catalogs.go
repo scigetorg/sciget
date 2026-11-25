@@ -174,58 +174,65 @@ func catalogListPath() (string, error) {
 	return filepath.Join(filepath.Dir(path), "catalogs.json"), nil
 }
 
-// catalogListLockTarget resolves symlinks along path (including dangling leaf
-// symlinks with relative targets inside symlinked parent directories) so a
-// reader through any symlink path and a writer through the target file acquire
-// the same lock file.
+// catalogListLockTarget resolves symlinks component by component (like
+// `realpath -m`), including dangling leaves, missing intermediate directories,
+// and relative symlink targets containing symlinked directories followed by
+// "..", so any two paths that open the same file acquire the same lock file.
 func catalogListLockTarget(path string) string {
-	cur := filepath.Clean(path)
+	cur := path
 	if !filepath.IsAbs(cur) {
 		if abs, err := filepath.Abs(cur); err == nil {
 			cur = abs
 		}
 	}
-	for range 40 {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			return resolved
+	vol := filepath.VolumeName(cur)
+	rest := cur[len(vol):]
+	resolved := vol + string(filepath.Separator)
+	var queue []string
+	for _, part := range strings.Split(filepath.ToSlash(rest), "/") {
+		if part != "" {
+			queue = append(queue, part)
 		}
-		dir := resolveExistingPrefix(filepath.Dir(cur))
-		cur = filepath.Join(dir, filepath.Base(cur))
-		info, err := os.Lstat(cur)
-		if err != nil || info.Mode()&os.ModeSymlink == 0 {
-			return cur
-		}
-		target, err := os.Readlink(cur)
-		if err != nil {
-			return cur
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(dir, target)
-		}
-		cur = filepath.Clean(target)
 	}
-	return cur
-}
-
-// resolveExistingPrefix resolves symlinks on the longest existing directory
-// prefix of dir, reattaching any not-yet-created suffix components.
-func resolveExistingPrefix(dir string) string {
-	dir = filepath.Clean(dir)
-	var suffix []string
-	for {
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			for i := len(suffix) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, suffix[i])
+	symlinksFollowed := 0
+	for len(queue) > 0 {
+		comp := queue[0]
+		queue = queue[1:]
+		if comp == "." {
+			continue
+		}
+		if comp == ".." {
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, comp)
+		info, err := os.Lstat(next)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			symlinksFollowed++
+			if symlinksFollowed > 40 {
+				return filepath.Clean(cur)
 			}
-			return resolved
+			target, err := os.Readlink(next)
+			if err != nil {
+				return filepath.Clean(cur)
+			}
+			if filepath.IsAbs(target) {
+				tVol := filepath.VolumeName(target)
+				resolved = tVol + string(filepath.Separator)
+				target = target[len(tVol):]
+			}
+			var targetParts []string
+			for _, part := range strings.Split(filepath.ToSlash(target), "/") {
+				if part != "" {
+					targetParts = append(targetParts, part)
+				}
+			}
+			queue = append(targetParts, queue...)
+			continue
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return dir
-		}
-		suffix = append(suffix, filepath.Base(dir))
-		dir = parent
+		resolved = next
 	}
+	return resolved
 }
 
 // loadCatalogList reads catalogs.json at path. A missing file lists no
