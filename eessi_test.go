@@ -1787,7 +1787,8 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 
 		// Mixed-case Catalogs/ alias (as on case-insensitive macOS APFS or when
 		// two cache roots alias a not-yet-created Catalogs target) must resolve
-		// to the exact same sibling locks/ file BOTH before and after Catalogs exists.
+		// to the exact same sibling lock file inside the resolved Catalogs tree
+		// BOTH before and after Catalogs exists.
 		mixedTargetRoot := filepath.Join(tmp, "mixed-target")
 		mixedUpper := filepath.Join(mixedTargetRoot, "Catalogs")
 		mixedLowerSibling := filepath.Join(mixedTargetRoot, "catalogs")
@@ -1806,10 +1807,9 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 		preDirect := catalogLockPath(filepath.Join(mixedRoot, "catalogs", "neuro-1234567890ab"))
 		preUpper := catalogLockPath(filepath.Join(mixedUpper, "neuro-1234567890ab"))
-		preLower := catalogLockPath(filepath.Join(mixedLowerSibling, "neuro-1234567890ab"))
 		preAlias := catalogLockPath(filepath.Join(mixedAliasRoot, "catalogs", "neuro-1234567890ab"))
-		if preDirect != preUpper || preDirect != preLower || preDirect != preAlias {
-			t.Fatalf("pre-creation mixed-case aliases split lock paths: direct=%q upper=%q lower=%q alias=%q", preDirect, preUpper, preLower, preAlias)
+		if preDirect != preUpper || preDirect != preAlias {
+			t.Fatalf("pre-creation mixed-case aliases split lock paths: direct=%q upper=%q alias=%q", preDirect, preUpper, preAlias)
 		}
 		// First refresh through a dangling catalogs -> missing Catalogs symlink
 		// must create the resolved target directory cleanly under the shared lock.
@@ -1819,13 +1819,56 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 		postDirect := catalogLockPath(filepath.Join(mixedRoot, "catalogs", "neuro-1234567890ab"))
 		postUpper := catalogLockPath(filepath.Join(mixedUpper, "neuro-1234567890ab"))
-		postLower := catalogLockPath(filepath.Join(mixedLowerSibling, "neuro-1234567890ab"))
 		postAlias := catalogLockPath(filepath.Join(mixedAliasRoot, "catalogs", "neuro-1234567890ab"))
-		if postDirect != preDirect || postDirect != postUpper || postDirect != postLower || postDirect != postAlias {
-			t.Fatalf("mixed-case Catalogs aliases shifted/split lock paths: pre=%q direct=%q upper=%q lower=%q alias=%q", preDirect, postDirect, postUpper, postLower, postAlias)
+		if postDirect != preDirect || postDirect != postUpper || postDirect != postAlias {
+			t.Fatalf("mixed-case Catalogs aliases shifted/split lock paths: pre=%q direct=%q upper=%q alias=%q", preDirect, postDirect, postUpper, postAlias)
 		}
-		if wantSuffix := filepath.Join("locks", "neuro-1234567890ab.lock"); !strings.HasSuffix(postDirect, wantSuffix) {
-			t.Fatalf("expected lock in sibling locks/ dir (%q), got %q", wantSuffix, postDirect)
+		if wantSuffix := filepath.Join("Catalogs", "neuro-1234567890ab.lock"); !strings.HasSuffix(postDirect, wantSuffix) {
+			t.Fatalf("expected lock beside catalog dir inside resolved Catalogs/ (%q), got %q", wantSuffix, postDirect)
+		}
+		if infoUpper, err1 := os.Stat(mixedUpper); err1 == nil {
+			if infoLower, err2 := os.Stat(mixedLowerSibling); err2 == nil && os.SameFile(infoUpper, infoLower) {
+				lockInfo1, err1 := os.Stat(postDirect)
+				lockInfo2, err2 := os.Stat(catalogLockPath(filepath.Join(mixedLowerSibling, "neuro-1234567890ab")))
+				if err1 != nil || err2 != nil || !os.SameFile(lockInfo1, lockInfo2) {
+					t.Fatalf("case-insensitive lock paths did not hit same inode: err1=%v err2=%v", err1, err2)
+				}
+			}
+		}
+
+		// Refresh through a symlink to a writable catalogs directory under a
+		// read-only parent must succeed without needing write access outside
+		// the resolved catalogs tree.
+		if os.Geteuid() != 0 {
+			roParent := filepath.Join(tmp, "ro-shared")
+			roCatalogs := filepath.Join(roParent, "catalogs")
+			roCacheRoot := filepath.Join(tmp, "ro-cache")
+			if err := os.MkdirAll(roCatalogs, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(roCacheRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(roCatalogs, filepath.Join(roCacheRoot, "catalogs")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(roParent, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(roParent, 0o755) })
+			roCatDir := filepath.Join(roCacheRoot, "catalogs", "neuro-1234567890ab")
+			if changed, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, roCatDir); err != nil || !changed {
+				t.Fatalf("refresh with read-only parent of shared catalogs failed: changed=%v err=%v", changed, err)
+			}
+			roLockA := catalogLockPath(roCatDir)
+			roLockB := catalogLockPath(filepath.Join(roCatalogs, "neuro-1234567890ab"))
+			wantRoCatalogs, err := filepath.EvalSymlinks(roCatalogs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if roLockA != roLockB || filepath.Dir(roLockA) != wantRoCatalogs {
+				t.Fatalf("expected shared lock inside writable catalogs dir %q, got alias=%q direct=%q", wantRoCatalogs, roLockA, roLockB)
+			}
 		}
 	}
 

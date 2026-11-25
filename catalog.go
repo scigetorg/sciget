@@ -265,18 +265,13 @@ func resolveCanonicalPath(path string, forFile bool) (string, bool) {
 // catalogLockPath returns the advisory lock file path for cache directory dir.
 // It resolves symlinks and Windows junctions along dir first so two cache
 // roots sharing a catalogs/ subtree serialize on the same lock file, and
-// places the lock outside dir (in a sibling locks/ directory under cache_dir
-// when dir is under a "catalogs" directory, matched case-insensitively so
-// lock placement never shifts across directory creation or case-insensitive
-// volumes, or beside dir otherwise) so deleting dir never breaks lock identity.
+// places the lock beside dir (outside dir, inside its resolved parent) so
+// deleting dir never breaks lock identity and refresh only needs write access
+// to the resolved catalog cache tree.
 func catalogLockPath(dir string) string {
 	clean, ok := resolveCanonicalPath(dir, false)
 	if !ok {
 		clean = filepath.Clean(dir)
-	}
-	parent := filepath.Dir(clean)
-	if strings.EqualFold(filepath.Base(parent), "catalogs") {
-		return filepath.Join(filepath.Dir(parent), "locks", filepath.Base(clean)+".lock")
 	}
 	return clean + ".lock"
 }
