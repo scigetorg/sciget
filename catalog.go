@@ -591,6 +591,19 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogLock, 
 				}
 			}
 		}
+	} else if isSymlinkLeaf && !allowInDirFallback {
+		// When removing a leaf symlink whose target's external lock was
+		// skipped (read-only target parent), read the target's in-dir .lock
+		// generation without modifying or removing it so bumping slotPath
+		// strictly exceeds any generation observed before removal.
+		if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
+			if inUnlock, inGen, inLocked, inErr := lockFileShared(inDirPath); inErr == nil && inLocked {
+				inUnlock()
+				if inGen > maxGen {
+					maxGen = inGen
+				}
+			}
+		}
 	}
 	for _, lk := range extLocks {
 		if syncErr := lk.syncGen(maxGen); syncErr != nil {

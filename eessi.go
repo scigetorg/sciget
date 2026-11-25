@@ -578,6 +578,7 @@ func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, 
 		if !locked {
 			return nil, nil, false, nil
 		}
+		beforeCatalogSnapshotRead(dir)
 		retryIfMissingAppeared := func() (bool, error) {
 			if len(missing) == 0 {
 				return false, nil

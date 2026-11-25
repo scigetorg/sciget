@@ -2280,6 +2280,80 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			t.Fatalf("symlink reader failed after first direct writer unlocked: containers=%v err=%v", res.containers, res.err)
 		}
 
+		// Equivalent partial-lock regression coverage for the EESSI reader
+		// (readCatalogEESSISnapshot): slot lock exists, target lock does not
+		// yet exist, and a direct writer creates the target lock and stages
+		// eessi.json.<digits>.incomplete while the reader pauses.
+		partialEESSISlotRoot := filepath.Join(tmp, "partial-eessi-slot-cache", "catalogs")
+		partialEESSITargetDir := filepath.Join(tmp, "partial-eessi-target-parent", "shared-neuro")
+		for _, d := range []string{partialEESSISlotRoot, partialEESSITargetDir} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(partialEESSITargetDir, "catalog.json"), []byte(`{"schemaVersion":1,"appJsonUrl":"apps.json","eessiCatalogUrl":"eessi.json","eessi_stacks":["2025.06"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(partialEESSITargetDir, "eessi.json"), []byte(testEESSIJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		partialEESSIAliasDir := filepath.Join(partialEESSISlotRoot, "neuro-1234567890ab")
+		if err := os.Symlink(partialEESSITargetDir, partialEESSIAliasDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(catalogLockPath(partialEESSIAliasDir), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		eessiReadPaused := make(chan struct{})
+		eessiReadResume := make(chan struct{})
+		beforeCatalogSnapshotRead = func(dir string) {
+			if dir == partialEESSIAliasDir {
+				close(eessiReadPaused)
+				<-eessiReadResume
+			}
+		}
+		type eessiSnapResult struct {
+			data []byte
+			ok   bool
+			err  error
+		}
+		eessiReaderDone := make(chan eessiSnapResult, 1)
+		go func() {
+			d, _, ok, err := readCatalogEESSISnapshot(partialEESSIAliasDir)
+			eessiReaderDone <- eessiSnapResult{data: d, ok: ok, err: err}
+		}()
+		<-eessiReadPaused
+		beforeCatalogSnapshotRead = prevBeforeSnapRead
+		firstDirectEESSILk, err := lockCatalogDir(partialEESSITargetDir)
+		if err != nil {
+			close(eessiReadResume)
+			<-eessiReaderDone
+			t.Fatalf("first direct EESSI lockCatalogDir failed: %v", err)
+		}
+		partialEESSIInc := filepath.Join(partialEESSITargetDir, "eessi.json.55555.incomplete")
+		if err := os.WriteFile(partialEESSIInc, []byte("partial"), 0o600); err != nil {
+			firstDirectEESSILk.unlock()
+			close(eessiReadResume)
+			<-eessiReaderDone
+			t.Fatal(err)
+		}
+		close(eessiReadResume)
+		select {
+		case res := <-eessiReaderDone:
+			os.Remove(partialEESSIInc)
+			firstDirectEESSILk.unlock()
+			t.Fatalf("EESSI symlink reader raced first direct writer instead of waiting on target lock: ok=%v err=%v", res.ok, res.err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		if err := os.Remove(partialEESSIInc); err != nil {
+			firstDirectEESSILk.unlock()
+			t.Fatal(err)
+		}
+		firstDirectEESSILk.unlock()
+		if res := <-eessiReaderDone; res.err != nil || !res.ok || len(res.data) == 0 {
+			t.Fatalf("EESSI symlink reader failed after first direct writer unlocked: ok=%v len=%d err=%v", res.ok, len(res.data), res.err)
+		}
+
 		// Removing an alias symlink whose target lives under a read-only
 		// parent (0555) must NOT unlink the target's in-dir .lock or lose its
 		// generation.
@@ -2299,9 +2373,18 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if changed, _, err := refreshCatalog(fileRead, catalog{Name: "direct", URL: catFile}, roAliasTargetDir); err != nil || !changed {
 				t.Fatalf("refresh of target under 0555 parent failed: changed=%v err=%v", changed, err)
 			}
+			// Second refresh advances target generation to 2 so recreating the
+			// alias after removal exercises bumping slotPath past target's gen.
+			if _, _, err := refreshCatalog(fileRead, catalog{Name: "direct", URL: catFile}, roAliasTargetDir); err != nil {
+				t.Fatalf("second refresh of target under 0555 parent failed: %v", err)
+			}
 			roAliasLink := filepath.Join(roAliasSlotParent, "alias-1234567890ab")
 			if err := os.Symlink(roAliasTargetDir, roAliasLink); err != nil {
 				t.Fatal(err)
+			}
+			preAliasGen, err := readCatalogLockGen(roAliasLink)
+			if err != nil || preAliasGen != 2 {
+				t.Fatalf("expected alias generation 2 before removal, got gen=%d err=%v", preAliasGen, err)
 			}
 			if err := removeCatalogCache(roAliasLink); err != nil {
 				t.Fatalf("removeCatalogCache on alias with 0555 target parent failed: %v", err)
@@ -2309,11 +2392,19 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(roAliasTargetDir, ".lock")); err != nil {
 				t.Fatalf("removing alias must preserve target in-dir .lock: %v", err)
 			}
-			if gen, err := readCatalogLockGen(roAliasTargetDir); err != nil || gen != 1 {
-				t.Fatalf("target generation must remain 1 after alias removal, got gen=%d err=%v", gen, err)
+			if gen, err := readCatalogLockGen(roAliasTargetDir); err != nil || gen != 2 {
+				t.Fatalf("target generation must remain 2 after alias removal, got gen=%d err=%v", gen, err)
 			}
 			if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "direct", URL: catFile}, roAliasTargetDir, 0, nil); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
-				t.Fatalf("delayed refresh on target must still see generation 1, got err=%v", err)
+				t.Fatalf("delayed refresh on target must still see generation 2, got err=%v", err)
+			}
+			// Recreating the alias symlink must still reject a delayed alias
+			// refresh captured before removal (slotPath bumped to 3 > 2).
+			if err := os.Symlink(roAliasTargetDir, roAliasLink); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "alias", URL: catFile}, roAliasLink, preAliasGen, nil); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
+				t.Fatalf("delayed refresh after alias remove+recreate must fail on generation mismatch, got err=%v", err)
 			}
 		}
 
