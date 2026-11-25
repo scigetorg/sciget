@@ -179,10 +179,40 @@ func isLinkLeaf(path string) bool {
 }
 
 type lockIdentityKey struct {
-	kind uint8 // 0 = hard-linked file inode, 1 = parent dir inode + base, 2 = lexical fallback
+	kind uint8 // 0 = hard-linked file inode, 1 = parent dir inode + base, 2 = existing ancestor inode + rel tail, 3 = lexical fallback
 	dev  uint64
 	ino  uint64
 	name string
+}
+
+func lockOrderKey(p string) lockIdentityKey {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	if dev, ino, nlink, ok := pathFileID(p, false); ok && nlink > 1 {
+		return lockIdentityKey{kind: 0, dev: dev, ino: ino}
+	}
+	dir := filepath.Dir(p)
+	if dev, ino, _, ok := pathFileID(dir, true); ok {
+		return lockIdentityKey{kind: 1, dev: dev, ino: ino, name: filepath.Base(p)}
+	}
+	// If dir does not exist yet (e.g. a dangling catalogs/ symlink whose
+	// parent exists under NFC/NFD or mixed-case spellings), anchor ordering on
+	// the nearest existing ancestor's filesystem identity plus the relative tail.
+	cur := dir
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		if dev, ino, _, ok := pathFileID(parent, true); ok {
+			if rel, err := filepath.Rel(parent, p); err == nil {
+				return lockIdentityKey{kind: 2, dev: dev, ino: ino, name: strings.ToLower(filepath.ToSlash(rel))}
+			}
+		}
+		cur = parent
+	}
+	return lockIdentityKey{kind: 3, name: strings.ToLower(p)}
 }
 
 func lockPathLess(a, b string) bool {

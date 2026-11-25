@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 )
 
@@ -14,18 +13,16 @@ func isReadOnlyOrPermError(err error) bool {
 	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
 }
 
-func lockOrderKey(p string) lockIdentityKey {
-	if info, err := os.Stat(p); err == nil {
-		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
-			return lockIdentityKey{kind: 0, dev: uint64(st.Dev), ino: uint64(st.Ino)}
-		}
+func pathFileID(path string, _ bool) (dev, ino, nlink uint64, ok bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, 0, false
 	}
-	if info, err := os.Stat(filepath.Dir(p)); err == nil {
-		if st, ok := info.Sys().(*syscall.Stat_t); ok {
-			return lockIdentityKey{kind: 1, dev: uint64(st.Dev), ino: uint64(st.Ino), name: filepath.Base(p)}
-		}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, 0, false
 	}
-	return lockIdentityKey{kind: 2, name: strings.ToLower(p)}
+	return uint64(st.Dev), uint64(st.Ino), uint64(st.Nlink), true
 }
 
 // lockFileExclusive acquires an exclusive advisory flock on lockPath so
