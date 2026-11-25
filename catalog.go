@@ -224,37 +224,42 @@ func openVerifiedRoot(dir, lockBase string, lockInfo os.FileInfo) (*os.Root, boo
 	return r, true, nil
 }
 
-func openPinnedSubdir(parent *os.Root, base string) (*os.Root, bool, error) {
+func openPinnedSubdirWithInfo(parent *os.Root, base string) (*os.Root, os.FileInfo, bool, error) {
 	info, err := parent.Lstat(base)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	if rootEntryIsLink(parent, base, info) {
-		return nil, false, errRootChanged
+		return nil, nil, false, errRootChanged
 	}
 	if !info.IsDir() {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	sub, err := parent.OpenRoot(base)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	subInfo, err := sub.Stat(".")
 	if err != nil {
 		_ = sub.Close()
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	if !os.SameFile(subInfo, info) {
 		_ = sub.Close()
-		return nil, false, errRootChanged
+		return nil, nil, false, errRootChanged
 	}
-	return sub, true, nil
+	return sub, subInfo, true, nil
+}
+
+func openPinnedSubdir(parent *os.Root, base string) (*os.Root, bool, error) {
+	sub, _, ok, err := openPinnedSubdirWithInfo(parent, base)
+	return sub, ok, err
 }
 
 func openPinnedDirDirect(dir string) (*os.Root, bool, error) {

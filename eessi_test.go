@@ -3954,6 +3954,30 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if dest, err := os.Readlink(swapLink); err != nil || dest != target2 {
 				t.Fatalf("replacement symlink must remain intact: err=%v dest=%q", err, dest)
 			}
+
+			// 13d. Type-enforced pinned removal helpers must never cross
+			// directory/non-directory types on Unix.
+			leafSwapRoot, err := os.OpenRoot(leafSwapParent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer leafSwapRoot.Close()
+			if err := removePinnedEmptyDir(leafSwapRoot, "link-leaf"); err == nil {
+				t.Fatalf("removePinnedEmptyDir must not unlink a symlink")
+			}
+			if _, err := os.Lstat(swapLink); err != nil {
+				t.Fatalf("symlink must remain intact after removePinnedEmptyDir: %v", err)
+			}
+			emptySubDir := filepath.Join(leafSwapParent, "empty-sub")
+			if err := os.Mkdir(emptySubDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := removePinnedNonDir(leafSwapRoot, "empty-sub"); err == nil {
+				t.Fatalf("removePinnedNonDir must not remove an empty directory")
+			}
+			if _, err := os.Lstat(emptySubDir); err != nil {
+				t.Fatalf("empty directory must remain intact after removePinnedNonDir: %v", err)
+			}
 		})
 		hlDir := filepath.Join(tmp, "lock-identity")
 		if err := os.MkdirAll(hlDir, 0o755); err != nil {
