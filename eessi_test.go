@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -427,7 +428,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		if err := os.Symlink(cpuModDir, siteModAlias); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}|PATH:${PATH}|MP:${MODULEPATH}\"\n"), 0o755); err != nil {
+		if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\nif [ \"$1\" = \"--exit-7\" ]; then exit 7; fi\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}|PATH:${PATH}|MP:${MODULEPATH}\"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(binDir, "gmx"), []byte("#!/bin/sh\necho \"CPU_GMX:$*\"\n"), 0o755); err != nil {
@@ -493,6 +494,14 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		wantLog := "LOAD:EESSI/2025.06|MP:" + realModRoot + "|EXACT:yes\nLOAD:ParaView/6.0.1-foss-2025b|MP:" + realCPUModDir + ":" + realModRoot + "|EXACT:yes\n"
 		if string(logBytes) != wantLog {
 			t.Fatalf("lmod log = %q, want %q", string(logBytes), wantLog)
+		}
+
+		// Non-zero exit codes from the launched tool must be preserved without
+		// printing a duplicate "sciget: exit status N" error line.
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--exit-7"}, &stdout, &stderr); code != 7 || stderr.Len() != 0 {
+			t.Fatalf("eessi launch must preserve tool exit code 7 cleanly: code=%d stderr=%q", code, stderr.String())
 		}
 
 		// An EESSI-side symlink executable pointing outside EESSI must be refused.
@@ -2109,6 +2118,101 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				}
 			})
 		}
+
+		// Removing a symlinked per-catalog cache directory must keep the lock
+		// path and generation anchored in the resolved catalogs/ parent so a
+		// delayed refresh started before remove+re-add cannot publish stale data.
+		symCatRoot := filepath.Join(tmp, "sym-leaf-cache", "catalogs")
+		symLeafTarget := filepath.Join(tmp, "external-leaf-target")
+		for _, d := range []string{symCatRoot, symLeafTarget} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		symCatDir := filepath.Join(symCatRoot, "neuro-1234567890ab")
+		if err := os.Symlink(symLeafTarget, symCatDir); err != nil {
+			t.Fatal(err)
+		}
+		preSymLock := catalogLockPath(symCatDir)
+		preSymGen, err := readCatalogLockGen(symCatDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := removeCatalogCache(symCatDir); err != nil {
+			t.Fatalf("removeCatalogCache on symlinked leaf failed: %v", err)
+		}
+		if _, err := os.Lstat(symCatDir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected symlinked leaf %q to be removed, lstat err=%v", symCatDir, err)
+		}
+		postSymLock := catalogLockPath(symCatDir)
+		if postSymLock != preSymLock {
+			t.Fatalf("removing symlinked leaf shifted lock path: %q != %q", postSymLock, preSymLock)
+		}
+		if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "neuro", URL: catFile}, symCatDir, preSymGen, func() (bool, error) { return true, nil }); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
+			t.Fatalf("delayed refresh after removing symlinked leaf must fail on generation mismatch, got err=%v", err)
+		}
+	}
+
+	// First creation of catalogs.json on filesystems without hard links must
+	// still publish atomically via rename so concurrent readers never see EOF.
+	noHardLinkDir := filepath.Join(tmp, "no-hardlink")
+	if err := os.MkdirAll(noHardLinkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prevLink := linkCatalogFile
+	linkCatalogFile = func(oldname, newname string) error {
+		return errors.New("hard links not supported")
+	}
+	t.Cleanup(func() { linkCatalogFile = prevLink })
+	for i := range 30 {
+		p := filepath.Join(noHardLinkDir, fmt.Sprintf("catalogs-%d.json", i))
+		stopRead := make(chan struct{})
+		readErr := make(chan error, 1)
+		go func() {
+			for {
+				select {
+				case <-stopRead:
+					readErr <- nil
+					return
+				default:
+					cats, err := loadCatalogList(p)
+					if err != nil {
+						readErr <- err
+						return
+					}
+					if len(cats) != 0 && (len(cats) != 1 || cats[0].Name != "neuro") {
+						readErr <- fmt.Errorf("unexpected catalog list: %+v", cats)
+						return
+					}
+				}
+			}
+		}()
+		if err := writeCatalogList(p, sampleList, false); err != nil {
+			close(stopRead)
+			<-readErr
+			t.Fatalf("writeCatalogList without hard links failed: %v", err)
+		}
+		close(stopRead)
+		if err := <-readErr; err != nil {
+			t.Fatalf("concurrent reader failed during non-hardlink first creation: %v", err)
+		}
+	}
+	linkCatalogFile = prevLink
+
+	// removeRetiredInDirLock must succeed on absent/removable files and return
+	// an error when deletion remains impossible.
+	nonEmptyDir := filepath.Join(tmp, "unremovable-dir")
+	if err := os.MkdirAll(nonEmptyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyDir, "keep"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeRetiredInDirLock(filepath.Join(tmp, "does-not-exist.lock")); err != nil {
+		t.Fatalf("removeRetiredInDirLock on absent file failed: %v", err)
+	}
+	if err := removeRetiredInDirLock(nonEmptyDir); err == nil {
+		t.Fatalf("removeRetiredInDirLock must return error when removal fails")
 	}
 
 	// catalogs.json placed inside a folder named "catalogs" must serialize

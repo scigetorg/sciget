@@ -274,6 +274,10 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 	return catalogs, nil
 }
 
+// linkCatalogFile creates a hard link when staging a new catalogs.json; tests
+// may replace it to simulate filesystems that do not support hard links.
+var linkCatalogFile = os.Link
+
 // writeCatalogList writes catalogs to catalogs.json at path, in place, or
 // with system set as writeSystemFile does. User writes lock the open file
 // itself before truncating and writing so concurrent readers (including
@@ -296,9 +300,10 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	data = append(data, '\n')
 	if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 		// Resolve any dangling symlink chain so first creation atomically
-		// publishes the target file via stage+link (using a short temp name
-		// that fits even when the target basename is 255 bytes) instead of
-		// exposing a zero-byte file before the exclusive lock is acquired.
+		// publishes the target file via stage+link (falling back to atomic
+		// rename on filesystems without hard links, and using a short temp
+		// name that fits even when the target basename is 255 bytes) instead
+		// of exposing a zero-byte file before the exclusive lock is acquired.
 		// If resolution fails (e.g. a broken symlink like missing/../target)
 		// or the target directory does not exist, skip staging so os.OpenFile
 		// reports the genuine OS error.
@@ -307,11 +312,17 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 		}
 		if target, ok := resolveCanonicalPath(path, true); ok {
 			if tmp, err := stageTemp(filepath.Dir(target), ".catalogs.*.tmp", data, 0o600); err == nil {
-				linkErr := os.Link(tmp, target)
-				_ = os.Remove(tmp)
+				linkErr := linkCatalogFile(tmp, target)
 				if linkErr == nil {
+					_ = os.Remove(tmp)
 					return nil
 				}
+				if !errors.Is(linkErr, fs.ErrExist) {
+					if renameErr := os.Rename(tmp, target); renameErr == nil {
+						return nil
+					}
+				}
+				_ = os.Remove(tmp)
 			}
 		}
 	}

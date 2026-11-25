@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -972,7 +973,22 @@ func runEESSILaunch(b eessiBuild, extraArgs []string, stdin io.Reader, stdout, s
 	argv = append(argv, extraArgs...)
 	cmd := exec.Command(bashPath, argv...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if code := ee.ExitCode(); code > 0 {
+				return exitStatusError{code: code, err: ee}
+			}
+			if status, ok := ee.Sys().(interface{ Signal() syscall.Signal }); ok {
+				if sig := status.Signal(); sig > 0 {
+					return exitStatusError{code: 128 + int(sig), err: ee}
+				}
+			}
+			return exitStatusError{code: 1, err: ee}
+		}
+		return err
+	}
+	return nil
 }
 
 func newEESSILaunchCommand() *cobra.Command {

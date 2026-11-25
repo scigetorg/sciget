@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -274,17 +275,38 @@ func canonicalCatalogDir(dir string) string {
 }
 
 // catalogLockPath returns the advisory lock file path for cache directory dir.
-// It resolves symlinks and Windows junctions along dir first so two cache
-// roots sharing a catalogs/ subtree serialize on the same lock file, places
-// the lock beside dir (outside dir, inside its resolved parent) so deleting
-// dir never breaks lock identity and refresh does not need write access
-// outside the resolved catalogs tree, and hashes the lowercased basename so
-// the lock filename stays bounded well under filesystem 255-byte name limits
-// even for maximum-length catalog names.
+// It resolves symlinks and Windows junctions along dir's parent so two cache
+// roots sharing a catalogs/ subtree serialize on the same lock file while
+// keeping the catalog slot basename stable even if dir itself is a symlink
+// that gets removed and recreated. Placing the lock beside dir (outside dir,
+// inside its resolved parent) preserves lock identity across removals and
+// avoids needing write access outside the resolved catalogs tree, and hashing
+// the lowercased basename keeps the filename well under 255-byte limits.
 func catalogLockPath(dir string) string {
-	clean := canonicalCatalogDir(dir)
-	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Base(clean))))
-	return filepath.Join(filepath.Dir(clean), ".sciget-lock-"+hex.EncodeToString(sum[:16])+".lock")
+	cleaned := filepath.Clean(dir)
+	parent, ok := resolveCanonicalPath(filepath.Dir(cleaned), false)
+	if !ok {
+		parent = filepath.Dir(cleaned)
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(filepath.Base(cleaned))))
+	return filepath.Join(parent, ".sciget-lock-"+hex.EncodeToString(sum[:16])+".lock")
+}
+
+// removeRetiredInDirLock removes a retired in-dir .lock file on Windows,
+// retrying briefly so any reader that opened .lock just before extPath
+// appeared finishes closing its handle before os.RemoveAll(dir) runs.
+func removeRetiredInDirLock(path string) error {
+	var err error
+	for i := range 50 {
+		err = os.Remove(path)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if i < 49 {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return err
 }
 
 func catalogLockExists(dir string) (bool, error) {
@@ -364,12 +386,15 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogLock, 
 				}
 			} else if !allowInDirFallback {
 				inLk.unlock()
-				_ = os.Remove(inDirPath)
+				if rmErr := removeRetiredInDirLock(inDirPath); rmErr != nil {
+					extLk.unlock()
+					return nil, rmErr
+				}
 			} else {
 				origUnlock := extLk.unlock
 				extLk.unlock = func() {
 					inLk.unlock()
-					_ = os.Remove(inDirPath)
+					_ = removeRetiredInDirLock(inDirPath)
 					origUnlock()
 				}
 			}
