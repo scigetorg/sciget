@@ -291,27 +291,29 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(binDir, "gmx"), []byte("#!/bin/sh\necho \"GMX:$*\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MODULEPATH", "/site/other/modules")
+	t.Setenv("LD_LIBRARY_PATH", "/site/stale/lib")
 	t.Setenv("EESSI_MODULE_ROOT", modRoot)
 	t.Setenv("EESSI_LMOD_INIT", mockLmod)
 	t.Setenv("MOCK_LMOD_LOG", lmodLog)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Tool flags (--version, --gpu) after <tool> pass through to the binary without `--`,
-	// inherited MODULEPATH is replaced by modroot, and LMOD_EXACT_MATCH=yes is enforced.
+	// inherited MODULEPATH is replaced by modroot, stale LD_LIBRARY_PATH left by
+	// an incomplete purge is scrubbed, and LMOD_EXACT_MATCH=yes is enforced.
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version", "--gpu"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("eessi launch failed (%d): %s", code, stderr.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "PARAVIEW:--version --gpu" {
-		t.Fatalf("got %q, want %q", got, "PARAVIEW:--version --gpu")
+	if got := strings.TrimSpace(stdout.String()); got != "PARAVIEW:--version --gpu|LD:" {
+		t.Fatalf("got %q, want %q", got, "PARAVIEW:--version --gpu|LD:")
 	}
 	logBytes, err := os.ReadFile(lmodLog)
 	if err != nil {
