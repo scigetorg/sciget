@@ -305,7 +305,7 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return fmt.Errorf("writing catalogs: %w", err)
 		}
-		if target, ok := resolveCanonicalPath(path); ok {
+		if target, ok := resolveCanonicalPath(path, true); ok {
 			if tmp, err := stageTemp(filepath.Dir(target), ".catalogs.*.tmp", data, 0o600); err == nil {
 				linkErr := os.Link(tmp, target)
 				_ = os.Remove(tmp)

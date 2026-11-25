@@ -1682,21 +1682,31 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			}
 		}
 
-		// A broken dangling symlink traversing ".." through a non-existent
-		// directory (missing/../actual.json) must fail instead of creating actual.json.
-		brokenDir := filepath.Join(tmp, "broken-dangling")
-		if err := os.MkdirAll(brokenDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		brokenLink := filepath.Join(brokenDir, "catalogs.json")
-		if err := os.Symlink("missing/../actual.json", brokenLink); err != nil {
-			t.Fatal(err)
-		}
-		if err := writeCatalogList(brokenLink, sampleList, false); err == nil {
-			t.Fatalf("expected error writing through broken symlink missing/../actual.json")
-		}
-		if _, err := os.Stat(filepath.Join(brokenDir, "actual.json")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("broken symlink write must not create actual.json: stat err=%v", err)
+		// Broken dangling symlinks (missing/../actual.json, or directory-only
+		// targets ending in "/" or "/.") must fail instead of creating regular files.
+		for _, tc := range []struct {
+			name   string
+			target string
+			forbid string
+		}{
+			{"missing-dotdot", "missing/../actual.json", "actual.json"},
+			{"trailing-slash", "dir-only/", "dir-only"},
+			{"trailing-dot", "dir-dot/.", "dir-dot"},
+		} {
+			brokenDir := filepath.Join(tmp, "broken-dangling-"+tc.name)
+			if err := os.MkdirAll(brokenDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			brokenLink := filepath.Join(brokenDir, "catalogs.json")
+			if err := os.Symlink(tc.target, brokenLink); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeCatalogList(brokenLink, sampleList, false); err == nil {
+				t.Fatalf("%s: expected error writing through broken symlink %q", tc.name, tc.target)
+			}
+			if _, err := os.Stat(filepath.Join(brokenDir, tc.forbid)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s: broken symlink write must not create %s: stat err=%v", tc.name, tc.forbid, err)
+			}
 		}
 
 		// Malformed apps.json with null tool apps ({"fsl":{"apps":null}}) must
@@ -1724,6 +1734,35 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 		if gotApps, err := os.ReadFile(appsPath); err != nil || string(gotApps) != appsV1 {
 			t.Fatalf("populated apps.json was overwritten by malformed null-apps catalog: err=%v got=%s", err, string(gotApps))
+		}
+
+		// Retiring EESSI (removing eessiCatalogUrl) and the last container
+		// (publishing "{}" in apps.json) together on a previously populated
+		// container+EESSI cache must succeed, remove stale eessi.json, and stay
+		// healthy on subsequent refreshes.
+		retireDir := filepath.Join(tmp, "retire-both-src")
+		if err := os.MkdirAll(retireDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(retireDir, "apps.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		retireCatFile := filepath.Join(retireDir, "cat.json")
+		if err := os.WriteFile(retireCatFile, []byte(`{"schemaVersion": 1, "appJsonUrl": "apps.json"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		fileRead := func(link string) ([]byte, string, error) {
+			data, rerr := os.ReadFile(link)
+			return data, link, rerr
+		}
+		if changed, empty, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: retireCatFile}, cacheDir); err != nil || !changed || !empty {
+			t.Fatalf("retiring EESSI + last container failed: changed=%v empty=%v err=%v", changed, empty, err)
+		}
+		if _, err := os.Stat(eessiPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale eessi.json must be removed on combined retirement: stat err=%v", err)
+		}
+		if changed, empty, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: retireCatFile}, cacheDir); err != nil || changed || !empty {
+			t.Fatalf("subsequent refresh after combined retirement failed: changed=%v empty=%v err=%v", changed, empty, err)
 		}
 
 		// Two cache roots sharing a catalogs/ subtree via symlink must resolve

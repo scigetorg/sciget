@@ -171,12 +171,22 @@ func readCatalogLockGen(dir string) (uint64, error) {
 	return gen, nil
 }
 
-// resolveCanonicalPath resolves symlinks and Windows junctions component by
-// component, including dangling leaves and missing tail components. It refuses
-// to collapse ".." through a non-existent directory (returning ok=false),
-// matching OS pathname lookup so a broken target like "missing/../actual.json"
-// is never rewritten to a different path.
-func resolveCanonicalPath(path string) (string, bool) {
+func endsWithDirSyntax(p string) bool {
+	s := filepath.ToSlash(p)
+	return s == "." || s == ".." || strings.HasSuffix(s, "/") || strings.HasSuffix(s, "/.") || strings.HasSuffix(s, "/..")
+}
+
+// resolveCanonicalPath resolves symlinks and Windows NTFS junctions component
+// by component, including dangling leaves and missing tail components. It
+// refuses to collapse ".." through a non-existent directory (returning
+// ok=false), matching OS pathname lookup. When forFile is true, it also
+// rejects paths or leaf symlink targets with directory-only syntax (trailing
+// "/", "/.", or "/..") so callers never create a regular file for a target
+// that OS open() requires to be a directory.
+func resolveCanonicalPath(path string, forFile bool) (string, bool) {
+	if forFile && endsWithDirSyntax(path) {
+		return "", false
+	}
 	cur := path
 	if !filepath.IsAbs(cur) {
 		if abs, err := filepath.Abs(cur); err == nil {
@@ -197,9 +207,15 @@ func resolveCanonicalPath(path string) (string, bool) {
 		comp := queue[0]
 		queue = queue[1:]
 		if comp == "." {
+			if forFile && len(queue) == 0 {
+				return "", false
+			}
 			continue
 		}
 		if comp == ".." {
+			if forFile && len(queue) == 0 {
+				return "", false
+			}
 			info, err := os.Stat(resolved)
 			if err != nil || !info.IsDir() {
 				return "", false
@@ -208,15 +224,13 @@ func resolveCanonicalPath(path string) (string, bool) {
 			continue
 		}
 		next := filepath.Join(resolved, comp)
-		// For existing components, filepath.EvalSymlinks resolves symlinks,
-		// Windows NTFS junctions (ModeIrregular), and on-disk casing natively.
-		if eval, err := filepath.EvalSymlinks(next); err == nil {
-			resolved = eval
-			continue
-		}
-		// Component does not exist (or is a dangling symlink/reparse point):
-		// follow its link target if os.Readlink succeeds.
+		// Check os.Readlink BEFORE filepath.EvalSymlinks because Go 1.23+
+		// intentionally leaves Windows NTFS directory junctions unresolved in
+		// filepath.EvalSymlinks while os.Readlink returns their target path.
 		if target, err := os.Readlink(next); err == nil {
+			if forFile && len(queue) == 0 && endsWithDirSyntax(target) {
+				return "", false
+			}
 			symlinksFollowed++
 			if symlinksFollowed > 40 {
 				return "", false
@@ -237,6 +251,12 @@ func resolveCanonicalPath(path string) (string, bool) {
 			queue = append(targetParts, queue...)
 			continue
 		}
+		// For existing non-link components, filepath.EvalSymlinks normalizes
+		// on-disk casing (e.g. on Windows).
+		if eval, err := filepath.EvalSymlinks(next); err == nil {
+			resolved = eval
+			continue
+		}
 		resolved = next
 	}
 	return resolved, true
@@ -249,7 +269,7 @@ func resolveCanonicalPath(path string) (string, bool) {
 // when dir is under catalogs/, or beside dir otherwise) so deleting dir never
 // breaks lock identity.
 func catalogLockPath(dir string) string {
-	clean, ok := resolveCanonicalPath(dir)
+	clean, ok := resolveCanonicalPath(dir, false)
 	if !ok {
 		clean = filepath.Clean(dir)
 	}

@@ -229,7 +229,7 @@ func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalo
 		}
 	}
 	if needsEmptyAppsCheck {
-		if !cachedAppsIsEmpty(dir) {
+		if !cachedAppsIsEmpty(dir) && !cachedHasEESSI(dir) {
 			return false, false, errors.New("downloaded catalog is invalid: no containers")
 		}
 		empty = true
@@ -431,6 +431,22 @@ func cachedAppsIsEmpty(dir string) bool {
 	}
 	containers, err := parseCatalog(appsData)
 	return err == nil && len(containers) == 0
+}
+
+// cachedHasEESSI reports whether dir currently caches an EESSI catalog
+// (eessi.json on disk or eessiCatalogUrl in catalog.json), so retiring EESSI
+// and the last container together removes stale eessi.json cleanly. Must be
+// called while holding lockCatalogDir(dir).
+func cachedHasEESSI(dir string) bool {
+	if _, err := os.Lstat(filepath.Join(dir, "eessi.json")); err == nil {
+		return true
+	}
+	catData, err := os.ReadFile(filepath.Join(dir, "catalog.json"))
+	if err != nil {
+		return false
+	}
+	meta, err := parseCatalogEESSI(catData)
+	return err == nil && meta.EESSICatalogURL != ""
 }
 
 // stageTemp writes data, with mode, to a new temporary file in dir matching
