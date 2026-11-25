@@ -1811,8 +1811,11 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if preDirect != preUpper || preDirect != preLower || preDirect != preAlias {
 			t.Fatalf("pre-creation mixed-case aliases split lock paths: direct=%q upper=%q lower=%q alias=%q", preDirect, preUpper, preLower, preAlias)
 		}
-		if err := os.MkdirAll(mixedUpper, 0o755); err != nil {
-			t.Fatal(err)
+		// First refresh through a dangling catalogs -> missing Catalogs symlink
+		// must create the resolved target directory cleanly under the shared lock.
+		danglingCacheDir := filepath.Join(mixedRoot, "catalogs", "neuro-1234567890ab")
+		if changed, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, danglingCacheDir); err != nil || !changed {
+			t.Fatalf("first refresh through dangling catalogs symlink failed: changed=%v err=%v", changed, err)
 		}
 		postDirect := catalogLockPath(filepath.Join(mixedRoot, "catalogs", "neuro-1234567890ab"))
 		postUpper := catalogLockPath(filepath.Join(mixedUpper, "neuro-1234567890ab"))

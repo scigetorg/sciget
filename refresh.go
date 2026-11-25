@@ -234,7 +234,11 @@ func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalo
 		}
 		empty = true
 	} else {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		mkdirTarget := dir
+		if resolved, ok := resolveCanonicalPath(dir, false); ok {
+			mkdirTarget = resolved
+		}
+		if err := os.MkdirAll(mkdirTarget, 0o755); err != nil {
 			return false, false, fmt.Errorf("writing catalog: %w", err)
 		}
 	}
