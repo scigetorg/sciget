@@ -175,12 +175,18 @@ func TestParseEESSICatalog(t *testing.T) {
 	}
 }
 
-func TestRefreshAndEESSICommands(t *testing.T) {
-	tmp := t.TempDir()
+func isolateTestEnv(t *testing.T, tmp string) {
+	t.Helper()
+	t.Setenv("SCIGET_CONFIG", "")
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
 	setCacheHome(t, filepath.Join(tmp, "cache"))
 	setConfigHome(t, filepath.Join(tmp, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
-	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
+}
+
+func TestRefreshAndEESSICommands(t *testing.T) {
+	tmp := t.TempDir()
+	isolateTestEnv(t, tmp)
 
 	srcDir := filepath.Join(tmp, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
@@ -506,10 +512,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 
 func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	tmp := t.TempDir()
-	setCacheHome(t, filepath.Join(tmp, "cache"))
-	setConfigHome(t, filepath.Join(tmp, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
-	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
+	isolateTestEnv(t, tmp)
 
 	srcDir := filepath.Join(tmp, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
@@ -780,14 +783,49 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	if err != nil || !sameEESSIBuild(resolvedAlt, b4[0]) {
 		t.Fatalf("--catalog cat-b resolved to %+v (err=%v), want %+v", resolvedAlt, err, b4[0])
 	}
+
+	// A CPU build in a higher-priority catalog must not shadow a GPU build with
+	// the same tool/stack/module/exec in a lower-priority catalog.
+	gpu1 := strings.ReplaceAll(cross1, `"high"`, `"sim"`)
+	gpu2 := strings.Replace(gpu1, `"gpu": false`, `"gpu": true`, 1)
+	if err := os.WriteFile(filepath.Join(srcDir, "eessi-gpu-1.json"), []byte(gpu1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "eessi-gpu-2.json"), []byte(gpu2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catGPU1 := filepath.Join(srcDir, "cat-gpu-1.json")
+	catGPU2 := filepath.Join(srcDir, "cat-gpu-2.json")
+	if err := os.WriteFile(catGPU1, []byte(`{"schemaVersion": 1, "eessiCatalogUrl": "eessi-gpu-1.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(catGPU2, []byte(`{"schemaVersion": 1, "eessiCatalogUrl": "eessi-gpu-2.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"catalog", "add", "gpu-low", catGPU2}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add gpu-low failed: %s", stderr.String())
+	}
+	if code := run([]string{"catalog", "add", "gpu-high", catGPU1}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add gpu-high failed: %s", stderr.String())
+	}
+	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("refresh gpu catalogs failed: %s", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"eessi", "find", "--gpu", "shared"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "gpu-low") || strings.Contains(stdout.String(), "(shadowed)") {
+		t.Fatalf("eessi find --gpu should list unshadowed GPU build in gpu-low: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"eessi", "info", "--gpu", "shared"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "gpu-low") {
+		t.Fatalf("eessi info --gpu should resolve unshadowed GPU build in gpu-low: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
 }
 
 func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
 	tmp := t.TempDir()
-	setCacheHome(t, filepath.Join(tmp, "cache"))
-	setConfigHome(t, filepath.Join(tmp, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
-	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
+	isolateTestEnv(t, tmp)
 
 	srcDir := filepath.Join(tmp, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
@@ -844,10 +882,7 @@ func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
 
 func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	tmp := t.TempDir()
-	setCacheHome(t, filepath.Join(tmp, "cache"))
-	setConfigHome(t, filepath.Join(tmp, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
-	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
+	isolateTestEnv(t, tmp)
 
 	srcDir := filepath.Join(tmp, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
@@ -1101,9 +1136,17 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		delayedErr <- err
 	}()
 	<-delayedPaused
-	if err := removeCatalogCache(cacheDir); err != nil {
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"catalog", "remove", "neuro"}, &stdout, &stderr); code != 0 {
 		close(resumeDelayed)
-		t.Fatalf("removeCatalogCache failed: %v", err)
+		t.Fatalf("catalog remove failed (%d): %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"catalog", "add", "neuro", catFile}, &stdout, &stderr); code != 0 {
+		close(resumeDelayed)
+		t.Fatalf("catalog re-add failed (%d): %s", code, stderr.String())
 	}
 	if _, _, err := refreshCatalog(func(link string) ([]byte, string, error) {
 		switch {
@@ -1130,6 +1173,95 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	}
 	if !strings.Contains(string(gotEESSI), "ParaView/6.0.1-foss-2025b") || strings.Contains(string(gotEESSI), "5.0.1") {
 		t.Fatalf("delayed refresh reverted newer cache: %s", string(gotEESSI))
+	}
+
+	// Lock file stores fixed-width non-empty generation without truncation.
+	lockData, err := os.ReadFile(catalogLockPath(cacheDir))
+	if err != nil || len(lockData) != 21 {
+		t.Fatalf("expected 21-byte fixed-width lock generation, got %q (err=%v)", string(lockData), err)
+	}
+
+	// Pending catalog remove paused after writing catalogs.json and before
+	// acquiring the cache lock must not delete a newly re-added and refreshed cache.
+	removePaused := make(chan struct{})
+	resumeRemove := make(chan struct{})
+	oldBeforeRemove := beforeRemoveCatalogCache
+	t.Cleanup(func() { beforeRemoveCatalogCache = oldBeforeRemove })
+	beforeRemoveCatalogCache = func(dir string) {
+		if dir == cacheDir {
+			close(removePaused)
+			<-resumeRemove
+		}
+	}
+	pausedRemoveDone := make(chan int, 1)
+	go func() {
+		var rmOut, rmErr bytes.Buffer
+		pausedRemoveDone <- run([]string{"catalog", "remove", "neuro"}, &rmOut, &rmErr)
+	}()
+	<-removePaused
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"catalog", "add", "neuro", catFile}, &stdout, &stderr); code != 0 {
+		close(resumeRemove)
+		t.Fatalf("re-add during paused remove failed (%d): %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+		close(resumeRemove)
+		t.Fatalf("refresh during paused remove failed (%d): %s", code, stderr.String())
+	}
+	close(resumeRemove)
+	if code := <-pausedRemoveDone; code != 0 {
+		t.Fatalf("paused remove failed: exit %d", code)
+	}
+	beforeRemoveCatalogCache = oldBeforeRemove
+	if _, err := os.Stat(appsPath); err != nil {
+		t.Fatalf("paused catalog remove deleted newly re-added cache: %v", err)
+	}
+
+	// Reverse race: a refresh that read the registry before removal and sampled
+	// generation after removal must see the catalog is unregistered and refuse
+	// to recreate the removed cache.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"catalog", "remove", "neuro"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove for reverse-race check failed (%d): %s", code, stderr.String())
+	}
+	postRemoveGen, err := readCatalogLockGen(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := refreshCatalogAt(func(link string) ([]byte, string, error) {
+		switch {
+		case strings.HasSuffix(link, "cat.json"):
+			return catMetaBytes, link, nil
+		case strings.HasSuffix(link, "apps.json"):
+			return []byte(appsV1), link, nil
+		case strings.HasSuffix(link, "eessi.json"):
+			return []byte(testEESSIJSON), link, nil
+		default:
+			return nil, "", os.ErrNotExist
+		}
+	}, used[0], cacheDir, postRemoveGen, func() (bool, error) {
+		return catalogDirRegistered(cacheDir)
+	}); err == nil || !strings.Contains(err.Error(), "removed during refresh") {
+		t.Fatalf("refresh of removed catalog must fail instead of recreating cache: err=%v", err)
+	}
+	if _, err := os.Stat(cacheDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refresh recreated removed catalog cache: stat err=%v", err)
+	}
+
+	// Re-add and refresh back to v1 for the remaining subtests.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"catalog", "add", "neuro", catFile}, &stdout, &stderr); code != 0 {
+		t.Fatalf("re-add after reverse-race check failed (%d): %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("refresh after reverse-race check failed (%d): %s", code, stderr.String())
 	}
 	// Restore v2 in srcDir for the unreadable-file subtest below.
 	if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV2), 0o644); err != nil {

@@ -360,15 +360,28 @@ func removeCatalog(w io.Writer, name string, system bool) error {
 	return err
 }
 
+// beforeRemoveCatalogCache runs immediately before removeCatalogCache acquires
+// the catalog lock; tests may set it to synchronize removal races.
+var beforeRemoveCatalogCache = func(dir string) {}
+
 // removeCatalogCache deletes a catalog's cache directory under its external
-// lock and bumps the lock generation so any delayed refresh started before
-// removal refuses to overwrite or recreate the cache.
+// lock if no registered catalog still points to dir, and bumps the lock
+// generation so any delayed refresh started before removal refuses to
+// overwrite or recreate the cache.
 func removeCatalogCache(dir string) error {
+	beforeRemoveCatalogCache(dir)
 	lk, err := lockCatalogDir(dir)
 	if err != nil {
 		return err
 	}
 	defer lk.unlock()
+	registered, err := catalogDirRegistered(dir)
+	if err != nil {
+		return err
+	}
+	if registered {
+		return nil
+	}
 	if err := lk.bump(); err != nil {
 		return err
 	}

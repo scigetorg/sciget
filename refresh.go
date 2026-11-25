@@ -109,7 +109,10 @@ func refreshCatalogs() ([]refreshResult, error) {
 			results = append(results, refreshResult{name: cat.Name, err: fmt.Errorf("reading catalog lock: %w", startErrs[i])})
 			continue
 		}
-		changed, empty, err := refreshCatalogAt(read, cat, cat.dir(cacheDir), startGens[i])
+		dir := cat.dir(cacheDir)
+		changed, empty, err := refreshCatalogAt(read, cat, dir, startGens[i], func() (bool, error) {
+			return catalogDirRegistered(dir)
+		})
 		results = append(results, refreshResult{name: cat.Name, changed: changed, empty: empty, err: err})
 	}
 	return results, nil
@@ -136,10 +139,10 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	if err != nil {
 		return false, false, fmt.Errorf("reading catalog lock: %w", err)
 	}
-	return refreshCatalogAt(read, cat, dir, startGen)
+	return refreshCatalogAt(read, cat, dir, startGen, nil)
 }
 
-func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalog, dir string, startGen uint64) (changed, empty bool, err error) {
+func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalog, dir string, startGen uint64, stillRegistered func() (bool, error)) (changed, empty bool, err error) {
 	data, base, err := read(cat.URL)
 	if err != nil {
 		return false, false, err
@@ -214,6 +217,15 @@ func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalo
 	defer lk.unlock()
 	if lk.gen != startGen {
 		return false, false, errors.New("catalog cache changed during refresh; run 'sciget refresh' again")
+	}
+	if stillRegistered != nil {
+		ok, err := stillRegistered()
+		if err != nil {
+			return false, false, fmt.Errorf("checking catalog registration: %w", err)
+		}
+		if !ok {
+			return false, false, fmt.Errorf("catalog %q was removed during refresh", cat.Name)
+		}
 	}
 	if needsEmptyAppsCheck {
 		if !cachedAppsIsEmpty(dir) {

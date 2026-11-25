@@ -128,15 +128,35 @@ func readLockFileGen(f *os.File) (uint64, error) {
 	return gen, nil
 }
 
+// writeLockFileGen overwrites the lock file's fixed-width generation record
+// in place at offset 0 without truncating the file to zero, so an interrupted
+// write can never reset the stored generation back to 0.
 func writeLockFileGen(f *os.File, gen uint64) error {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+	buf := fmt.Sprintf("%020d\n", gen)
+	n, err := f.WriteAt([]byte(buf), 0)
+	if err != nil {
 		return err
 	}
-	if err := f.Truncate(0); err != nil {
-		return err
+	if n != len(buf) {
+		return io.ErrShortWrite
 	}
-	_, err := fmt.Fprintf(f, "%d\n", gen)
-	return err
+	return nil
+}
+
+// catalogDirRegistered reports whether any catalog currently registered in the
+// user or system catalog lists maps to cache directory dir.
+func catalogDirRegistered(dir string) (bool, error) {
+	layers, err := readCatalogLayers()
+	if err != nil {
+		return false, err
+	}
+	clean := filepath.Clean(dir)
+	for _, c := range layers.combined() {
+		if filepath.Clean(c.dir(layers.cacheDir)) == clean {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func readCatalogLockGen(dir string) (uint64, error) {

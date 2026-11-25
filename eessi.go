@@ -420,7 +420,11 @@ func readEESSIBuilds() ([]eessiBuild, error) {
 		for i := range builds {
 			builds[i].catalog = cat.Name
 			builds[i].catalogOrder = catIdx
-			key := builds[i].id + "\x00" + builds[i].stack + "\x00" + builds[i].module + "\x00" + strings.Join(builds[i].exec, "\x00")
+			gpuKey := "0"
+			if builds[i].gpu {
+				gpuKey = "1"
+			}
+			key := builds[i].id + "\x00" + builds[i].cvmfsRepo + "\x00" + builds[i].stack + "\x00" + gpuKey + "\x00" + builds[i].module + "\x00" + strings.Join(builds[i].exec, "\x00")
 			if seen[key] {
 				builds[i].shadowed = true
 			}
