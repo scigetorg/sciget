@@ -554,7 +554,31 @@ func canonicalCatalogDir(dir string) string {
 	return clean
 }
 
+// canonicalOnDiskBase returns the single on-disk directory entry name inside
+// parent matching base by os.SameFile when the entry exists. On normalization-
+// insensitive filesystems such as macOS APFS (NFC "Café" vs NFD "Cafe\u0301")
+// and Windows NTFS (8.3 short names or mixed case), this ensures two spellings
+// for the same existing directory hash to the exact same lock filename.
+func canonicalOnDiskBase(parent, base string) string {
+	full := filepath.Join(parent, base)
+	targetInfo, err := os.Lstat(full)
+	if err != nil {
+		return base
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return base
+	}
+	for _, e := range entries {
+		if info, err := os.Lstat(filepath.Join(parent, e.Name())); err == nil && os.SameFile(info, targetInfo) {
+			return e.Name()
+		}
+	}
+	return base
+}
+
 func hashLockPath(parent, base string) string {
+	base = canonicalOnDiskBase(parent, base)
 	sum := sha256.Sum256([]byte(strings.ToLower(base)))
 	return filepath.Join(parent, ".sciget-lock-"+hex.EncodeToString(sum[:16])+".lock")
 }
@@ -689,11 +713,29 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 	clean := canonicalCatalogDir(dir)
 	slotPath := catalogLockPath(dir)
 	targetPath := catalogTargetLockPath(dir)
-	extPaths := catalogExternalLockPaths(dir)
 	inDirPath := filepath.Join(clean, ".lock")
 	linkLeaf := isLinkLeaf(dir)
-
+	if allowInDirFallback {
+		// Ensure both external lock parent directories exist before computing
+		// OS filesystem identity ordering keys so concurrent first refreshes
+		// through a dangling symlink across filesystems never observe a
+		// missing-parent vs existing-parent key transition and invert order.
+		_ = os.MkdirAll(filepath.Dir(slotPath), 0o755)
+		_ = os.MkdirAll(filepath.Dir(targetPath), 0o755)
+	}
 	slotSameAsTarget := sameLockFile(slotPath, targetPath)
+	var extPaths []string
+	if !allowInDirFallback && linkLeaf && !slotSameAsTarget {
+		// When removing a dangling leaf link whose target parent does not even
+		// exist, lock only slotPath without creating the missing target parent
+		// (a single lock can never deadlock with concurrent refreshes).
+		if _, err := os.Stat(filepath.Dir(targetPath)); errors.Is(err, os.ErrNotExist) {
+			extPaths = []string{slotPath}
+		}
+	}
+	if extPaths == nil {
+		extPaths = catalogExternalLockPaths(dir)
+	}
 	var extLocks []*catalogLock
 	var slotLk, targetLk *catalogLock
 	var skippedExt []string

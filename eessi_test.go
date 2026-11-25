@@ -2979,6 +2979,50 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			!sameLockFile(orderNFC[1], orderNFD[1]) {
 			t.Fatalf("Unicode-equivalent lock order diverged: nfc=%q nfd=%q", orderNFC, orderNFD)
 		}
+		// Unicode-equivalent target basenames referring to the same on-disk
+		// entry (as NFC "Café" vs NFD "Cafe\u0301" on APFS) must hash to the
+		// exact same lock filename via canonicalOnDiskBase.
+		normDir := filepath.Join(tmp, "unicode-base-norm")
+		if err := os.MkdirAll(normDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		nfcEntry := filepath.Join(normDir, "Caf\u00e9")
+		nfdEntry := filepath.Join(normDir, "Cafe\u0301")
+		if err := os.WriteFile(nfcEntry, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(nfdEntry); errors.Is(err, os.ErrNotExist) {
+			if err := os.Link(nfcEntry, nfdEntry); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if gotNFC, gotNFD := hashLockPath(normDir, "Caf\u00e9"), hashLockPath(normDir, "Cafe\u0301"); gotNFC != gotNFD {
+			t.Fatalf("same-inode NFC vs NFD target basenames hashed to different lock paths: %q != %q", gotNFC, gotNFD)
+		}
+		// Locking a dangling symlink whose target parent does not exist yet
+		// must pre-create the target parent before sorting so lock ordering is
+		// identical to a subsequent call after parent creation.
+		danglingSlotParent := filepath.Join(tmp, "dangling-order-slots", "catalogs")
+		if err := os.MkdirAll(danglingSlotParent, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		danglingTargetParent := filepath.Join(tmp, "dangling-order-missing-parent")
+		danglingTarget := filepath.Join(danglingTargetParent, "shared-neuro")
+		danglingAlias := filepath.Join(danglingSlotParent, "neuro-1234567890ab")
+		if err := os.Symlink(danglingTarget, danglingAlias); err != nil {
+			t.Fatal(err)
+		}
+		dlk, err := lockCatalogDir(danglingAlias)
+		if err != nil {
+			t.Fatalf("lockCatalogDir on dangling alias with missing target parent failed: %v", err)
+		}
+		dlk.unlock()
+		if _, err := os.Stat(danglingTargetParent); err != nil {
+			t.Fatalf("expected target parent to exist after lockCatalogDir: %v", err)
+		}
+		if k := lockOrderKey(catalogTargetLockPath(danglingAlias)); k.kind != 1 {
+			t.Fatalf("expected existing-parent lockOrderKey kind=1 after pre-creation, got %+v", k)
+		}
 		hlDir := filepath.Join(tmp, "lock-identity")
 		if err := os.MkdirAll(hlDir, 0o755); err != nil {
 			t.Fatal(err)
