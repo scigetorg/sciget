@@ -1784,6 +1784,39 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if lockA != lockB {
 			t.Fatalf("aliased cache roots split lock paths: %q != %q", lockA, lockB)
 		}
+
+		// Mixed-case Catalogs/ alias (as on case-insensitive macOS APFS or when
+		// catalogs and Catalogs refer to the same directory) must also resolve
+		// to the exact same locks/ file.
+		mixedRoot := filepath.Join(tmp, "mixed-cache")
+		mixedUpper := filepath.Join(mixedRoot, "Catalogs")
+		if err := os.MkdirAll(mixedUpper, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mixedLower := filepath.Join(mixedRoot, "catalogs")
+		if _, err := os.Stat(mixedLower); errors.Is(err, os.ErrNotExist) {
+			// On case-sensitive filesystems, alias catalogs -> Catalogs to exercise
+			// the os.SameFile directory-identity branch.
+			if err := os.Symlink(mixedUpper, mixedLower); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mixedAliasRoot := filepath.Join(tmp, "mixed-alias-cache")
+		if err := os.MkdirAll(mixedAliasRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(mixedUpper, filepath.Join(mixedAliasRoot, "catalogs")); err != nil {
+			t.Fatal(err)
+		}
+		mixedLockDirect := catalogLockPath(filepath.Join(mixedLower, "neuro-1234567890ab"))
+		mixedLockUpper := catalogLockPath(filepath.Join(mixedUpper, "neuro-1234567890ab"))
+		mixedLockAlias := catalogLockPath(filepath.Join(mixedAliasRoot, "catalogs", "neuro-1234567890ab"))
+		if mixedLockDirect != mixedLockUpper || mixedLockDirect != mixedLockAlias {
+			t.Fatalf("mixed-case Catalogs aliases split lock paths: direct=%q upper=%q alias=%q", mixedLockDirect, mixedLockUpper, mixedLockAlias)
+		}
+		if wantSuffix := filepath.Join("locks", "neuro-1234567890ab.lock"); !strings.HasSuffix(mixedLockDirect, wantSuffix) {
+			t.Fatalf("expected lock in sibling locks/ dir (%q), got %q", wantSuffix, mixedLockDirect)
+		}
 	}
 
 	// catalogs.json placed inside a folder named "catalogs" must serialize
