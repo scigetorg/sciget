@@ -440,6 +440,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		if err := os.Symlink(filepath.Join(siteHookBinDir, "paraview"), filepath.Join(binDir, "escaped")); err != nil {
 			t.Fatal(err)
 		}
+		t.Setenv("BASH_ENV", "")
 		t.Setenv("MODULEPATH", "/site/other/modules")
 		t.Setenv("LD_LIBRARY_PATH", "/site/stale/lib")
 		t.Setenv("EESSI_MODULE_ROOT", modRoot)
@@ -2938,10 +2939,45 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 		orderUpper := catalogExternalLockPaths(upperAlias)
 		orderLower := catalogExternalLockPaths(lowerAlias)
-		if len(orderUpper) != 2 || len(orderLower) != 2 ||
-			!sameLockFile(orderUpper[0], catalogLockPath(upperAlias)) ||
-			!sameLockFile(orderLower[0], catalogLockPath(lowerAlias)) {
-			t.Fatalf("catalogExternalLockPaths inverted lock order across Cache vs cache: upper=%q lower=%q", orderUpper, orderLower)
+		if len(orderUpper) != 2 || len(orderLower) != 2 {
+			t.Fatalf("expected 2 locks for aliased dirs: upper=%q lower=%q", orderUpper, orderLower)
+		}
+		// Hard-linked lock files across Unicode NFC ("Café") and NFD
+		// ("Cafe\u0301") paths on opposite sides of "Cafz" must order
+		// identically relative to Cafz so APFS Unicode-equivalent spellings
+		// never deadlock.
+		nfcDir := filepath.Join(tmp, "Caf\u00e9", "catalogs")
+		nfdDir := filepath.Join(tmp, "Cafe\u0301", "catalogs")
+		cafzTarget := filepath.Join(tmp, "Cafz", "shared")
+		for _, d := range []string{nfcDir, nfdDir, cafzTarget} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		nfcAlias := filepath.Join(nfcDir, "neuro-1234567890ab")
+		nfdAlias := filepath.Join(nfdDir, "neuro-1234567890ab")
+		if err := os.Symlink(cafzTarget, nfcAlias); err != nil && !errors.Is(err, os.ErrExist) {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(cafzTarget, nfdAlias); err != nil && !errors.Is(err, os.ErrExist) {
+			t.Fatal(err)
+		}
+		nfcSlotLock := catalogLockPath(nfcAlias)
+		nfdSlotLock := catalogLockPath(nfdAlias)
+		if err := os.WriteFile(nfcSlotLock, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !sameLockFile(nfcSlotLock, nfdSlotLock) {
+			if err := os.Link(nfcSlotLock, nfdSlotLock); err != nil {
+				t.Fatal(err)
+			}
+		}
+		orderNFC := catalogExternalLockPaths(nfcAlias)
+		orderNFD := catalogExternalLockPaths(nfdAlias)
+		if len(orderNFC) != 2 || len(orderNFD) != 2 ||
+			!sameLockFile(orderNFC[0], orderNFD[0]) ||
+			!sameLockFile(orderNFC[1], orderNFD[1]) {
+			t.Fatalf("Unicode-equivalent lock order diverged: nfc=%q nfd=%q", orderNFC, orderNFD)
 		}
 		hlDir := filepath.Join(tmp, "lock-identity")
 		if err := os.MkdirAll(hlDir, 0o755); err != nil {

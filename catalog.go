@@ -178,7 +178,27 @@ func isLinkLeaf(path string) bool {
 	return err == nil
 }
 
+type lockIdentityKey struct {
+	kind uint8 // 0 = hard-linked file inode, 1 = parent dir inode + base, 2 = lexical fallback
+	dev  uint64
+	ino  uint64
+	name string
+}
+
 func lockPathLess(a, b string) bool {
+	ka, kb := lockOrderKey(a), lockOrderKey(b)
+	if ka.kind != kb.kind {
+		return ka.kind < kb.kind
+	}
+	if ka.dev != kb.dev {
+		return ka.dev < kb.dev
+	}
+	if ka.ino != kb.ino {
+		return ka.ino < kb.ino
+	}
+	if ka.name != kb.name {
+		return ka.name < kb.name
+	}
 	la, lb := strings.ToLower(a), strings.ToLower(b)
 	if la != lb {
 		return la < lb

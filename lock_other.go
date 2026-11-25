@@ -5,11 +5,16 @@ package main
 import (
 	"errors"
 	"os"
+	"strings"
 	"sync"
 )
 
 func isReadOnlyOrPermError(err error) bool {
 	return errors.Is(err, os.ErrPermission)
+}
+
+func lockOrderKey(p string) lockIdentityKey {
+	return lockIdentityKey{kind: 2, name: strings.ToLower(p)}
 }
 
 type memCatalogLock struct {

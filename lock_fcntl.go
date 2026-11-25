@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -17,6 +18,17 @@ var catalogDirLocks sync.Map
 
 func isReadOnlyOrPermError(err error) bool {
 	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
+}
+
+func lockOrderKey(p string) lockIdentityKey {
+	var st unix.Stat_t
+	if err := unix.Stat(p, &st); err == nil && st.Nlink > 1 {
+		return lockIdentityKey{kind: 0, dev: uint64(st.Dev), ino: uint64(st.Ino)}
+	}
+	if err := unix.Stat(filepath.Dir(p), &st); err == nil {
+		return lockIdentityKey{kind: 1, dev: uint64(st.Dev), ino: uint64(st.Ino), name: filepath.Base(p)}
+	}
+	return lockIdentityKey{kind: 2, name: strings.ToLower(p)}
 }
 
 // lockFileExclusive acquires both an in-process inode mutex and a POSIX fcntl

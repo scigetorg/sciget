@@ -6,12 +6,44 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
 
 func isReadOnlyOrPermError(err error) bool {
 	return errors.Is(err, os.ErrPermission) || errors.Is(err, windows.ERROR_WRITE_PROTECT)
+}
+
+func winFileID(path string, isDir bool) (dev, ino uint64, nlinks uint32, ok bool) {
+	p16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	flags := uint32(windows.FILE_ATTRIBUTE_NORMAL)
+	if isDir {
+		flags = windows.FILE_FLAG_BACKUP_SEMANTICS
+	}
+	h, err := windows.CreateFile(p16, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, flags, 0)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	defer windows.CloseHandle(h)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		return 0, 0, 0, false
+	}
+	return uint64(info.VolumeSerialNumber), (uint64(info.FileIndexHigh) << 32) | uint64(info.FileIndexLow), info.NumberOfLinks, true
+}
+
+func lockOrderKey(p string) lockIdentityKey {
+	if dev, ino, nlinks, ok := winFileID(p, false); ok && nlinks > 1 {
+		return lockIdentityKey{kind: 0, dev: dev, ino: ino}
+	}
+	if dev, ino, _, ok := winFileID(filepath.Dir(p), true); ok {
+		return lockIdentityKey{kind: 1, dev: dev, ino: ino, name: filepath.Base(p)}
+	}
+	return lockIdentityKey{kind: 2, name: strings.ToLower(p)}
 }
 
 // lockFileExclusive acquires an exclusive Windows file lock on lockPath so
