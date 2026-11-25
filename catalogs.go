@@ -176,8 +176,38 @@ func catalogListPath() (string, error) {
 
 // loadCatalogList reads catalogs.json at path. A missing file lists no
 // catalogs. Anything but a JSON array of entries with a valid name, URL
-// and use is an error, as is a name listed twice.
+// and use is an error, as is a name listed twice. When a sibling lock file
+// exists for path, it holds a shared lock across the read so concurrent
+// in-place updates cannot expose a truncated file.
 func loadCatalogList(path string) ([]catalog, error) {
+	readLocked := func() ([]catalog, error) {
+		unlock, _, locked, err := lockCatalogDirShared(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading catalogs: %w", err)
+		}
+		if locked {
+			defer unlock()
+		}
+		data, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading catalogs: %w", err)
+		}
+		catalogs, err := parseCatalogList(data)
+		if err != nil {
+			return nil, fmt.Errorf("reading catalogs %s: %w", path, err)
+		}
+		return catalogs, nil
+	}
+	unlock, _, locked, err := lockCatalogDirShared(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading catalogs: %w", err)
+	}
+	if locked {
+		defer unlock()
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -187,6 +217,11 @@ func loadCatalogList(path string) ([]catalog, error) {
 	}
 	catalogs, err := parseCatalogList(data)
 	if err != nil {
+		if !locked {
+			if _, statErr := os.Stat(catalogLockPath(path)); statErr == nil {
+				return readLocked()
+			}
+		}
 		return nil, fmt.Errorf("reading catalogs %s: %w", path, err)
 	}
 	return catalogs, nil
@@ -264,16 +299,24 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 }
 
 // writeCatalogList writes catalogs to catalogs.json at path, in place, or
-// with system set as writeSystemFile does.
+// with system set as writeSystemFile does. User writes hold an exclusive lock
+// on path's sibling lock file so concurrent readers never observe O_TRUNC.
 func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	if catalogs == nil {
 		catalogs = []catalog{} // written as [], not null
 	}
-	write := writeJSONFile
 	if system {
-		write = writeSystemFile
+		if err := writeSystemFile(path, catalogs); err != nil {
+			return fmt.Errorf("writing catalogs: %w", err)
+		}
+		return nil
 	}
-	if err := write(path, catalogs); err != nil {
+	lk, err := lockCatalogDir(path)
+	if err != nil {
+		return fmt.Errorf("writing catalogs: %w", err)
+	}
+	defer lk.unlock()
+	if err := writeJSONFile(path, catalogs); err != nil {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
 	return nil

@@ -26,14 +26,17 @@ var (
 
 // eessiStrictLaunchScript loads the exact requested EESSI stack and exact
 // module from the declared CVMFS repository alone (clearing any inherited
-// MODULEPATH and enforcing LMOD_EXACT_MATCH=yes plus LOADEDMODULES verification)
-// without falling back to an unversioned or prefix-matched module, then execs
-// the validated command with `--`.
+// MODULEPATH, stripping site/host_injections module paths added by EESSI
+// bootstrap, enforcing LMOD_EXACT_MATCH=yes plus LOADEDMODULES and _LMFILES_
+// verification, and requiring an accelerator modulepath/modulefile for --gpu)
+// without falling back to an unversioned, CPU/GPU-mismatched, site, or host
+// binary, then execs the validated command with `--`.
 const eessiStrictLaunchScript = `set -euo pipefail
-modroot="$1"
+modroot="${1%/}"
 stack="$2"
 mod="$3"
-shift 3
+want_gpu="$4"
+shift 4
 if [ ! -d "${modroot}" ]; then
     echo "sciget eessi: EESSI repository is not mounted at ${modroot}" >&2
     exit 1
@@ -54,15 +57,66 @@ fi
 export FPATH="${FPATH:-}"
 source "${lmod_init}"
 module --force purge >/dev/null
-# Clear loader/runtime search paths and reset PATH to a minimal system path
-# so a broken or deleted site modulefile cannot leak stale binaries or
-# libraries into EESSI launches before EESSI/${stack} and ${mod} load.
+# Clear loader/runtime search paths, site EESSI overrides, and reset PATH to a
+# minimal system path so broken site modulefiles or site overrides cannot leak
+# binaries, libraries, or shadow modules into EESSI launches.
 unset LD_LIBRARY_PATH LD_PRELOAD LIBRARY_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH PKG_CONFIG_PATH CMAKE_PREFIX_PATH PYTHONPATH
+unset EESSI_SITE_INSTALL EESSI_SITE_SOFTWARE_PATH EESSI_SITE_MODULEPATH
 export PATH="/usr/bin:/bin"
 export MODULEPATH="${modroot}"
 export LMOD_EXACT_MATCH=yes
 export EESSI_MODULE_QUIET_LOAD=1
 module load "EESSI/${stack}" >/dev/null
+case ":${LOADEDMODULES:-}:" in
+*":EESSI/${stack}:"*) ;;
+*)
+    echo "sciget eessi: Lmod loaded ${LOADEDMODULES:-<none>} instead of exact stack EESSI/${stack}" >&2
+    exit 1
+    ;;
+esac
+# Restrict MODULEPATH after loading EESSI/${stack} strictly to the selected
+# EESSI repository and stack so site module directories or host_injections
+# prepended by the EESSI bootstrap cannot shadow ${mod}. For CPU builds, also
+# exclude accelerator module roots; for GPU builds, require an accelerator root.
+if [[ "${modroot}" == */init/modules ]]; then
+    eessi_sw_prefix="${modroot%/init/modules}/versions/${stack}/software/"
+else
+    eessi_sw_prefix="${modroot}/"
+fi
+filtered_mp=""
+has_accel_mp="0"
+IFS=':' read -r -a mp_parts <<<"${MODULEPATH:-}"
+for p in "${mp_parts[@]+"${mp_parts[@]}"}"; do
+    p="${p%/}"
+    case "${p}" in
+    ""|*"/../"*|*"/.."|"../"*|"..") continue ;;
+    esac
+    if [ "${p}" = "${modroot}" ]; then
+        filtered_mp="${filtered_mp:+${filtered_mp}:}${p}"
+        continue
+    fi
+    case "${p}" in
+    "${eessi_sw_prefix}"*)
+        rel_p="${p#"${eessi_sw_prefix}"}"
+        case "/${rel_p}/" in
+        */accel/*)
+            if [ "${want_gpu}" = "1" ]; then
+                has_accel_mp="1"
+                filtered_mp="${filtered_mp:+${filtered_mp}:}${p}"
+            fi
+            ;;
+        *)
+            filtered_mp="${filtered_mp:+${filtered_mp}:}${p}"
+            ;;
+        esac
+        ;;
+    esac
+done
+if [ "${want_gpu}" = "1" ] && [ "${has_accel_mp}" != "1" ]; then
+    echo "sciget eessi: GPU build ${mod} requires an active EESSI accelerator modulepath under ${eessi_sw_prefix}" >&2
+    exit 1
+fi
+export MODULEPATH="${filtered_mp}"
 module load "${mod}" >/dev/null
 case ":${LOADEDMODULES:-}:" in
 *":EESSI/${stack}:"*) ;;
@@ -78,6 +132,50 @@ case ":${LOADEDMODULES:-}:" in
     exit 1
     ;;
 esac
+# Verify via _LMFILES_ that ${mod} resolved from the allowed EESSI software root
+# (and from an accelerator tree when --gpu was requested, never falling back to a
+# same-named CPU or site module).
+IFS=':' read -r -a lm_mods <<<"${LOADEDMODULES:-}"
+IFS=':' read -r -a lm_files <<<"${_LMFILES_:-}"
+mod_file=""
+for i in "${!lm_mods[@]}"; do
+    if [ "${lm_mods[$i]}" = "${mod}" ]; then
+        mod_file="${lm_files[$i]:-}"
+        break
+    fi
+done
+if [ -z "${mod_file}" ]; then
+    echo "sciget eessi: Lmod did not report modulefile path (_LMFILES_) for ${mod}" >&2
+    exit 1
+fi
+case "${mod_file}" in
+*"/../"*|*"/.."|"../"*|"..")
+    echo "sciget eessi: refusing modulefile path with traversal: ${mod_file}" >&2
+    exit 1
+    ;;
+"${eessi_sw_prefix}"*) ;;
+*)
+    echo "sciget eessi: refusing module ${mod} loaded outside EESSI root ${eessi_sw_prefix}: ${mod_file}" >&2
+    exit 1
+    ;;
+esac
+rel_mod_file="${mod_file#"${eessi_sw_prefix}"}"
+if [ "${want_gpu}" = "1" ]; then
+    case "/${rel_mod_file}/" in
+    */accel/*) ;;
+    *)
+        echo "sciget eessi: --gpu requested accelerator module ${mod}, but Lmod loaded CPU module ${mod_file}" >&2
+        exit 1
+        ;;
+    esac
+else
+    case "/${rel_mod_file}/" in
+    */accel/*)
+        echo "sciget eessi: CPU build ${mod} unexpectedly resolved to accelerator module ${mod_file}" >&2
+        exit 1
+        ;;
+    esac
+fi
 cmd_name="$1"
 shift
 case "${cmd_name}" in
@@ -747,7 +845,11 @@ func runEESSILaunch(b eessiBuild, extraArgs []string, stdin io.Reader, stdout, s
 	if err != nil {
 		return fmt.Errorf("bash not found on PATH; load the module directly with:\n  %s", b.loadCommand())
 	}
-	argv := []string{"-c", eessiStrictLaunchScript, "sciget-eessi-launch", b.moduleRoot(), b.stack, b.module}
+	wantGPU := "0"
+	if b.gpu {
+		wantGPU = "1"
+	}
+	argv := []string{"-c", eessiStrictLaunchScript, "sciget-eessi-launch", b.moduleRoot(), b.stack, b.module, wantGPU}
 	argv = append(argv, b.exec...)
 	argv = append(argv, extraArgs...)
 	cmd := exec.Command(bashPath, argv...)
