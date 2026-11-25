@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -97,6 +99,57 @@ func readContainers() ([]container, error) {
 	return all, nil
 }
 
+// catalogLock is an exclusive lock held on a catalog's external lock file.
+// gen is the monotonic generation stored in the lock file when acquired;
+// bump increments it in place before the lock is released so any delayed
+// refresh that started against an older generation detects the change.
+type catalogLock struct {
+	gen    uint64
+	bump   func() error
+	unlock func()
+}
+
+func readLockFileGen(f *os.File) (uint64, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return 0, err
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return 0, nil
+	}
+	gen, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid catalog lock generation: %w", err)
+	}
+	return gen, nil
+}
+
+func writeLockFileGen(f *os.File, gen uint64) error {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(f, "%d\n", gen)
+	return err
+}
+
+func readCatalogLockGen(dir string) (uint64, error) {
+	unlock, gen, locked, err := lockCatalogDirShared(dir)
+	if err != nil {
+		return 0, err
+	}
+	if locked {
+		unlock()
+	}
+	return gen, nil
+}
+
 // catalogLockPath returns the advisory lock file path for cache directory dir.
 // The lock lives outside dir (in a sibling locks/ directory under cache_dir
 // when dir is under catalogs/, or beside dir otherwise) so deleting dir during
@@ -132,7 +185,7 @@ func checkCatalogClean(dir string) error {
 }
 
 func readCatalogSnapshotLocked(dir string) ([]container, []string, error) {
-	unlock, locked, err := lockCatalogDirShared(dir)
+	unlock, _, locked, err := lockCatalogDirShared(dir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -163,7 +216,7 @@ func readCatalogSnapshotLocked(dir string) ([]container, []string, error) {
 func readCatalogSnapshot(dir string) ([]container, []string, error) {
 	beforeCatalogSharedLock(dir)
 	lockPath := catalogLockPath(dir)
-	unlock, locked, err := lockCatalogDirShared(dir)
+	unlock, _, locked, err := lockCatalogDirShared(dir)
 	if err != nil {
 		return nil, nil, err
 	}

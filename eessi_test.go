@@ -177,8 +177,8 @@ func TestParseEESSICatalog(t *testing.T) {
 
 func TestRefreshAndEESSICommands(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	setCacheHome(t, filepath.Join(tmp, "cache"))
+	setConfigHome(t, filepath.Join(tmp, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
 	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
 
@@ -506,8 +506,8 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 
 func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	setCacheHome(t, filepath.Join(tmp, "cache"))
+	setConfigHome(t, filepath.Join(tmp, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
 	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
 
@@ -784,8 +784,8 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 
 func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	setCacheHome(t, filepath.Join(tmp, "cache"))
+	setConfigHome(t, filepath.Join(tmp, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
 	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
 
@@ -844,8 +844,8 @@ func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
 
 func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	setCacheHome(t, filepath.Join(tmp, "cache"))
+	setConfigHome(t, filepath.Join(tmp, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
 	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(tmp, "no-system"))
 
@@ -938,6 +938,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				select {
 				case r := <-readerDone:
 					t.Errorf("concurrent readContainers bypassed lock during commit: %+v", r)
+					readerDone <- r
 				case <-time.After(25 * time.Millisecond):
 				}
 			}
@@ -1061,10 +1062,74 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	if code := run([]string{"catalog", "add", "neuro", catFile}, &stdout, &stderr); code != 0 {
 		t.Fatalf("re-add failed (%d): %s", code, stderr.String())
 	}
+	// Before the re-added catalog is refreshed (its external lock survives removal,
+	// while its cache directory does not exist yet), EESSI commands must skip it
+	// cleanly instead of failing.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"eessi", "find"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("eessi find must skip unrefreshed re-added catalog (%d): %s", code, stderr.String())
+	}
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("re-refresh failed (%d): %s", code, stderr.String())
+	}
+
+	// A delayed refresh that downloaded stale data before a remove/re-add and
+	// newer refresh must refuse to overwrite the newer cache.
+	staleEESSI := strings.Replace(testEESSIJSON, `"ParaView/6.0.1-foss-2025b"`, `"ParaView/5.0.1-foss-2025b"`, 1)
+	catMetaBytes := []byte(`{"schemaVersion": 1, "appJsonUrl": "apps.json", "eessiCatalogUrl": "eessi.json", "eessi_stacks": ["2025.06"]}`)
+	delayedPaused := make(chan struct{})
+	resumeDelayed := make(chan struct{})
+	delayedErr := make(chan error, 1)
+	go func() {
+		_, _, err := refreshCatalog(func(link string) ([]byte, string, error) {
+			switch {
+			case strings.HasSuffix(link, "cat.json"):
+				close(delayedPaused)
+				<-resumeDelayed
+				return catMetaBytes, link, nil
+			case strings.HasSuffix(link, "apps.json"):
+				return []byte(appsV1), link, nil
+			case strings.HasSuffix(link, "eessi.json"):
+				return []byte(staleEESSI), link, nil
+			default:
+				return nil, "", os.ErrNotExist
+			}
+		}, used[0], cacheDir)
+		delayedErr <- err
+	}()
+	<-delayedPaused
+	if err := removeCatalogCache(cacheDir); err != nil {
+		close(resumeDelayed)
+		t.Fatalf("removeCatalogCache failed: %v", err)
+	}
+	if _, _, err := refreshCatalog(func(link string) ([]byte, string, error) {
+		switch {
+		case strings.HasSuffix(link, "cat.json"):
+			return catMetaBytes, link, nil
+		case strings.HasSuffix(link, "apps.json"):
+			return []byte(appsV1), link, nil
+		case strings.HasSuffix(link, "eessi.json"):
+			return []byte(testEESSIJSON), link, nil
+		default:
+			return nil, "", os.ErrNotExist
+		}
+	}, used[0], cacheDir); err != nil {
+		close(resumeDelayed)
+		t.Fatalf("newer refresh failed: %v", err)
+	}
+	close(resumeDelayed)
+	if err := <-delayedErr; err == nil || !strings.Contains(err.Error(), "catalog cache changed during refresh") {
+		t.Fatalf("delayed refresh must fail instead of overwriting newer cache: err=%v", err)
+	}
+	gotEESSI, err = os.ReadFile(eessiPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gotEESSI), "ParaView/6.0.1-foss-2025b") || strings.Contains(string(gotEESSI), "5.0.1") {
+		t.Fatalf("delayed refresh reverted newer cache: %s", string(gotEESSI))
 	}
 	// Restore v2 in srcDir for the unreadable-file subtest below.
 	if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV2), 0o644); err != nil {

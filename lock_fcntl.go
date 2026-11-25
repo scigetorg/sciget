@@ -16,7 +16,7 @@ var catalogDirLocks sync.Map
 
 // lockCatalogDir acquires both an in-process mutex and a POSIX fcntl write
 // lock for dir on Unix platforms without BSD flock (such as Solaris/illumos).
-func lockCatalogDir(dir string) (func(), error) {
+func lockCatalogDir(dir string) (*catalogLock, error) {
 	lockPath := catalogLockPath(dir)
 	v, _ := catalogDirLocks.LoadOrStore(lockPath, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
@@ -48,18 +48,34 @@ func lockCatalogDir(dir string) (func(), error) {
 		mu.Unlock()
 		return nil, err
 	}
-	return func() {
+	gen, err := readLockFileGen(f)
+	if err != nil {
 		unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
 		_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
 		_ = f.Close()
 		mu.Unlock()
-	}, nil
+		return nil, err
+	}
+	res := &catalogLock{
+		gen: gen,
+		unlock: func() {
+			unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
+			_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
+			_ = f.Close()
+			mu.Unlock()
+		},
+	}
+	res.bump = func() error {
+		res.gen++
+		return writeLockFileGen(f, res.gen)
+	}
+	return res, nil
 }
 
 // lockCatalogDirShared acquires both an in-process mutex and a shared POSIX
 // fcntl read lock when a lock file exists. When the lock file does not exist
 // yet, it returns ok=false.
-func lockCatalogDirShared(dir string) (func(), bool, error) {
+func lockCatalogDirShared(dir string) (func(), uint64, bool, error) {
 	lockPath := catalogLockPath(dir)
 	v, _ := catalogDirLocks.LoadOrStore(lockPath, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
@@ -68,11 +84,11 @@ func lockCatalogDirShared(dir string) (func(), bool, error) {
 	f, err := os.Open(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		mu.Unlock()
-		return func() {}, false, nil
+		return func() {}, 0, false, nil
 	}
 	if err != nil {
 		mu.Unlock()
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	lk := unix.Flock_t{Type: unix.F_RDLCK, Whence: 0, Start: 0, Len: 0}
 	for {
@@ -84,12 +100,20 @@ func lockCatalogDirShared(dir string) (func(), bool, error) {
 	if err != nil {
 		f.Close()
 		mu.Unlock()
-		return nil, false, err
+		return nil, 0, false, err
+	}
+	gen, err := readLockFileGen(f)
+	if err != nil {
+		unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
+		_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
+		_ = f.Close()
+		mu.Unlock()
+		return nil, 0, false, err
 	}
 	return func() {
 		unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
 		_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
 		_ = f.Close()
 		mu.Unlock()
-	}, true, nil
+	}, gen, true, nil
 }

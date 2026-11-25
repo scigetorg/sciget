@@ -361,14 +361,17 @@ func removeCatalog(w io.Writer, name string, system bool) error {
 }
 
 // removeCatalogCache deletes a catalog's cache directory under its external
-// lock so a concurrent refresh cannot race cache removal or roll back into a
-// newly recreated directory of the same path.
+// lock and bumps the lock generation so any delayed refresh started before
+// removal refuses to overwrite or recreate the cache.
 func removeCatalogCache(dir string) error {
-	unlock, err := lockCatalogDir(dir)
+	lk, err := lockCatalogDir(dir)
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer lk.unlock()
+	if err := lk.bump(); err != nil {
+		return err
+	}
 	return os.RemoveAll(dir)
 }
 

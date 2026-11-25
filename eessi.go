@@ -364,14 +364,17 @@ func readEESSIBuilds() ([]eessiBuild, error) {
 	seen := map[string]bool{}
 	for catIdx, cat := range used {
 		dir := cat.dir(cacheDir)
-		unlock, locked, err := lockCatalogDirShared(dir)
+		unlock, _, locked, err := lockCatalogDirShared(dir)
 		if err != nil {
 			return nil, &catalogError{name: cat.Name, err: err}
 		}
 		if !locked {
 			continue
 		}
-		if err := checkCatalogClean(dir); err != nil {
+		if err := checkCatalogClean(dir); errors.Is(err, os.ErrNotExist) {
+			unlock()
+			continue
+		} else if err != nil {
 			unlock()
 			return nil, &catalogError{name: cat.Name, err: err}
 		}

@@ -98,9 +98,18 @@ func refreshCatalogs() ([]refreshResult, error) {
 	}
 	client.CheckRedirect = httpsOnly // as the catalog URL itself must be
 	read := onceReader(client, maxSize)
+	startGens := make([]uint64, len(used))
+	startErrs := make([]error, len(used))
+	for i, cat := range used {
+		startGens[i], startErrs[i] = readCatalogLockGen(cat.dir(cacheDir))
+	}
 	var results []refreshResult
-	for _, cat := range used {
-		changed, empty, err := refreshCatalog(read, cat, cat.dir(cacheDir))
+	for i, cat := range used {
+		if startErrs[i] != nil {
+			results = append(results, refreshResult{name: cat.Name, err: fmt.Errorf("reading catalog lock: %w", startErrs[i])})
+			continue
+		}
+		changed, empty, err := refreshCatalogAt(read, cat, cat.dir(cacheDir), startGens[i])
 		results = append(results, refreshResult{name: cat.Name, changed: changed, empty: empty, err: err})
 	}
 	return results, nil
@@ -123,6 +132,14 @@ func newHTTPClient(cfg config) (*http.Client, error) {
 // whether the catalog is empty. Any failure leaves the copy as it was.
 // Each success also writes the URL to dir's url file.
 func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog, dir string) (changed, empty bool, err error) {
+	startGen, err := readCatalogLockGen(dir)
+	if err != nil {
+		return false, false, fmt.Errorf("reading catalog lock: %w", err)
+	}
+	return refreshCatalogAt(read, cat, dir, startGen)
+}
+
+func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalog, dir string, startGen uint64) (changed, empty bool, err error) {
 	data, base, err := read(cat.URL)
 	if err != nil {
 		return false, false, err
@@ -190,11 +207,14 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			return false, false, errors.New("downloaded catalog is invalid: no containers")
 		}
 	}
-	unlock, err := lockCatalogDir(dir)
+	lk, err := lockCatalogDir(dir)
 	if err != nil {
 		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
-	defer unlock()
+	defer lk.unlock()
+	if lk.gen != startGen {
+		return false, false, errors.New("catalog cache changed during refresh; run 'sciget refresh' again")
+	}
 	if needsEmptyAppsCheck {
 		if !cachedAppsIsEmpty(dir) {
 			return false, false, errors.New("downloaded catalog is invalid: no containers")
@@ -204,6 +224,9 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return false, false, fmt.Errorf("writing catalog: %w", err)
 		}
+	}
+	if err := lk.bump(); err != nil {
+		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
 	// 0o600, as catalogs.json: a query string may carry a token.
 	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
