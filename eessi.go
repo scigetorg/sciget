@@ -341,6 +341,13 @@ func readEESSIBuilds() ([]eessiBuild, error) {
 		if !locked {
 			continue
 		}
+		if baks, err := filepath.Glob(filepath.Join(dir, "*.bak")); err != nil {
+			unlock()
+			return nil, &catalogError{name: cat.Name, err: err}
+		} else if len(baks) > 0 {
+			unlock()
+			return nil, &catalogError{name: cat.Name, err: errors.New("catalog cache is incomplete after a failed refresh; run 'sciget refresh' to recover")}
+		}
 		var allowedStacks []string
 		catData, err := os.ReadFile(filepath.Join(dir, "catalog.json"))
 		if errors.Is(err, os.ErrNotExist) {

@@ -259,7 +259,7 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		}
 		var bakPath string
 		if oldErr == nil {
-			bakPath, err = stageCatalog(path+".bak", old, file.mode)
+			bakPath, err = stageTemp(dir, file.name+".*.bak", old, file.mode)
 			if err != nil {
 				os.Remove(tmpPath)
 				cleanupStaged()
@@ -333,6 +333,11 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		changed = true
 	}
 	cleanupStaged()
+	if oldBaks, _ := filepath.Glob(filepath.Join(dir, "*.bak")); len(oldBaks) > 0 {
+		for _, p := range oldBaks {
+			_ = os.Remove(p)
+		}
+	}
 	return changed, empty, nil
 }
 
@@ -381,10 +386,10 @@ func cachedAppsIsEmpty(dir string) bool {
 	return err == nil && len(containers) == 0
 }
 
-// stageCatalog writes data, with mode, to a new temporary file beside path
-// and returns its path ready to be renamed to path.
-func stageCatalog(path string, data []byte, mode os.FileMode) (string, error) {
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.incomplete")
+// stageTemp writes data, with mode, to a new temporary file in dir matching
+// pattern and returns its path.
+func stageTemp(dir, pattern string, data []byte, mode os.FileMode) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return "", err
 	}
@@ -400,6 +405,12 @@ func stageCatalog(path string, data []byte, mode os.FileMode) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// stageCatalog writes data, with mode, to a new temporary file beside path
+// and returns its path ready to be renamed to path.
+func stageCatalog(path string, data []byte, mode os.FileMode) (string, error) {
+	return stageTemp(filepath.Dir(path), filepath.Base(path)+".*.incomplete", data, mode)
 }
 
 // writeCatalog writes data, with mode, to a new temporary file beside path

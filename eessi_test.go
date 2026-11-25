@@ -895,4 +895,59 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	if string(gotApps) != appsV1 {
 		t.Fatalf("apps.json modified on failed unreadable refresh: got %s, want %s", string(gotApps), appsV1)
 	}
+
+	// If the directory becomes read-only after eessi.json is renamed and before
+	// catalog.json is renamed (so rollback also fails), refresh reports the
+	// rollback failure and EESSI commands refuse to serve the uncommitted build
+	// until a later refresh recovers the cache.
+	if os.Geteuid() != 0 {
+		catV2 := `{"schemaVersion": 1, "title": "v2", "appJsonUrl": "apps.json", "eessiCatalogUrl": "eessi.json", "eessi_stacks": ["2025.06"]}`
+		if err := os.WriteFile(catFile, []byte(catV2), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		eessiUncommitted := strings.Replace(testEESSIJSON, `"ParaView/6.0.1-foss-2025b"`, `"ParaView/9.9.9-uncommitted"`, 1)
+		if err := os.WriteFile(filepath.Join(srcDir, "eessi.json"), []byte(eessiUncommitted), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		catPath := filepath.Join(cacheDir, "catalog.json")
+		t.Cleanup(func() { _ = os.Chmod(cacheDir, 0o755) })
+		renameCatalogFile = func(oldpath, newpath string) error {
+			err := os.Rename(oldpath, newpath)
+			if err == nil && newpath == eessiPath {
+				_ = os.Chmod(cacheDir, 0o555)
+			}
+			return err
+		}
+		_ = catPath
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
+			t.Fatalf("expected refresh to fail when cache dir turns read-only before catalog.json rename")
+		}
+		renameCatalogFile = oldRename
+		if !strings.Contains(stderr.String(), "rollback incomplete") {
+			t.Fatalf("expected rollback failure report in stderr: %s", stderr.String())
+		}
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find", "paraview"}, &stdout, &stderr); code == 0 || strings.Contains(stdout.String(), "9.9.9-uncommitted") {
+			t.Fatalf("eessi find must refuse to serve uncommitted build after failed rollback: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+		}
+		if err := os.Chmod(cacheDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("recovery refresh failed (%d): %s", code, stderr.String())
+		}
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find", "paraview"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "9.9.9-uncommitted") {
+			t.Fatalf("eessi find should work cleanly after recovery refresh: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+		}
+	}
 }
