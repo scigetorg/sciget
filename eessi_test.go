@@ -2210,6 +2210,164 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "neuro", URL: catFile}, symCatDir, preSymGen, func() (bool, error) { return true, nil }); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
 			t.Fatalf("delayed refresh after removing symlinked leaf must fail on generation mismatch, got err=%v", err)
 		}
+
+		// When an upgraded cache has a slot lock but no target lock yet, a
+		// symlink reader holding only the slot lock must detect a direct
+		// writer creating the target lock and retry under both locks rather
+		// than reporting an incomplete cache.
+		partialSlotRoot := filepath.Join(tmp, "partial-slot-cache", "catalogs")
+		partialTargetDir := filepath.Join(tmp, "partial-target-parent", "shared-neuro")
+		for _, d := range []string{partialSlotRoot, partialTargetDir} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(partialTargetDir, "apps.json"), []byte(`{"fsl":{"apps":{"fsl 6.0.7":{"version":"20240101","image":"fsl_6.0.7"}}}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		partialAliasDir := filepath.Join(partialSlotRoot, "neuro-1234567890ab")
+		if err := os.Symlink(partialTargetDir, partialAliasDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(catalogLockPath(partialAliasDir), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		partialReadPaused := make(chan struct{})
+		partialReadResume := make(chan struct{})
+		prevBeforeSnapRead := beforeCatalogSnapshotRead
+		beforeCatalogSnapshotRead = func(dir string) {
+			if dir == partialAliasDir {
+				close(partialReadPaused)
+				<-partialReadResume
+			}
+		}
+		t.Cleanup(func() { beforeCatalogSnapshotRead = prevBeforeSnapRead })
+		partialReaderDone := make(chan aliasSnapResult, 1)
+		go func() {
+			c, _, err := readCatalogSnapshot(partialAliasDir)
+			partialReaderDone <- aliasSnapResult{containers: c, err: err}
+		}()
+		<-partialReadPaused
+		beforeCatalogSnapshotRead = prevBeforeSnapRead
+		// Direct writer now creates the target lock and stages a temp file.
+		firstDirectLk, err := lockCatalogDir(partialTargetDir)
+		if err != nil {
+			close(partialReadResume)
+			<-partialReaderDone
+			t.Fatalf("first direct lockCatalogDir failed: %v", err)
+		}
+		partialInc := filepath.Join(partialTargetDir, "apps.json.55555.incomplete")
+		if err := os.WriteFile(partialInc, []byte("partial"), 0o600); err != nil {
+			firstDirectLk.unlock()
+			close(partialReadResume)
+			<-partialReaderDone
+			t.Fatal(err)
+		}
+		close(partialReadResume)
+		select {
+		case res := <-partialReaderDone:
+			os.Remove(partialInc)
+			firstDirectLk.unlock()
+			t.Fatalf("symlink reader raced first direct writer instead of waiting on target lock: containers=%v err=%v", res.containers, res.err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		if err := os.Remove(partialInc); err != nil {
+			firstDirectLk.unlock()
+			t.Fatal(err)
+		}
+		firstDirectLk.unlock()
+		if res := <-partialReaderDone; res.err != nil || len(res.containers) != 1 || res.containers[0].tool != "fsl" {
+			t.Fatalf("symlink reader failed after first direct writer unlocked: containers=%v err=%v", res.containers, res.err)
+		}
+
+		// Removing an alias symlink whose target lives under a read-only
+		// parent (0555) must NOT unlink the target's in-dir .lock or lose its
+		// generation.
+		if os.Geteuid() != 0 {
+			roAliasTargetParent := filepath.Join(tmp, "ro-alias-target-parent")
+			roAliasTargetDir := filepath.Join(roAliasTargetParent, "target-neuro")
+			roAliasSlotParent := filepath.Join(tmp, "ro-alias-slots", "catalogs")
+			for _, d := range []string{roAliasTargetDir, roAliasSlotParent} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Chmod(roAliasTargetParent, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(roAliasTargetParent, 0o755) })
+			if changed, _, err := refreshCatalog(fileRead, catalog{Name: "direct", URL: catFile}, roAliasTargetDir); err != nil || !changed {
+				t.Fatalf("refresh of target under 0555 parent failed: changed=%v err=%v", changed, err)
+			}
+			roAliasLink := filepath.Join(roAliasSlotParent, "alias-1234567890ab")
+			if err := os.Symlink(roAliasTargetDir, roAliasLink); err != nil {
+				t.Fatal(err)
+			}
+			if err := removeCatalogCache(roAliasLink); err != nil {
+				t.Fatalf("removeCatalogCache on alias with 0555 target parent failed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(roAliasTargetDir, ".lock")); err != nil {
+				t.Fatalf("removing alias must preserve target in-dir .lock: %v", err)
+			}
+			if gen, err := readCatalogLockGen(roAliasTargetDir); err != nil || gen != 1 {
+				t.Fatalf("target generation must remain 1 after alias removal, got gen=%d err=%v", gen, err)
+			}
+			if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "direct", URL: catFile}, roAliasTargetDir, 0, nil); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
+				t.Fatalf("delayed refresh on target must still see generation 1, got err=%v", err)
+			}
+		}
+
+		// Two enabled catalogs sharing a cache directory via symlink must both
+		// refresh cleanly on consecutive 'sciget refresh' runs, and removing
+		// the direct registration must preserve the shared cache while the
+		// alias remains registered.
+		t.Run("shared cache refresh and direct removal with remaining alias", func(t *testing.T) {
+			subTmp := t.TempDir()
+			isolateTestEnv(t, subTmp)
+			layers, err := readCatalogLayers()
+			if err != nil {
+				t.Fatal(err)
+			}
+			directCat := catalog{Name: "direct", URL: catFile, Use: true}
+			aliasCat := catalog{Name: "alias", URL: catFile, Use: true}
+			if err := writeCatalogList(layers.userPath, []catalog{directCat, aliasCat}, false); err != nil {
+				t.Fatal(err)
+			}
+			directDir := directCat.dir(layers.cacheDir)
+			aliasDir := aliasCat.dir(layers.cacheDir)
+			if err := os.MkdirAll(directDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(directDir, aliasDir); err != nil {
+				t.Fatal(err)
+			}
+			for pass := 1; pass <= 2; pass++ {
+				var out, errBuf bytes.Buffer
+				if code := run([]string{"refresh"}, &out, &errBuf); code != 0 {
+					t.Fatalf("sciget refresh pass %d with shared cache failed: code=%d stdout=%q stderr=%q", pass, code, out.String(), errBuf.String())
+				}
+			}
+			var out, errBuf bytes.Buffer
+			if code := run([]string{"catalog", "remove", "direct"}, &out, &errBuf); code != 0 {
+				t.Fatalf("catalog remove direct failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+			}
+			if _, err := os.Stat(filepath.Join(aliasDir, "apps.json")); err != nil {
+				t.Fatalf("removing direct must preserve shared cache for remaining alias: %v", err)
+			}
+			out.Reset()
+			errBuf.Reset()
+			if code := run([]string{"find"}, &out, &errBuf); code != 0 || !strings.Contains(out.String(), "fsl") {
+				t.Fatalf("sciget find via remaining alias failed after direct removal: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+			}
+			out.Reset()
+			errBuf.Reset()
+			if code := run([]string{"catalog", "remove", "alias"}, &out, &errBuf); code != 0 {
+				t.Fatalf("catalog remove alias failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+			}
+			if _, err := os.Lstat(aliasDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("removing alias must unlink its symlink, lstat err=%v", err)
+			}
+		})
 	}
 
 	// First creation of catalogs.json on filesystems without hard links must

@@ -380,7 +380,16 @@ func removeCatalogCache(dir string) error {
 		return err
 	}
 	defer lk.unlock()
-	registered, err := catalogDirRegistered(dir)
+	isSymlinkLeaf := false
+	if info, statErr := os.Lstat(filepath.Clean(dir)); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		isSymlinkLeaf = true
+	}
+	var registered bool
+	if isSymlinkLeaf {
+		registered, err = catalogDirRegistered(dir)
+	} else {
+		registered, err = catalogTargetRegistered(dir)
+	}
 	if err != nil {
 		return err
 	}

@@ -569,6 +569,99 @@ func sortEESSIBuilds(builds []eessiBuild) {
 	})
 }
 
+func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, ok bool, err error) {
+	for range 4 {
+		unlock, _, locked, missing, lockErr := lockCatalogDirSharedWithMissing(dir)
+		if lockErr != nil {
+			return nil, nil, false, lockErr
+		}
+		if !locked {
+			return nil, nil, false, nil
+		}
+		retryIfMissingAppeared := func() (bool, error) {
+			if len(missing) == 0 {
+				return false, nil
+			}
+			return anyPathExists(missing)
+		}
+		if cleanErr := checkCatalogClean(dir); errors.Is(cleanErr, os.ErrNotExist) {
+			unlock()
+			if appeared, _ := retryIfMissingAppeared(); appeared {
+				continue
+			}
+			return nil, nil, false, nil
+		} else if cleanErr != nil {
+			unlock()
+			if appeared, _ := retryIfMissingAppeared(); appeared {
+				continue
+			}
+			return nil, nil, false, cleanErr
+		}
+		catData, readErr := os.ReadFile(filepath.Join(dir, "catalog.json"))
+		if errors.Is(readErr, os.ErrNotExist) {
+			unlock()
+			if appeared, _ := retryIfMissingAppeared(); appeared {
+				continue
+			}
+			return nil, nil, false, nil
+		}
+		if readErr != nil {
+			unlock()
+			if appeared, _ := retryIfMissingAppeared(); appeared {
+				continue
+			}
+			return nil, nil, false, readErr
+		}
+		if _, parseErr := parseCatalogJSON(catData); parseErr != nil {
+			unlock()
+			if appeared, _ := retryIfMissingAppeared(); appeared {
+				continue
+			}
+			return nil, nil, false, parseErr
+		}
+		meta, metaErr := parseCatalogEESSI(catData)
+		if metaErr != nil {
+			unlock()
+			if appeared, _ := retryIfMissingAppeared(); appeared {
+				continue
+			}
+			return nil, nil, false, metaErr
+		}
+		if meta.EESSICatalogURL == "" {
+			unlock()
+			if appeared, statErr := retryIfMissingAppeared(); statErr != nil {
+				return nil, nil, false, statErr
+			} else if appeared {
+				continue
+			}
+			return nil, nil, false, nil
+		}
+		raw, eessiErr := os.ReadFile(filepath.Join(dir, "eessi.json"))
+		unlock()
+		if errors.Is(eessiErr, os.ErrNotExist) {
+			if appeared, statErr := retryIfMissingAppeared(); statErr != nil {
+				return nil, nil, false, statErr
+			} else if appeared {
+				continue
+			}
+			return nil, nil, false, nil
+		}
+		if eessiErr != nil {
+			if appeared, _ := retryIfMissingAppeared(); appeared {
+				continue
+			}
+			return nil, nil, false, eessiErr
+		}
+		if appeared, statErr := retryIfMissingAppeared(); statErr != nil {
+			return nil, nil, false, statErr
+		} else if appeared {
+			continue
+		}
+		return raw, meta.EESSIStacks, true, nil
+	}
+	return nil, nil, false, errors.New("catalog locks changed during read; run again")
+}
+
 // readEESSIBuilds reads cached eessi.json files from every catalog in use.
 // Catalogs without an eessi.json (or whose catalog.json declares no
 // eessiCatalogUrl) are skipped cleanly. Earlier catalogs in use take precedence.
@@ -581,53 +674,12 @@ func readEESSIBuilds() ([]eessiBuild, error) {
 	seen := map[string]bool{}
 	for catIdx, cat := range used {
 		dir := cat.dir(cacheDir)
-		unlock, _, locked, err := lockCatalogDirShared(dir)
+		data, allowedStacks, ok, err := readCatalogEESSISnapshot(dir)
 		if err != nil {
 			return nil, &catalogError{name: cat.Name, err: err}
 		}
-		if !locked {
+		if !ok {
 			continue
-		}
-		if err := checkCatalogClean(dir); errors.Is(err, os.ErrNotExist) {
-			unlock()
-			continue
-		} else if err != nil {
-			unlock()
-			return nil, &catalogError{name: cat.Name, err: err}
-		}
-		var allowedStacks []string
-		catData, err := os.ReadFile(filepath.Join(dir, "catalog.json"))
-		if errors.Is(err, os.ErrNotExist) {
-			unlock()
-			continue
-		}
-		if err != nil {
-			unlock()
-			return nil, &catalogError{name: cat.Name, err: err}
-		}
-		if _, err := parseCatalogJSON(catData); err != nil {
-			unlock()
-			return nil, &catalogError{name: cat.Name, err: err}
-		}
-		meta, err := parseCatalogEESSI(catData)
-		if err != nil {
-			unlock()
-			return nil, &catalogError{name: cat.Name, err: err}
-		}
-		if meta.EESSICatalogURL == "" {
-			unlock()
-			continue
-		}
-		allowedStacks = meta.EESSIStacks
-
-		path := filepath.Join(dir, "eessi.json")
-		data, err := os.ReadFile(path)
-		unlock()
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, &catalogError{name: cat.Name, err: err}
 		}
 		builds, err := parseEESSICatalog(data, allowedStacks)
 		if err != nil {
