@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -333,9 +334,15 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		changed = true
 	}
 	cleanupStaged()
-	if oldBaks, _ := filepath.Glob(filepath.Join(dir, "*.bak")); len(oldBaks) > 0 {
-		for _, p := range oldBaks {
-			_ = os.Remove(p)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return changed, empty, fmt.Errorf("cleaning catalog backups: %w", err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".bak") {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return changed, empty, fmt.Errorf("removing stale catalog backup %s: %w", entry.Name(), err)
+			}
 		}
 	}
 	return changed, empty, nil
