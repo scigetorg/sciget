@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -113,4 +114,68 @@ func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 		_ = f.Close()
 		mu.Unlock()
 	}, gen, true, nil
+}
+
+func openFileInodeKey(f *os.File) (string, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("inode:%d:%d", st.Dev, st.Ino), nil
+}
+
+// lockOpenFileExclusive acquires an in-process inode mutex and POSIX fcntl
+// write lock directly on open file f.
+func lockOpenFileExclusive(f *os.File) (func(), error) {
+	key, err := openFileInodeKey(f)
+	if err != nil {
+		return nil, err
+	}
+	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	lk := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0, Len: 0}
+	for {
+		err = unix.FcntlFlock(f.Fd(), unix.F_SETLKW, &lk)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		mu.Unlock()
+		return nil, err
+	}
+	return func() {
+		unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
+		_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
+		mu.Unlock()
+	}, nil
+}
+
+// lockOpenFileShared acquires an in-process inode mutex and POSIX fcntl read
+// lock directly on open file f.
+func lockOpenFileShared(f *os.File) (func(), error) {
+	key, err := openFileInodeKey(f)
+	if err != nil {
+		return nil, err
+	}
+	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	lk := unix.Flock_t{Type: unix.F_RDLCK, Whence: 0, Start: 0, Len: 0}
+	for {
+		err = unix.FcntlFlock(f.Fd(), unix.F_SETLKW, &lk)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		mu.Unlock()
+		return nil, err
+	}
+	return func() {
+		unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
+		_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
+		mu.Unlock()
+	}, nil
 }

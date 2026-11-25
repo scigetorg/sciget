@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"sync"
 )
 
@@ -11,7 +12,10 @@ type memCatalogLock struct {
 	gen uint64
 }
 
-var catalogDirLocks sync.Map
+var (
+	catalogDirLocks sync.Map
+	openFileMu      sync.Mutex
+)
 
 // lockFileExclusive serializes in-process writers on platforms without Unix or
 // Windows file locking APIs.
@@ -37,4 +41,14 @@ func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 		return nil, 0, false, err
 	}
 	return lk.unlock, lk.gen, true, nil
+}
+
+func lockOpenFileExclusive(f *os.File) (func(), error) {
+	openFileMu.Lock()
+	return openFileMu.Unlock, nil
+}
+
+func lockOpenFileShared(f *os.File) (func(), error) {
+	openFileMu.Lock()
+	return openFileMu.Unlock, nil
 }

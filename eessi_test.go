@@ -1595,64 +1595,48 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		t.Fatalf("concurrent writeCatalogList failed: %v", err)
 	}
 
-	// Dangling relative symlink inside a symlinked parent directory must resolve
-	// to the exact same lock target as the not-yet-created target file.
-	if runtime.GOOS != "windows" {
-		realBase := filepath.Join(tmp, "real-base")
-		realSub := filepath.Join(realBase, "sub")
-		if err := os.MkdirAll(realSub, 0o755); err != nil {
+	// A writable catalogs.json inside a read-only (0555) directory, accessed
+	// directly or through a symlink, must stay updatable without needing to
+	// create any sibling lock file.
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		roDir := filepath.Join(tmp, "ro-catalogs-dir")
+		if err := os.MkdirAll(roDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		parentLink := filepath.Join(tmp, "parent-link")
-		if err := os.Symlink(realSub, parentLink); err != nil {
+		roFile := filepath.Join(roDir, "catalogs.json")
+		if err := writeCatalogList(roFile, sampleList, false); err != nil {
 			t.Fatal(err)
 		}
-		danglingLink := filepath.Join(parentLink, "catalogs.json")
-		if err := os.Symlink(filepath.Join("..", "dangling-target.json"), danglingLink); err != nil {
+		roLinkDir := filepath.Join(tmp, "ro-link-dir")
+		if err := os.MkdirAll(roLinkDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		wantTarget := catalogListLockTarget(filepath.Join(realBase, "dangling-target.json"))
-		gotTarget := catalogListLockTarget(danglingLink)
-		if gotTarget != wantTarget {
-			t.Fatalf("dangling symlink lock target = %q, want %q", gotTarget, wantTarget)
-		}
-		// Nested dangling symlink whose relative target traverses a symlinked
-		// directory followed by ".." must also resolve identically to its target.
-		realDeep := filepath.Join(realSub, "deep")
-		if err := os.MkdirAll(realDeep, 0o755); err != nil {
+		roLink := filepath.Join(roLinkDir, "catalogs.json")
+		if err := os.Symlink(roFile, roLink); err != nil {
 			t.Fatal(err)
 		}
-		nestedDir := filepath.Join(tmp, "nested-dir")
-		if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		if err := os.Chmod(roDir, 0o555); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(realDeep, filepath.Join(nestedDir, "s")); err != nil {
-			t.Fatal(err)
+		t.Cleanup(func() { _ = os.Chmod(roDir, 0o755) })
+		updatedList := []catalog{{Name: "neuro", URL: catFile, Use: false}}
+		if err := writeCatalogList(roLink, updatedList, false); err != nil {
+			t.Fatalf("updating writable catalogs.json in 0555 dir through symlink failed: %v", err)
 		}
-		nestedDangling := filepath.Join(nestedDir, "catalogs.json")
-		if err := os.Symlink("s/../nested-target.json", nestedDangling); err != nil {
-			t.Fatal(err)
-		}
-		wantNested := catalogListLockTarget(filepath.Join(realSub, "nested-target.json"))
-		gotNested := catalogListLockTarget(nestedDangling)
-		if gotNested != wantNested {
-			t.Fatalf("nested dangling symlink lock target = %q, want %q", gotNested, wantNested)
+		gotCats, err := loadCatalogList(roFile)
+		if err != nil || len(gotCats) != 1 || gotCats[0].Use {
+			t.Fatalf("expected updated catalogs.json with Use=false: err=%v cats=%+v", err, gotCats)
 		}
 	}
 
-	// catalogs.json placed inside a folder named "catalogs" must keep its lock
-	// directly beside catalogs.json on every platform (never redirected by the
-	// cache-directory heuristic), and on Windows both "catalogs" and "Catalogs"
-	// spellings must serialize readers and writers on the same lock file.
+	// catalogs.json placed inside a folder named "catalogs" must serialize
+	// readers and writers on the file itself across all platforms, including
+	// mixed-case "catalogs" vs "Catalogs" paths on Windows.
 	catNamedDir := filepath.Join(tmp, "cfg", "catalogs")
 	if err := os.MkdirAll(catNamedDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	catNamedFile := filepath.Join(catNamedDir, "catalogs.json")
-	wantCatLock := catalogListLockTarget(catNamedFile) + ".lock"
-	if got := catalogListLockPath(catNamedFile); got != wantCatLock {
-		t.Fatalf("catalogListLockPath inside catalogs/ = %q, want %q", got, wantCatLock)
-	}
 	if err := writeCatalogList(catNamedFile, sampleList, false); err != nil {
 		t.Fatal(err)
 	}

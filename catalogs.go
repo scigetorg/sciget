@@ -14,7 +14,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -175,127 +174,32 @@ func catalogListPath() (string, error) {
 	return filepath.Join(filepath.Dir(path), "catalogs.json"), nil
 }
 
-// catalogListLockTarget resolves symlinks component by component (like
-// `realpath -m`), including dangling leaves, missing intermediate directories,
-// and relative symlink targets containing symlinked directories followed by
-// "..", so any two paths that open the same file acquire the same lock file.
-func catalogListLockTarget(path string) string {
-	cur := path
-	if !filepath.IsAbs(cur) {
-		if abs, err := filepath.Abs(cur); err == nil {
-			cur = abs
-		}
-	}
-	vol := filepath.VolumeName(cur)
-	rest := cur[len(vol):]
-	resolved := vol + string(filepath.Separator)
-	var queue []string
-	for _, part := range strings.Split(filepath.ToSlash(rest), "/") {
-		if part != "" {
-			queue = append(queue, part)
-		}
-	}
-	symlinksFollowed := 0
-	for len(queue) > 0 {
-		comp := queue[0]
-		queue = queue[1:]
-		if comp == "." {
-			continue
-		}
-		if comp == ".." {
-			resolved = filepath.Dir(resolved)
-			continue
-		}
-		next := filepath.Join(resolved, comp)
-		info, err := os.Lstat(next)
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			symlinksFollowed++
-			if symlinksFollowed > 40 {
-				return filepath.Clean(cur)
-			}
-			target, err := os.Readlink(next)
-			if err != nil {
-				return filepath.Clean(cur)
-			}
-			if filepath.IsAbs(target) {
-				tVol := filepath.VolumeName(target)
-				resolved = tVol + string(filepath.Separator)
-				target = target[len(tVol):]
-			} else if runtime.GOOS == "windows" && (strings.HasPrefix(target, `\`) || strings.HasPrefix(target, "/")) {
-				// Drive-root-relative symlink target on Windows (e.g. \shared\catalogs.json)
-				// resolves against the current volume root rather than the symlink's directory.
-				resolved = filepath.VolumeName(resolved) + string(filepath.Separator)
-			}
-			var targetParts []string
-			for _, part := range strings.Split(filepath.ToSlash(target), "/") {
-				if part != "" {
-					targetParts = append(targetParts, part)
-				}
-			}
-			queue = append(targetParts, queue...)
-			continue
-		}
-		resolved = next
-	}
-	return resolved
-}
-
-// catalogListLockPath returns the sibling lock file path for catalogs.json at
-// path after resolving symlinks, always placed directly beside the resolved
-// file (never redirected by directory-name heuristics).
-func catalogListLockPath(path string) string {
-	return catalogListLockTarget(path) + ".lock"
-}
-
-// loadCatalogList reads catalogs.json at path. A missing file lists no
-// catalogs. Anything but a JSON array of entries with a valid name, URL
-// and use is an error, as is a name listed twice. When a sibling lock file
-// exists for the resolved target of path, it holds a shared lock across the
-// read so concurrent in-place updates cannot expose a truncated file.
+// loadCatalogList reads catalogs.json at path while holding a shared lock
+// directly on the open file so concurrent in-place updates cannot expose a
+// truncated file, regardless of symlinks, junctions, or path casing. A missing
+// file lists no catalogs. Anything but a JSON array of entries with a valid
+// name, URL and use is an error, as is a name listed twice.
 func loadCatalogList(path string) ([]catalog, error) {
-	lockPath := catalogListLockPath(path)
-	readLocked := func() ([]catalog, error) {
-		unlock, _, locked, err := lockFileShared(lockPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading catalogs: %w", err)
-		}
-		if locked {
-			defer unlock()
-		}
-		data, err := os.ReadFile(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading catalogs: %w", err)
-		}
-		catalogs, err := parseCatalogList(data)
-		if err != nil {
-			return nil, fmt.Errorf("reading catalogs %s: %w", path, err)
-		}
-		return catalogs, nil
-	}
-	unlock, _, locked, err := lockFileShared(lockPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading catalogs: %w", err)
-	}
-	if locked {
-		defer unlock()
-	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogs: %w", err)
 	}
+	unlock, err := lockOpenFileShared(f)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("reading catalogs: %w", err)
+	}
+	data, readErr := io.ReadAll(f)
+	unlock()
+	_ = f.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("reading catalogs: %w", readErr)
+	}
 	catalogs, err := parseCatalogList(data)
 	if err != nil {
-		if !locked {
-			if _, statErr := os.Stat(lockPath); statErr == nil {
-				return readLocked()
-			}
-		}
 		return nil, fmt.Errorf("reading catalogs %s: %w", path, err)
 	}
 	return catalogs, nil
@@ -373,9 +277,10 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 }
 
 // writeCatalogList writes catalogs to catalogs.json at path, in place, or
-// with system set as writeSystemFile does. User writes hold an exclusive lock
-// on the resolved target's sibling lock file so concurrent readers (including
-// through symlinks) never observe O_TRUNC.
+// with system set as writeSystemFile does. User writes lock the open file
+// itself before truncating and writing so concurrent readers (including
+// through symlinks, junctions, or mixed case) never observe O_TRUNC and
+// writable files inside read-only directories stay updatable.
 func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	if catalogs == nil {
 		catalogs = []catalog{} // written as [], not null
@@ -386,12 +291,42 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 		}
 		return nil
 	}
-	lk, err := lockFileExclusive(catalogListLockPath(path))
+	data, err := json.MarshalIndent(catalogs, "", "  ")
 	if err != nil {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
-	defer lk.unlock()
-	if err := writeJSONFile(path, catalogs); err != nil {
+	data = append(data, '\n')
+	if _, lstatErr := os.Lstat(path); errors.Is(lstatErr, fs.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("writing catalogs: %w", err)
+		}
+		if tmp, err := stageCatalog(path, data, 0o600); err == nil {
+			linkErr := os.Link(tmp, path)
+			_ = os.Remove(tmp)
+			if linkErr == nil {
+				return nil
+			}
+		}
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("writing catalogs: %w", err)
+	}
+	unlock, err := lockOpenFileExclusive(f)
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("writing catalogs: %w", err)
+	}
+	if _, err = f.Seek(0, io.SeekStart); err == nil {
+		if err = f.Truncate(0); err == nil {
+			_, err = f.Write(data)
+		}
+	}
+	unlock()
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
 	return nil

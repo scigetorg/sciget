@@ -81,3 +81,38 @@ func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 		_ = f.Close()
 	}, gen, true, nil
 }
+
+// lockOpenFileExclusive acquires an exclusive advisory flock directly on the
+// open file f (following symlinks natively without creating a sibling file).
+func lockOpenFileExclusive(f *os.File) (func(), error) {
+	var err error
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	}, nil
+}
+
+// lockOpenFileShared acquires a shared advisory flock directly on open file f.
+func lockOpenFileShared(f *os.File) (func(), error) {
+	var err error
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	}, nil
+}
