@@ -1638,16 +1638,53 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if gotNested != wantNested {
 			t.Fatalf("nested dangling symlink lock target = %q, want %q", gotNested, wantNested)
 		}
-		// catalogs.json placed inside a folder named "catalogs" must keep its
-		// lock directly beside catalogs.json rather than redirecting to locks/.
-		catNamedDir := filepath.Join(tmp, "cfg", "catalogs")
-		if err := os.MkdirAll(catNamedDir, 0o755); err != nil {
-			t.Fatal(err)
+	}
+
+	// catalogs.json placed inside a folder named "catalogs" must keep its lock
+	// directly beside catalogs.json on every platform (never redirected by the
+	// cache-directory heuristic), and on Windows both "catalogs" and "Catalogs"
+	// spellings must serialize readers and writers on the same lock file.
+	catNamedDir := filepath.Join(tmp, "cfg", "catalogs")
+	if err := os.MkdirAll(catNamedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	catNamedFile := filepath.Join(catNamedDir, "catalogs.json")
+	wantCatLock := catalogListLockTarget(catNamedFile) + ".lock"
+	if got := catalogListLockPath(catNamedFile); got != wantCatLock {
+		t.Fatalf("catalogListLockPath inside catalogs/ = %q, want %q", got, wantCatLock)
+	}
+	if err := writeCatalogList(catNamedFile, sampleList, false); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		altCaseFile := filepath.Join(tmp, "cfg", "Catalogs", "catalogs.json")
+		stopAlt := make(chan struct{})
+		altErrs := make(chan error, 1)
+		go func() {
+			for {
+				select {
+				case <-stopAlt:
+					altErrs <- nil
+					return
+				default:
+					if err := writeCatalogList(catNamedFile, sampleList, false); err != nil {
+						altErrs <- err
+						return
+					}
+				}
+			}
+		}()
+		for range 100 {
+			cats, err := loadCatalogList(altCaseFile)
+			if err != nil || len(cats) != 1 || cats[0].Name != "neuro" {
+				close(stopAlt)
+				<-altErrs
+				t.Fatalf("concurrent Windows mixed-case loadCatalogList failed: err=%v cats=%+v", err, cats)
+			}
 		}
-		catNamedFile := filepath.Join(catNamedDir, "catalogs.json")
-		wantCatLock := catalogListLockTarget(catNamedFile) + ".lock"
-		if got := catalogListLockPath(catNamedFile); got != wantCatLock {
-			t.Fatalf("catalogListLockPath inside catalogs/ = %q, want %q", got, wantCatLock)
+		close(stopAlt)
+		if err := <-altErrs; err != nil {
+			t.Fatalf("concurrent Windows mixed-case writeCatalogList failed: %v", err)
 		}
 	}
 }

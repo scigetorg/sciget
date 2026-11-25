@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -220,6 +221,10 @@ func catalogListLockTarget(path string) string {
 				tVol := filepath.VolumeName(target)
 				resolved = tVol + string(filepath.Separator)
 				target = target[len(tVol):]
+			} else if runtime.GOOS == "windows" && (strings.HasPrefix(target, `\`) || strings.HasPrefix(target, "/")) {
+				// Drive-root-relative symlink target on Windows (e.g. \shared\catalogs.json)
+				// resolves against the current volume root rather than the symlink's directory.
+				resolved = filepath.VolumeName(resolved) + string(filepath.Separator)
 			}
 			var targetParts []string
 			for _, part := range strings.Split(filepath.ToSlash(target), "/") {
