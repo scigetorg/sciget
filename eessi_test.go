@@ -1950,7 +1950,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				inDirWriterLk.unlock()
 				t.Fatal(err)
 			}
-			earlyIncomplete := filepath.Join(existingWritableDir, "apps.json.incomplete")
+			earlyIncomplete := filepath.Join(existingWritableDir, "apps.json.12345.incomplete")
 			if err := os.WriteFile(earlyIncomplete, []byte("partial"), 0o600); err != nil {
 				inDirWriterLk.unlock()
 				t.Fatal(err)
@@ -2032,7 +2032,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				t.Fatalf("expected in-dir lock %q to be unlinked during migration, stat err=%v", inDirLock, err)
 			}
 			// Simulate an in-progress refresh writing temporary files.
-			incompleteMarker := filepath.Join(existingWritableDir, "apps.json.incomplete")
+			incompleteMarker := filepath.Join(existingWritableDir, "apps.json.12345.incomplete")
 			if err := os.WriteFile(incompleteMarker, []byte("partial"), 0o600); err != nil {
 				migLk.unlock()
 				close(inDirHookRelease)
@@ -2133,6 +2133,65 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if err := os.Symlink(symLeafTarget, symCatDir); err != nil {
 			t.Fatal(err)
 		}
+		// Refresh must preserve unrelated *.bak / *.incomplete files and
+		// checkCatalogClean must only flag refresh-generated temp files.
+		unrelatedBak := filepath.Join(symLeafTarget, "operator-notes.bak")
+		unrelatedInc := filepath.Join(symLeafTarget, "notes.incomplete")
+		manualBak := filepath.Join(symLeafTarget, "apps.json.manual.bak")
+		for _, f := range []string{unrelatedBak, unrelatedInc, manualBak} {
+			if err := os.WriteFile(f, []byte("keep-me"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if changed, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, symLeafTarget); err != nil || !changed {
+			t.Fatalf("refresh of target dir with unrelated .bak/.incomplete failed: changed=%v err=%v", changed, err)
+		}
+		for _, f := range []string{unrelatedBak, unrelatedInc, manualBak} {
+			if got, err := os.ReadFile(f); err != nil || string(got) != "keep-me" {
+				t.Fatalf("refresh must preserve unrelated file %q: got=%q err=%v", f, string(got), err)
+			}
+		}
+		if containers, _, err := readCatalogSnapshot(symLeafTarget); err != nil || len(containers) != 1 {
+			t.Fatalf("readCatalogSnapshot must ignore unrelated .bak/.incomplete files: len=%d err=%v", len(containers), err)
+		}
+
+		// While the leaf symlink exists, accessing the cache through the
+		// symlink and through its target must serialize on the shared target
+		// lock so a reader through the alias never sees mid-write temp files.
+		targetLk, err := lockCatalogDir(symLeafTarget)
+		if err != nil {
+			t.Fatalf("locking symlink target dir failed: %v", err)
+		}
+		symIncomplete := filepath.Join(symLeafTarget, "apps.json.99999.incomplete")
+		if err := os.WriteFile(symIncomplete, []byte("partial"), 0o600); err != nil {
+			targetLk.unlock()
+			t.Fatal(err)
+		}
+		type aliasSnapResult struct {
+			containers []container
+			err        error
+		}
+		aliasReaderDone := make(chan aliasSnapResult, 1)
+		go func() {
+			c, _, err := readCatalogSnapshot(symCatDir)
+			aliasReaderDone <- aliasSnapResult{containers: c, err: err}
+		}()
+		select {
+		case res := <-aliasReaderDone:
+			os.Remove(symIncomplete)
+			targetLk.unlock()
+			t.Fatalf("reader through symlinked leaf bypassed target lock: containers=%v err=%v", res.containers, res.err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		if err := os.Remove(symIncomplete); err != nil {
+			targetLk.unlock()
+			t.Fatal(err)
+		}
+		targetLk.unlock()
+		if res := <-aliasReaderDone; res.err != nil || len(res.containers) != 1 || res.containers[0].tool != "fsl" {
+			t.Fatalf("reader through symlinked leaf failed after target unlock: containers=%v err=%v", res.containers, res.err)
+		}
+
 		preSymLock := catalogLockPath(symCatDir)
 		preSymGen, err := readCatalogLockGen(symCatDir)
 		if err != nil {
@@ -2154,7 +2213,9 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	}
 
 	// First creation of catalogs.json on filesystems without hard links must
-	// still publish atomically via rename so concurrent readers never see EOF.
+	// still publish atomically via rename so concurrent readers never see EOF,
+	// AND a delayed first-time writer must not rename over an already-created
+	// and exclusively locked catalogs.json inode.
 	noHardLinkDir := filepath.Join(tmp, "no-hardlink")
 	if err := os.MkdirAll(noHardLinkDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2196,6 +2257,78 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if err := <-readErr; err != nil {
 			t.Fatalf("concurrent reader failed during non-hardlink first creation: %v", err)
 		}
+	}
+	// Delayed first-time writer paused after failed os.Link must NOT replace
+	// a newly created & exclusively locked catalogs.json inode.
+	raceListPath := filepath.Join(noHardLinkDir, "race-catalogs.json")
+	createPaused := make(chan struct{})
+	createResume := make(chan struct{})
+	prevBeforeCreate := beforeCatalogCreateRename
+	beforeCatalogCreateRename = func(target string) {
+		if filepath.Base(target) == "race-catalogs.json" {
+			close(createPaused)
+			<-createResume
+		}
+	}
+	t.Cleanup(func() { beforeCatalogCreateRename = prevBeforeCreate })
+	delayedWriteDone := make(chan error, 1)
+	go func() {
+		delayedWriteDone <- writeCatalogList(raceListPath, sampleList, false)
+	}()
+	<-createPaused
+	beforeCatalogCreateRename = prevBeforeCreate
+	otherList := []catalog{{Name: "other", URL: catFile, Use: true}}
+	if err := writeCatalogList(raceListPath, otherList, false); err != nil {
+		close(createResume)
+		<-delayedWriteDone
+		t.Fatalf("concurrent first writeCatalogList failed: %v", err)
+	}
+	lockedFile, err := os.OpenFile(raceListPath, os.O_RDWR, 0o600)
+	if err != nil {
+		close(createResume)
+		<-delayedWriteDone
+		t.Fatal(err)
+	}
+	lockedStat, err := lockedFile.Stat()
+	if err != nil {
+		lockedFile.Close()
+		close(createResume)
+		<-delayedWriteDone
+		t.Fatal(err)
+	}
+	unlockLocked, err := lockOpenFileExclusive(lockedFile)
+	if err != nil {
+		close(createResume)
+		<-delayedWriteDone
+		t.Fatal(err)
+	}
+	close(createResume)
+	select {
+	case err := <-delayedWriteDone:
+		_ = unlockLocked()
+		t.Fatalf("delayed non-hardlink writer bypassed active file lock (possible rename over locked inode): err=%v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	curStat, err := os.Stat(raceListPath)
+	if err != nil {
+		_ = unlockLocked()
+		<-delayedWriteDone
+		t.Fatal(err)
+	}
+	if !os.SameFile(lockedStat, curStat) {
+		_ = unlockLocked()
+		<-delayedWriteDone
+		t.Fatalf("delayed non-hardlink writer replaced locked catalogs.json inode")
+	}
+	if err := unlockLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-delayedWriteDone; err != nil {
+		t.Fatalf("delayed non-hardlink writer failed after lock release: %v", err)
+	}
+	finalStat, err := os.Stat(raceListPath)
+	if err != nil || !os.SameFile(lockedStat, finalStat) {
+		t.Fatalf("expected final catalogs.json to stay on original locked inode: err=%v", err)
 	}
 	linkCatalogFile = prevLink
 

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -377,7 +376,7 @@ func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalo
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasSuffix(name, ".bak") || strings.HasSuffix(name, ".incomplete") {
+		if isRefreshTempFile(name) {
 			if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return changed, empty, fmt.Errorf("removing stale catalog backup %s: %w", name, err)
 			}

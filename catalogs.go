@@ -278,6 +278,10 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 // may replace it to simulate filesystems that do not support hard links.
 var linkCatalogFile = os.Link
 
+// beforeCatalogCreateRename runs in the non-hardlink first-creation path right
+// before acquiring the creation lock; tests may set it to reproduce races.
+var beforeCatalogCreateRename = func(target string) {}
+
 // writeCatalogList writes catalogs to catalogs.json at path, in place, or
 // with system set as writeSystemFile does. User writes lock the open file
 // itself before truncating and writing so concurrent readers (including
@@ -300,13 +304,13 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	data = append(data, '\n')
 	if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 		// Resolve any dangling symlink chain so first creation atomically
-		// publishes the target file via stage+link (falling back to atomic
-		// rename on filesystems without hard links, and using a short temp
-		// name that fits even when the target basename is 255 bytes) instead
-		// of exposing a zero-byte file before the exclusive lock is acquired.
-		// If resolution fails (e.g. a broken symlink like missing/../target)
-		// or the target directory does not exist, skip staging so os.OpenFile
-		// reports the genuine OS error.
+		// publishes the target file via stage+link (falling back to a
+		// creation-locked rename on filesystems without hard links, and using
+		// a short temp name that fits even when the target basename is 255
+		// bytes) instead of exposing a zero-byte file before the exclusive
+		// lock is acquired. If resolution fails (e.g. a broken symlink like
+		// missing/../target) or the target directory does not exist, skip
+		// staging so os.OpenFile reports the genuine OS error.
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return fmt.Errorf("writing catalogs: %w", err)
 		}
@@ -318,11 +322,26 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 					return nil
 				}
 				if !errors.Is(linkErr, fs.ErrExist) {
-					if renameErr := os.Rename(tmp, target); renameErr == nil {
-						return nil
+					beforeCatalogCreateRename(target)
+					createLockPath := hashLockPath(filepath.Dir(target), "create-"+filepath.Base(target))
+					if clk, clkErr := lockFileExclusive(createLockPath); clkErr == nil {
+						if _, postStat := os.Stat(target); errors.Is(postStat, fs.ErrNotExist) {
+							renameErr := os.Rename(tmp, target)
+							clk.unlock()
+							if renameErr == nil {
+								return nil
+							}
+							_ = os.Remove(tmp)
+						} else {
+							clk.unlock()
+							_ = os.Remove(tmp)
+						}
+					} else {
+						_ = os.Remove(tmp)
 					}
+				} else {
+					_ = os.Remove(tmp)
 				}
-				_ = os.Remove(tmp)
 			}
 		}
 	}
