@@ -3790,6 +3790,170 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 					t.Fatalf("otherCache was wrongly touched: %v", err)
 				}
 			})
+
+			// 12. Search-only (0111) alias parent with an existing slot lock
+			// must still allow refresh when the target's parent is read-only
+			// (in-dir .lock fallback), AND removing an alias in a writable
+			// parent must succeed when the target's parent is search-only
+			// (0111) with an existing target lock.
+			if os.Geteuid() != 0 {
+				s12AliasParent := filepath.Join(subTmp, "s12-alias-0111")
+				s12TargetParent := filepath.Join(subTmp, "s12-target-0555")
+				s12Target := filepath.Join(s12TargetParent, "cache")
+				if err := os.MkdirAll(s12AliasParent, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(s12Target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFixture(s12Target, "fbtool", "fbpkg")
+				s12Alias := filepath.Join(s12AliasParent, "alias-fb")
+				if err := os.Symlink(s12Target, s12Alias); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(catalogLockPath(s12Alias), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(s12AliasParent, 0o111); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(s12TargetParent, 0o555); err != nil {
+					_ = os.Chmod(s12AliasParent, 0o755)
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					_ = os.Chmod(s12AliasParent, 0o755)
+					_ = os.Chmod(s12TargetParent, 0o755)
+				})
+				changed12, _, err := refreshCatalog(refreshRead, catalog{Name: "fb", URL: "https://example.invalid/cat.json"}, s12Alias)
+				if err != nil || !changed12 {
+					t.Fatalf("refreshCatalog failed with 0111 alias parent + 0555 target parent fallback: changed=%v err=%v", changed12, err)
+				}
+				if data, err := os.ReadFile(filepath.Join(s12Target, "apps.json")); err != nil || !strings.Contains(string(data), "updatedtool") {
+					t.Fatalf("expected s12Target to be updated, err=%v data=%q", err, string(data))
+				}
+				_ = os.Chmod(s12AliasParent, 0o755)
+				_ = os.Chmod(s12TargetParent, 0o755)
+
+				// Alias removal when target parent is 0111 with existing target lock.
+				rmAliasParent := filepath.Join(subTmp, "s12-rm-alias-rw")
+				rmTargetParent := filepath.Join(subTmp, "s12-rm-target-0111")
+				rmTarget := filepath.Join(rmTargetParent, "cache")
+				if err := os.MkdirAll(rmAliasParent, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(rmTarget, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFixture(rmTarget, "keep0111", "keep0111pkg")
+				rmAlias := filepath.Join(rmAliasParent, "alias-rm")
+				if err := os.Symlink(rmTarget, rmAlias); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(catalogTargetLockPath(rmTarget), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(rmTargetParent, 0o111); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(rmTargetParent, 0o755) })
+				if err := removeCatalogCache(rmAlias); err != nil {
+					t.Fatalf("removeCatalogCache failed for alias whose target parent is 0111: %v", err)
+				}
+				if _, err := os.Lstat(rmAlias); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("expected rmAlias to be unlinked, lstat err=%v", err)
+				}
+				if _, err := os.Stat(filepath.Join(rmTarget, "apps.json")); err != nil {
+					t.Fatalf("rmTarget must remain intact after unlinking alias: %v", err)
+				}
+				_ = os.Chmod(rmTargetParent, 0o755)
+			}
+
+			// 13. Removal must never delete a leaf replaced inside the pinned
+			// parent after registration checks, and must skip deletion when the
+			// leaf was initially absent.
+			leafSwapParent := filepath.Join(subTmp, "leaf-swap")
+			if err := os.MkdirAll(leafSwapParent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// 13a. Real directory replaced inside pinned parent after check.
+			swapDir := filepath.Join(leafSwapParent, "dir-leaf")
+			swapDirMoved := filepath.Join(leafSwapParent, "dir-leaf-old")
+			if err := os.MkdirAll(swapDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(swapDir, "apps.json"), []byte(`{"old":true}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			prevBeforeDel := beforeRemoveDelete
+			beforeRemoveDelete = func(dir string) {
+				if dir == swapDir {
+					if err := os.Rename(swapDir, swapDirMoved); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(swapDir, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(swapDir, "apps.json"), []byte(`{"replacement":true}`), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			err = removeCatalogCache(swapDir)
+			beforeRemoveDelete = prevBeforeDel
+			if err == nil || !strings.Contains(err.Error(), "changed during removal") {
+				t.Fatalf("expected removeCatalogCache to reject replaced directory leaf, got err=%v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(swapDir, "apps.json")); err != nil || !strings.Contains(string(data), "replacement") {
+				t.Fatalf("replacement directory leaf must remain intact: err=%v data=%q", err, string(data))
+			}
+
+			// 13b. Initially missing leaf created after check must not be deleted.
+			absentLeaf := filepath.Join(leafSwapParent, "absent-leaf")
+			beforeRemoveDelete = func(dir string) {
+				if dir == absentLeaf {
+					if err := os.MkdirAll(absentLeaf, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(absentLeaf, "apps.json"), []byte(`{"fresh":true}`), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			err = removeCatalogCache(absentLeaf)
+			beforeRemoveDelete = prevBeforeDel
+			if err != nil {
+				t.Fatalf("removeCatalogCache on initially absent leaf failed: %v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(absentLeaf, "apps.json")); err != nil || !strings.Contains(string(data), "fresh") {
+				t.Fatalf("entry created after absent-leaf check must not be deleted: err=%v data=%q", err, string(data))
+			}
+
+			// 13c. Symlink leaf replaced inside pinned parent after check.
+			swapLink := filepath.Join(leafSwapParent, "link-leaf")
+			if err := os.Symlink(target1, swapLink); err != nil {
+				t.Fatal(err)
+			}
+			beforeRemoveDelete = func(dir string) {
+				if dir == swapLink {
+					tmpL := filepath.Join(leafSwapParent, ".link-leaf-tmp")
+					_ = os.Remove(tmpL)
+					if err := os.Symlink(target2, tmpL); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(tmpL, swapLink); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			err = removeCatalogCache(swapLink)
+			beforeRemoveDelete = prevBeforeDel
+			if err == nil || !strings.Contains(err.Error(), "changed during removal") {
+				t.Fatalf("expected removeCatalogCache to reject replaced symlink leaf, got err=%v", err)
+			}
+			if dest, err := os.Readlink(swapLink); err != nil || dest != target2 {
+				t.Fatalf("replacement symlink must remain intact: err=%v dest=%q", err, dest)
+			}
 		})
 		hlDir := filepath.Join(tmp, "lock-identity")
 		if err := os.MkdirAll(hlDir, 0o755); err != nil {

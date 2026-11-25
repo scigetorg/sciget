@@ -1272,12 +1272,18 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 				return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
 			}
 			if spErr != nil {
-				_ = targetRoot.Close()
-				inLk.unlock()
-				unlockAll()
-				return nil, spErr
+				if isReadOnlyOrPermError(spErr) && lockPathMatchesInfo(slotPath, slotLk.fileInfo) {
+					// Search-only (0111) slot parent: refresh writes only to
+					// targetRoot, not to slotParent.
+				} else {
+					_ = targetRoot.Close()
+					inLk.unlock()
+					unlockAll()
+					return nil, spErr
+				}
+			} else {
+				slotParent = sp
 			}
-			slotParent = sp
 		}
 		closeFallbackRoots := func() {
 			if targetRoot != nil {
@@ -1402,7 +1408,11 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 			return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
 		}
 		if tpErr != nil {
-			if allowInDirFallback && isReadOnlyOrPermError(tpErr) && lockPathMatchesInfo(targetPath, targetLk.fileInfo) {
+			if !allowInDirFallback && linkLeaf && isReadOnlyOrPermError(tpErr) && lockPathMatchesInfo(targetPath, targetLk.fileInfo) {
+				// Search-only (0111) target parent during alias removal: we
+				// verified the locked target lock file and removal only unlinks
+				// the alias inside slotParent.
+			} else if allowInDirFallback && isReadOnlyOrPermError(tpErr) && lockPathMatchesInfo(targetPath, targetLk.fileInfo) {
 				tr, trOK, trErr := openPinnedDirDirect(clean)
 				if errors.Is(trErr, errRootChanged) || (trErr == nil && !trOK) {
 					closeRoots()

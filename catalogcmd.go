@@ -369,6 +369,29 @@ var beforeRemoveCatalogCache = func(dir string) {}
 // parent-retarget races.
 var afterRemoveCatalogLock = func(dir string) {}
 
+// beforeRemoveDelete runs in removeCatalogCache after registration checks pass
+// and immediately before deleting the leaf entry; tests may set it to reproduce
+// leaf-replacement races inside the pinned parent.
+var beforeRemoveDelete = func(dir string) {}
+
+func removeRootContents(root *os.Root) error {
+	f, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	names, err := f.Readdirnames(-1)
+	_ = f.Close()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := root.RemoveAll(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // removeCatalogCache deletes a catalog's cache directory under its external
 // lock if no registered catalog still points to dir, and bumps the lock
 // generation so any delayed refresh started before removal refuses to
@@ -416,6 +439,20 @@ func removeCatalogCache(dir string) error {
 		if registered {
 			return nil
 		}
+		beforeRemoveDelete(dir)
+		if pinnedInfo == nil {
+			return lk.bump()
+		}
+		curInfo, statErr := lk.slotParent.Lstat(lk.slotBase)
+		if errors.Is(statErr, os.ErrNotExist) {
+			return lk.bump()
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if !os.SameFile(curInfo, pinnedInfo) || !rootEntryIsLink(lk.slotParent, lk.slotBase, curInfo) {
+			return errors.New("catalog cache changed during removal; run again")
+		}
 		if err := lk.bump(); err != nil {
 			return err
 		}
@@ -428,11 +465,29 @@ func removeCatalogCache(dir string) error {
 		return errors.New("catalog cache changed during removal; run again")
 	}
 	var pinnedInfo os.FileInfo
+	var pinnedSub *os.Root
 	if info, statErr := lk.targetParent.Lstat(lk.targetBase); statErr == nil {
 		if rootEntryIsLink(lk.targetParent, lk.targetBase, info) {
 			return errors.New("catalog cache changed during removal; run again")
 		}
 		pinnedInfo = info
+		if info.IsDir() {
+			sub, subOK, subErr := openPinnedSubdir(lk.targetParent, lk.targetBase)
+			if errors.Is(subErr, errRootChanged) {
+				return errors.New("catalog cache changed during removal; run again")
+			}
+			if subErr != nil {
+				return subErr
+			}
+			if subOK {
+				pinnedSub = sub
+				defer func() {
+					if pinnedSub != nil {
+						_ = pinnedSub.Close()
+					}
+				}()
+			}
+		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
 	}
@@ -443,10 +498,46 @@ func removeCatalogCache(dir string) error {
 	if registered {
 		return nil
 	}
+	beforeRemoveDelete(dir)
+	if pinnedInfo == nil {
+		return lk.bump()
+	}
+	curInfo, statErr := lk.targetParent.Lstat(lk.targetBase)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return lk.bump()
+	}
+	if statErr != nil {
+		return statErr
+	}
+	if !os.SameFile(curInfo, pinnedInfo) || rootEntryIsLink(lk.targetParent, lk.targetBase, curInfo) {
+		return errors.New("catalog cache changed during removal; run again")
+	}
 	if err := lk.bump(); err != nil {
 		return err
 	}
-	return lk.targetParent.RemoveAll(lk.targetBase)
+	if pinnedSub != nil {
+		if err := removeRootContents(pinnedSub); err != nil {
+			return err
+		}
+		_ = pinnedSub.Close()
+		pinnedSub = nil
+		// Re-verify the empty directory identity before non-recursive rmdir so
+		// a replacement entry swapped in during cleanup cannot be removed.
+		curInfo, statErr = lk.targetParent.Lstat(lk.targetBase)
+		if errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if !os.SameFile(curInfo, pinnedInfo) || rootEntryIsLink(lk.targetParent, lk.targetBase, curInfo) {
+			return errors.New("catalog cache changed during removal; run again")
+		}
+	}
+	if err := lk.targetParent.Remove(lk.targetBase); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // useCatalog puts a catalog in use, moving it first or (last) last, or with
