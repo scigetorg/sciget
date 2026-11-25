@@ -520,6 +520,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		t.Run("bundled EESSI Lmod init discovery", func(t *testing.T) {
 			t.Setenv("EESSI_LMOD_INIT", "")
 			t.Setenv("LMOD_PKG", "")
+			t.Setenv("BASH_ENV", "")
 			var bOut, bErr bytes.Buffer
 			if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &bOut, &bErr); code != 0 {
 				t.Fatalf("eessi launch with bundled versions/<stack>/init/lmod/bash failed (%d): %s", code, bErr.String())
@@ -2908,6 +2909,54 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	}
 	if err := removeRetiredInDirLock(nonEmptyDir); err == nil {
 		t.Fatalf("removeRetiredInDirLock must return error when removal fails")
+	}
+
+	// Lock ordering must be invariant to directory casing so mixed-case paths
+	// on case-insensitive volumes (e.g. Cache/ vs cache/ relative to Mid/)
+	// never invert lock acquisition order, and sameLockFile must deduplicate
+	// hard-linked / identical lock files.
+	if !lockPathLess("/tmp/Cache/catalogs/a.lock", "/tmp/Mid/shared/b.lock") ||
+		!lockPathLess("/tmp/cache/catalogs/a.lock", "/tmp/Mid/shared/b.lock") {
+		t.Fatal("lockPathLess inverted lock order across Cache vs cache relative to Mid")
+	}
+	if runtime.GOOS != "windows" {
+		cacheUpper := filepath.Join(tmp, "Cache", "catalogs")
+		cacheLower := filepath.Join(tmp, "cache", "catalogs")
+		midTarget := filepath.Join(tmp, "Mid", "shared")
+		for _, d := range []string{cacheUpper, cacheLower, midTarget} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		upperAlias := filepath.Join(cacheUpper, "neuro-1234567890ab")
+		lowerAlias := filepath.Join(cacheLower, "neuro-1234567890ab")
+		if err := os.Symlink(midTarget, upperAlias); err != nil && !errors.Is(err, os.ErrExist) {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(midTarget, lowerAlias); err != nil && !errors.Is(err, os.ErrExist) {
+			t.Fatal(err)
+		}
+		orderUpper := catalogExternalLockPaths(upperAlias)
+		orderLower := catalogExternalLockPaths(lowerAlias)
+		if len(orderUpper) != 2 || len(orderLower) != 2 ||
+			!sameLockFile(orderUpper[0], catalogLockPath(upperAlias)) ||
+			!sameLockFile(orderLower[0], catalogLockPath(lowerAlias)) {
+			t.Fatalf("catalogExternalLockPaths inverted lock order across Cache vs cache: upper=%q lower=%q", orderUpper, orderLower)
+		}
+		hlDir := filepath.Join(tmp, "lock-identity")
+		if err := os.MkdirAll(hlDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		hlA := filepath.Join(hlDir, "a.lock")
+		hlB := filepath.Join(hlDir, "b.lock")
+		if err := os.WriteFile(hlA, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(hlA, hlB); err == nil {
+			if !sameLockFile(hlA, hlB) {
+				t.Fatalf("sameLockFile must treat hard-linked lock files %q and %q as identical", hlA, hlB)
+			}
+		}
 	}
 
 	// catalogs.json placed inside a folder named "catalogs" must serialize

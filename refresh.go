@@ -125,16 +125,16 @@ func refreshCatalogs() ([]refreshResult, error) {
 			// this catalog rolled back after bumping — so a single
 			// 'sciget refresh' does not conflict with its own earlier bump.
 			for j := i + 1; j < len(used); j++ {
-				if slotPaths[j] == slotPaths[i] && newGen.slot > startGens[j].slot {
+				if sameLockFile(slotPaths[j], slotPaths[i]) && newGen.slot > startGens[j].slot {
 					startGens[j].slot = newGen.slot
 				}
-				if slotPaths[j] == targetPaths[i] && newGen.target > startGens[j].slot {
+				if sameLockFile(slotPaths[j], targetPaths[i]) && newGen.target > startGens[j].slot {
 					startGens[j].slot = newGen.target
 				}
-				if targetPaths[j] == slotPaths[i] && newGen.slot > startGens[j].target {
+				if sameLockFile(targetPaths[j], slotPaths[i]) && newGen.slot > startGens[j].target {
 					startGens[j].target = newGen.slot
 				}
-				if targetPaths[j] == targetPaths[i] && newGen.target > startGens[j].target {
+				if sameLockFile(targetPaths[j], targetPaths[i]) && newGen.target > startGens[j].target {
 					startGens[j].target = newGen.target
 				}
 			}
