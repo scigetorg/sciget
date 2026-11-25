@@ -461,6 +461,9 @@ func parseEESSICatalog(data []byte, allowedStacks []string) ([]eessiBuild, error
 		if strings.TrimSpace(tool.Package) == "" {
 			return nil, fmt.Errorf("tool %q has empty package name", id)
 		}
+		if len(tool.Apps) == 0 {
+			return nil, fmt.Errorf("tool %q must have a non-empty apps object", id)
+		}
 		cleanDesc := strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(tool.Description)
 		toolTexts := slices.Concat([]string{id, tool.Package, cleanDesc, tool.Homepage}, tool.Categories)
 		if slices.ContainsFunc(toolTexts, func(s string) bool { return printable(s) != s }) {

@@ -167,6 +167,14 @@ func TestParseEESSICatalog(t *testing.T) {
 			name: "bidi override in app label",
 			json: strings.Replace(testEESSIJSON, `"ParaView 6.0.1 (EESSI/2025.06)"`, `"ParaView \u202e6.0.1"`, 1),
 		},
+		{
+			name: "null apps object",
+			json: `{"schemaVersion":1,"backend":"eessi","explicitSelectionRequired":true,"cvmfsRepo":"software.eessi.io","stacks":["2025.06"],"tools":{"paraview":{"package":"ParaView","apps":null}}}`,
+		},
+		{
+			name: "empty apps object",
+			json: `{"schemaVersion":1,"backend":"eessi","explicitSelectionRequired":true,"cvmfsRepo":"software.eessi.io","stacks":["2025.06"],"tools":{"paraview":{"package":"ParaView","apps":{}}}}`,
+		},
 	}
 	for _, tc := range badCases {
 		if _, err := parseEESSICatalog([]byte(tc.json), nil); err == nil {
@@ -1626,6 +1634,68 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		gotCats, err := loadCatalogList(roFile)
 		if err != nil || len(gotCats) != 1 || gotCats[0].Use {
 			t.Fatalf("expected updated catalogs.json with Use=false: err=%v cats=%+v", err, gotCats)
+		}
+	}
+
+	// First write through a dangling symlink must publish complete JSON
+	// atomically so concurrent readers never observe a zero-byte file (EOF).
+	if runtime.GOOS != "windows" {
+		for i := range 20 {
+			danglingDir := filepath.Join(tmp, "dangling-first", string(rune('a'+i)))
+			targetDir := filepath.Join(danglingDir, "target")
+			if err := os.MkdirAll(targetDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			targetFile := filepath.Join(targetDir, "catalogs.json")
+			linkFile := filepath.Join(danglingDir, "link.json")
+			if err := os.Symlink(targetFile, linkFile); err != nil {
+				t.Fatal(err)
+			}
+			stopRead := make(chan struct{})
+			readErrs := make(chan error, 1)
+			go func() {
+				for {
+					select {
+					case <-stopRead:
+						readErrs <- nil
+						return
+					default:
+						if _, err := loadCatalogList(linkFile); err != nil {
+							readErrs <- err
+							return
+						}
+					}
+				}
+			}()
+			if err := writeCatalogList(linkFile, sampleList, false); err != nil {
+				close(stopRead)
+				<-readErrs
+				t.Fatalf("first write through dangling symlink failed: %v", err)
+			}
+			close(stopRead)
+			if err := <-readErrs; err != nil {
+				t.Fatalf("concurrent read during dangling-symlink first write failed: %v", err)
+			}
+		}
+
+		// Two cache roots sharing a catalogs/ subtree via symlink must resolve
+		// to the exact same external lock file.
+		sharedRoot := filepath.Join(tmp, "shared-cache")
+		sharedCatalogs := filepath.Join(sharedRoot, "catalogs")
+		if err := os.MkdirAll(sharedCatalogs, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		aliasRoot := filepath.Join(tmp, "alias-cache")
+		if err := os.MkdirAll(aliasRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(sharedCatalogs, filepath.Join(aliasRoot, "catalogs")); err != nil {
+			t.Fatal(err)
+		}
+		lockA := catalogLockPath(filepath.Join(sharedCatalogs, "neuro-1234567890ab"))
+		lockB := catalogLockPath(filepath.Join(aliasRoot, "catalogs", "neuro-1234567890ab"))
+		if lockA != lockB {
+			t.Fatalf("aliased cache roots split lock paths: %q != %q", lockA, lockB)
 		}
 	}
 

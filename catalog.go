@@ -171,12 +171,77 @@ func readCatalogLockGen(dir string) (uint64, error) {
 	return gen, nil
 }
 
+// resolveCanonicalPath resolves symlinks component by component (like
+// `realpath -m`), including dangling leaves, missing intermediate directories,
+// relative symlink targets containing symlinked directories followed by "..",
+// and Windows drive-root-relative targets.
+func resolveCanonicalPath(path string) string {
+	cur := path
+	if !filepath.IsAbs(cur) {
+		if abs, err := filepath.Abs(cur); err == nil {
+			cur = abs
+		}
+	}
+	vol := filepath.VolumeName(cur)
+	rest := cur[len(vol):]
+	resolved := vol + string(filepath.Separator)
+	var queue []string
+	for _, part := range strings.Split(filepath.ToSlash(rest), "/") {
+		if part != "" {
+			queue = append(queue, part)
+		}
+	}
+	symlinksFollowed := 0
+	for len(queue) > 0 {
+		comp := queue[0]
+		queue = queue[1:]
+		if comp == "." {
+			continue
+		}
+		if comp == ".." {
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, comp)
+		info, err := os.Lstat(next)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			symlinksFollowed++
+			if symlinksFollowed > 40 {
+				return filepath.Clean(cur)
+			}
+			target, err := os.Readlink(next)
+			if err != nil {
+				return filepath.Clean(cur)
+			}
+			if filepath.IsAbs(target) {
+				tVol := filepath.VolumeName(target)
+				resolved = tVol + string(filepath.Separator)
+				target = target[len(tVol):]
+			} else if runtime.GOOS == "windows" && (strings.HasPrefix(target, `\`) || strings.HasPrefix(target, "/")) {
+				resolved = filepath.VolumeName(resolved) + string(filepath.Separator)
+			}
+			var targetParts []string
+			for _, part := range strings.Split(filepath.ToSlash(target), "/") {
+				if part != "" {
+					targetParts = append(targetParts, part)
+				}
+			}
+			queue = append(targetParts, queue...)
+			continue
+		}
+		resolved = next
+	}
+	return resolved
+}
+
 // catalogLockPath returns the advisory lock file path for cache directory dir.
-// The lock lives outside dir (in a sibling locks/ directory under cache_dir
-// when dir is under catalogs/, or beside dir otherwise) so deleting dir during
-// catalog removal or replacement never breaks lock identity.
+// It resolves symlinks along dir first so two cache roots sharing a catalogs/
+// subtree through a symlink serialize on the same lock file, and places the
+// lock outside dir (in a sibling locks/ directory under cache_dir when dir is
+// under catalogs/, or beside dir otherwise) so deleting dir never breaks lock
+// identity.
 func catalogLockPath(dir string) string {
-	clean := filepath.Clean(dir)
+	clean := resolveCanonicalPath(dir)
 	parent := filepath.Dir(clean)
 	base := filepath.Base(parent)
 	if base == "catalogs" || (runtime.GOOS == "windows" && strings.EqualFold(base, "catalogs")) {

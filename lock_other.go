@@ -43,12 +43,20 @@ func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 	return lk.unlock, lk.gen, true, nil
 }
 
-func lockOpenFileExclusive(f *os.File) (func(), error) {
+func lockOpenFileExclusive(f *os.File) (func() error, error) {
 	openFileMu.Lock()
-	return openFileMu.Unlock, nil
+	return func() error {
+		err := f.Close()
+		openFileMu.Unlock()
+		return err
+	}, nil
 }
 
-func lockOpenFileShared(f *os.File) (func(), error) {
+func lockOpenFileShared(f *os.File) (func() error, error) {
 	openFileMu.Lock()
-	return openFileMu.Unlock, nil
+	return func() error {
+		err := f.Close()
+		openFileMu.Unlock()
+		return err
+	}, nil
 }

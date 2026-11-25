@@ -79,26 +79,30 @@ func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 
 // lockOpenFileExclusive acquires an exclusive Windows file lock directly on
 // open file f (following symlinks, junctions, and case-insensitive paths
-// natively in the OS without creating a sibling lock file).
-func lockOpenFileExclusive(f *os.File) (func(), error) {
+// natively in the OS without creating a sibling lock file). The returned
+// function releases the lock and closes f.
+func lockOpenFileExclusive(f *os.File) (func() error, error) {
 	var ol windows.Overlapped
 	if err := windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ol); err != nil {
 		return nil, err
 	}
-	return func() {
+	return func() error {
 		var uol windows.Overlapped
 		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
+		return f.Close()
 	}, nil
 }
 
 // lockOpenFileShared acquires a shared Windows file lock directly on open file f.
-func lockOpenFileShared(f *os.File) (func(), error) {
+// The returned function releases the lock and closes f.
+func lockOpenFileShared(f *os.File) (func() error, error) {
 	var ol windows.Overlapped
 	if err := windows.LockFileEx(windows.Handle(f.Fd()), 0, 0, 1, 0, &ol); err != nil {
 		return nil, err
 	}
-	return func() {
+	return func() error {
 		var uol windows.Overlapped
 		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
+		return f.Close()
 	}, nil
 }

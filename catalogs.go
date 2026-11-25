@@ -187,14 +187,13 @@ func loadCatalogList(path string) ([]catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogs: %w", err)
 	}
-	unlock, err := lockOpenFileShared(f)
+	closeAndUnlock, err := lockOpenFileShared(f)
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("reading catalogs: %w", err)
 	}
 	data, readErr := io.ReadAll(f)
-	unlock()
-	_ = f.Close()
+	_ = closeAndUnlock()
 	if readErr != nil {
 		return nil, fmt.Errorf("reading catalogs: %w", readErr)
 	}
@@ -296,12 +295,16 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
 	data = append(data, '\n')
-	if _, lstatErr := os.Lstat(path); errors.Is(lstatErr, fs.ErrNotExist) {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
+		// Resolve any dangling symlink chain so first creation atomically
+		// publishes the target file via stage+link instead of exposing a
+		// zero-byte file before the exclusive lock is acquired.
+		target := resolveCanonicalPath(path)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return fmt.Errorf("writing catalogs: %w", err)
 		}
-		if tmp, err := stageCatalog(path, data, 0o600); err == nil {
-			linkErr := os.Link(tmp, path)
+		if tmp, err := stageCatalog(target, data, 0o600); err == nil {
+			linkErr := os.Link(tmp, target)
 			_ = os.Remove(tmp)
 			if linkErr == nil {
 				return nil
@@ -312,7 +315,7 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	if err != nil {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
-	unlock, err := lockOpenFileExclusive(f)
+	closeAndUnlock, err := lockOpenFileExclusive(f)
 	if err != nil {
 		f.Close()
 		return fmt.Errorf("writing catalogs: %w", err)
@@ -322,8 +325,7 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 			_, err = f.Write(data)
 		}
 	}
-	unlock()
-	if closeErr := f.Close(); err == nil {
+	if closeErr := closeAndUnlock(); err == nil {
 		err = closeErr
 	}
 	if err != nil {

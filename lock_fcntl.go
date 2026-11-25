@@ -125,8 +125,10 @@ func openFileInodeKey(f *os.File) (string, error) {
 }
 
 // lockOpenFileExclusive acquires an in-process inode mutex and POSIX fcntl
-// write lock directly on open file f.
-func lockOpenFileExclusive(f *os.File) (func(), error) {
+// write lock directly on open file f. The returned function unlocks and closes
+// f BEFORE releasing the in-process mutex so close(2) cannot drop another
+// goroutine's process-owned fcntl lock on the same inode.
+func lockOpenFileExclusive(f *os.File) (func() error, error) {
 	key, err := openFileInodeKey(f)
 	if err != nil {
 		return nil, err
@@ -145,16 +147,19 @@ func lockOpenFileExclusive(f *os.File) (func(), error) {
 		mu.Unlock()
 		return nil, err
 	}
-	return func() {
+	return func() error {
 		unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
 		_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
+		err := f.Close()
 		mu.Unlock()
+		return err
 	}, nil
 }
 
 // lockOpenFileShared acquires an in-process inode mutex and POSIX fcntl read
-// lock directly on open file f.
-func lockOpenFileShared(f *os.File) (func(), error) {
+// lock directly on open file f. The returned function unlocks and closes f
+// BEFORE releasing the in-process mutex.
+func lockOpenFileShared(f *os.File) (func() error, error) {
 	key, err := openFileInodeKey(f)
 	if err != nil {
 		return nil, err
@@ -173,9 +178,11 @@ func lockOpenFileShared(f *os.File) (func(), error) {
 		mu.Unlock()
 		return nil, err
 	}
-	return func() {
+	return func() error {
 		unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
 		_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
+		err := f.Close()
 		mu.Unlock()
+		return err
 	}, nil
 }
