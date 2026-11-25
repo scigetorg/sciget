@@ -577,7 +577,7 @@ func sortEESSIBuilds(builds []eessiBuild) {
 
 func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, ok bool, err error) {
 	for range 4 {
-		unlock, _, locked, missing, lockErr := lockCatalogDirSharedWithMissing(dir)
+		unlock, _, locked, missing, lockedDir, lockErr := lockCatalogDirSharedWithMissing(dir)
 		if lockErr != nil {
 			return nil, nil, false, lockErr
 		}
@@ -591,7 +591,7 @@ func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, 
 			}
 			return anyPathExists(missing)
 		}
-		if cleanErr := checkCatalogClean(dir); errors.Is(cleanErr, os.ErrNotExist) {
+		if cleanErr := checkCatalogClean(lockedDir); errors.Is(cleanErr, os.ErrNotExist) {
 			unlock()
 			if appeared, _ := retryIfMissingAppeared(); appeared {
 				continue
@@ -604,7 +604,7 @@ func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, 
 			}
 			return nil, nil, false, cleanErr
 		}
-		catData, readErr := os.ReadFile(filepath.Join(dir, "catalog.json"))
+		catData, readErr := os.ReadFile(filepath.Join(lockedDir, "catalog.json"))
 		if errors.Is(readErr, os.ErrNotExist) {
 			unlock()
 			if appeared, _ := retryIfMissingAppeared(); appeared {
@@ -643,7 +643,7 @@ func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, 
 			}
 			return nil, nil, false, nil
 		}
-		raw, eessiErr := os.ReadFile(filepath.Join(dir, "eessi.json"))
+		raw, eessiErr := os.ReadFile(filepath.Join(lockedDir, "eessi.json"))
 		unlock()
 		if errors.Is(eessiErr, os.ErrNotExist) {
 			if appeared, statErr := retryIfMissingAppeared(); statErr != nil {

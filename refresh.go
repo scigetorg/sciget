@@ -99,6 +99,7 @@ func refreshCatalogs() ([]refreshResult, error) {
 	client.CheckRedirect = httpsOnly // as the catalog URL itself must be
 	read := onceReader(client, maxSize)
 	startGens := make([]catalogGen, len(used))
+	startDirs := make([]string, len(used))
 	startErrs := make([]error, len(used))
 	dirs := make([]string, len(used))
 	slotPaths := make([]string, len(used))
@@ -107,7 +108,7 @@ func refreshCatalogs() ([]refreshResult, error) {
 		dirs[i] = cat.dir(cacheDir)
 		slotPaths[i] = catalogLockPath(dirs[i])
 		targetPaths[i] = catalogTargetLockPath(dirs[i])
-		startGens[i], startErrs[i] = readCatalogLockGen(dirs[i])
+		startGens[i], startDirs[i], startErrs[i] = readCatalogLockState(dirs[i])
 	}
 	var results []refreshResult
 	for i, cat := range used {
@@ -116,7 +117,7 @@ func refreshCatalogs() ([]refreshResult, error) {
 			continue
 		}
 		dir := dirs[i]
-		changed, empty, newGen, bumped, err := refreshCatalogAtGen(read, cat, dir, startGens[i], func() (bool, error) {
+		changed, empty, newGen, bumped, err := refreshCatalogAtGen(read, cat, dir, startGens[i], startDirs[i], func() (bool, error) {
 			return catalogDirRegistered(dir)
 		})
 		if bumped {
@@ -161,19 +162,20 @@ func newHTTPClient(cfg config) (*http.Client, error) {
 // whether the catalog is empty. Any failure leaves the copy as it was.
 // Each success also writes the URL to dir's url file.
 func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog, dir string) (changed, empty bool, err error) {
-	startGen, err := readCatalogLockGen(dir)
+	startGen, startDir, err := readCatalogLockState(dir)
 	if err != nil {
 		return false, false, fmt.Errorf("reading catalog lock: %w", err)
 	}
-	return refreshCatalogAt(read, cat, dir, startGen, nil)
-}
-
-func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalog, dir string, startGen catalogGen, stillRegistered func() (bool, error)) (changed, empty bool, err error) {
-	changed, empty, _, _, err = refreshCatalogAtGen(read, cat, dir, startGen, stillRegistered)
+	changed, empty, _, _, err = refreshCatalogAtGen(read, cat, dir, startGen, startDir, nil)
 	return changed, empty, err
 }
 
-func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat catalog, dir string, startGen catalogGen, stillRegistered func() (bool, error)) (changed, empty bool, newGen catalogGen, bumped bool, err error) {
+func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalog, dir string, startGen catalogGen, stillRegistered func() (bool, error)) (changed, empty bool, err error) {
+	changed, empty, _, _, err = refreshCatalogAtGen(read, cat, dir, startGen, "", stillRegistered)
+	return changed, empty, err
+}
+
+func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat catalog, dir string, startGen catalogGen, startDir string, stillRegistered func() (bool, error)) (changed, empty bool, newGen catalogGen, bumped bool, err error) {
 	data, base, err := read(cat.URL)
 	if err != nil {
 		return false, false, catalogGen{}, false, err
@@ -246,7 +248,11 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 		return false, false, catalogGen{}, false, fmt.Errorf("writing catalog: %w", err)
 	}
 	defer lk.unlock()
-	if lk.gen != startGen {
+	ioDir := lk.dir
+	if ioDir == "" {
+		ioDir = canonicalCatalogDir(dir)
+	}
+	if lk.gen != startGen || (startDir != "" && ioDir != startDir) {
 		return false, false, catalogGen{}, false, errors.New("catalog cache changed during refresh; run 'sciget refresh' again")
 	}
 	if stillRegistered != nil {
@@ -259,16 +265,12 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 		}
 	}
 	if needsEmptyAppsCheck {
-		if !cachedAppsIsEmpty(dir) && !cachedHasEESSI(dir) {
+		if !cachedAppsIsEmpty(ioDir) && !cachedHasEESSI(ioDir) {
 			return false, false, catalogGen{}, false, errors.New("downloaded catalog is invalid: no containers")
 		}
 		empty = true
 	} else {
-		mkdirTarget := dir
-		if resolved, ok := resolveCanonicalPath(dir, false); ok {
-			mkdirTarget = resolved
-		}
-		if err := os.MkdirAll(mkdirTarget, 0o755); err != nil {
+		if err := os.MkdirAll(ioDir, 0o755); err != nil {
 			return false, false, catalogGen{}, false, fmt.Errorf("writing catalog: %w", err)
 		}
 	}
@@ -278,7 +280,7 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 	newGen = lk.gen
 	bumped = true
 	// 0o600, as catalogs.json: a query string may carry a token.
-	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(ioDir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
 		return false, false, newGen, true, fmt.Errorf("writing catalog: %w", err)
 	}
 	// Stage every changed file and back up replaced files first so a mid-commit
@@ -311,7 +313,7 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 		}
 	}
 	for _, file := range files {
-		path := filepath.Join(dir, file.name)
+		path := filepath.Join(ioDir, file.name)
 		old, oldErr := os.ReadFile(path)
 		if oldErr == nil && bytes.Equal(old, file.data) {
 			continue
@@ -327,7 +329,7 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 		}
 		var bakPath string
 		if oldErr == nil {
-			bakPath, err = stageTemp(dir, file.name+".*.bak", old, file.mode)
+			bakPath, err = stageTemp(ioDir, file.name+".*.bak", old, file.mode)
 			if err != nil {
 				os.Remove(tmpPath)
 				cleanupStaged()
@@ -338,10 +340,10 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 	}
 
 	var staleEESSIBak string
-	eessiPath := filepath.Join(dir, "eessi.json")
+	eessiPath := filepath.Join(ioDir, "eessi.json")
 	if eessiLink == "" {
 		if _, err := os.Lstat(eessiPath); err == nil {
-			f, err := os.CreateTemp(dir, "eessi.json.*.bak")
+			f, err := os.CreateTemp(ioDir, "eessi.json.*.bak")
 			if err != nil {
 				cleanupStaged()
 				return false, empty, newGen, true, fmt.Errorf("removing stale EESSI catalog: %w", err)
@@ -403,14 +405,14 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 		changed = true
 	}
 	cleanupStaged()
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(ioDir)
 	if err != nil {
 		return changed, empty, newGen, true, fmt.Errorf("cleaning catalog backups: %w", err)
 	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if isRefreshTempFile(name) {
-			if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := os.Remove(filepath.Join(ioDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return changed, empty, newGen, true, fmt.Errorf("removing stale catalog backup %s: %w", name, err)
 			}
 		}

@@ -3164,7 +3164,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 		prevMaxShared := maxSharedLockAttempts
 		maxSharedLockAttempts = 1
-		exhaustUnlock, _, exhaustLocked, _, exhaustErr := lockCatalogDirSharedWithMissing(danglingAlias)
+		exhaustUnlock, _, exhaustLocked, _, _, exhaustErr := lockCatalogDirSharedWithMissing(danglingAlias)
 		maxSharedLockAttempts = prevMaxShared
 		secondExclLk.unlock()
 		if exhaustUnlock != nil {
@@ -3173,6 +3173,286 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if exhaustErr == nil || !strings.Contains(exhaustErr.Error(), "catalog locks busy during read") || exhaustLocked {
 			t.Fatalf("exhausting shared lock retries must fail without bypassing second lock: locked=%v err=%v", exhaustLocked, exhaustErr)
 		}
+		// Distinct directories whose lock filenames fold to the same hash
+		// (e.g. "strasse" vs "straße", or "alpha-<h>" vs "ALPHA-<h>" on a
+		// case-sensitive filesystem) must NOT be conflated as the same catalog
+		// slot during 'catalog remove'.
+		t.Run("shared lock hash does not conflate distinct directories on remove", func(t *testing.T) {
+			subTmp := t.TempDir()
+			isolateTestEnv(t, subTmp)
+			layers, err := readCatalogLayers()
+			if err != nil {
+				t.Fatal(err)
+			}
+			strasseDir := filepath.Join(subTmp, "strasse")
+			strasseSharpDir := filepath.Join(subTmp, "stra\u00dfe")
+			if err := os.MkdirAll(strasseDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(strasseSharpDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if infoA, errA := os.Lstat(strasseDir); errA == nil {
+				if infoB, errB := os.Lstat(strasseSharpDir); errB == nil && !os.SameFile(infoA, infoB) {
+					if sameCatalogSlot(strasseDir, strasseSharpDir) {
+						t.Fatalf("sameCatalogSlot must not conflate distinct directories %q and %q", strasseDir, strasseSharpDir)
+					}
+				}
+			}
+			catA := catalog{Name: "alpha", URL: "https://example.invalid/catalog.json", Use: true}
+			catB := catalog{Name: "beta", URL: "https://example.invalid/catalog.json", Use: true}
+			if err := writeCatalogList(layers.userPath, []catalog{catA, catB}, false); err != nil {
+				t.Fatal(err)
+			}
+			dirA := catA.dir(layers.cacheDir)
+			// Create a sibling directory whose name folds to dirA's lock hash
+			// ("ALPHA-<hash>" vs "alpha-<hash>") and point beta's symlink at it.
+			dirAUpper := filepath.Join(filepath.Dir(dirA), strings.ToUpper(filepath.Base(dirA)))
+			if err := os.MkdirAll(dirA, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dirAUpper, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			infoA, errA := os.Lstat(dirA)
+			infoU, errU := os.Lstat(dirAUpper)
+			if errA != nil || errU != nil || os.SameFile(infoA, infoU) {
+				t.Skip("filesystem is case-insensitive")
+			}
+			dirB := catB.dir(layers.cacheDir)
+			if err := os.Symlink(dirAUpper, dirB); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dirA, "apps.json"), []byte(`{}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dirAUpper, "apps.json"), []byte(`{}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var out, errBuf bytes.Buffer
+			if code := run([]string{"catalog", "remove", "alpha"}, &out, &errBuf); code != 0 {
+				t.Fatalf("catalog remove alpha failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+			}
+			if _, err := os.Lstat(dirA); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("removing alpha must delete its own cache directory, lstat err=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dirAUpper, "apps.json")); err != nil {
+				t.Fatalf("removing alpha must leave beta's sibling target intact: %v", err)
+			}
+		})
+		// Retargeting a catalog symlink either after or during lock acquisition
+		// must never let readers or refreshes perform file I/O against the new
+		// target while its exclusive lock is held.
+		t.Run("retargeting catalog symlink cannot bypass target lock", func(t *testing.T) {
+			subTmp := t.TempDir()
+			slotDir := filepath.Join(subTmp, "slots")
+			target1 := filepath.Join(subTmp, "target1")
+			target2 := filepath.Join(subTmp, "target2")
+			for _, d := range []string{slotDir, target1, target2} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeFixture := func(d, toolName, pkgName string) {
+				appsJSON := fmt.Sprintf(`{"%s":{"categories":["imaging"],"apps":{"%s 1.0":{"image":"%s_1.0","version":"20260101","exec":"%s"}}}}`, toolName, toolName, toolName, toolName)
+				catJSON := `{"schemaVersion":1,"appJsonUrl":"https://example.invalid/apps.json","eessiCatalogUrl":"https://example.invalid/eessi.json","eessiStacks":["2023.06"]}`
+				eessiJSON := fmt.Sprintf(`{"schemaVersion":1,"explicitSelectionRequired":true,"packages":[{"id":"%s","name":"%s","stack":"2023.06","module":"%s/1.0","categories":["imaging"],"exec":["%s"]}]}`, pkgName, pkgName, pkgName, pkgName)
+				if err := os.WriteFile(filepath.Join(d, "apps.json"), []byte(appsJSON), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(d, "catalog.json"), []byte(catJSON), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(d, "eessi.json"), []byte(eessiJSON), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeFixture(target1, "toolone", "pkgone")
+			writeFixture(target2, "tooltwo", "pkgtwo")
+			alias := filepath.Join(slotDir, "alias-1234567890ab")
+			retarget := func(to string) {
+				tmpLink := filepath.Join(slotDir, ".retarget-tmp")
+				_ = os.Remove(tmpLink)
+				if err := os.Symlink(to, tmpLink); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmpLink, alias); err != nil {
+					t.Fatal(err)
+				}
+			}
+			retarget(target1)
+			// Create lock files for slot, target1, and target2.
+			for _, p := range []string{catalogLockPath(alias), catalogTargetLockPath(target1), catalogTargetLockPath(target2)} {
+				if err := os.WriteFile(p, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Hold target2's exclusive lock throughout the post-lock retarget checks.
+			t2Lk, err := lockFileExclusive(catalogTargetLockPath(target2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if t2Lk != nil {
+					t2Lk.unlock()
+				}
+			}()
+
+			// 1. Reader retargeted AFTER acquiring target1's shared lock must
+			// read locked target1 (never touching locked target2).
+			prevSnapHook := beforeCatalogSnapshotRead
+			beforeCatalogSnapshotRead = func(dir string) {
+				if dir == alias {
+					retarget(target2)
+				}
+			}
+			containers, _, err := readCatalogSnapshot(alias)
+			beforeCatalogSnapshotRead = prevSnapHook
+			if err != nil {
+				t.Fatalf("readCatalogSnapshot failed after post-lock retarget: %v", err)
+			}
+			if len(containers) != 1 || containers[0].tool != "toolone" {
+				t.Fatalf("readCatalogSnapshot read wrong target after retarget: %+v", containers)
+			}
+
+			retarget(target1)
+			beforeCatalogSnapshotRead = func(dir string) {
+				if dir == alias {
+					retarget(target2)
+				}
+			}
+			rawEESSI, _, ok, err := readCatalogEESSISnapshot(alias)
+			beforeCatalogSnapshotRead = prevSnapHook
+			if err != nil || !ok || !strings.Contains(string(rawEESSI), `"pkgone"`) {
+				t.Fatalf("readCatalogEESSISnapshot read wrong target after retarget: ok=%v err=%v data=%q", ok, err, string(rawEESSI))
+			}
+
+			// 2. Refresh retargeted AFTER acquiring target1's exclusive lock
+			// must write ONLY to target1 and leave locked target2 untouched.
+			retarget(target1)
+			startGen, err := readCatalogLockGen(alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refreshRead := func(link string) ([]byte, string, error) {
+				switch link {
+				case "https://example.invalid/cat.json":
+					return []byte(`{"schemaVersion":1,"appJsonUrl":"https://example.invalid/apps.json"}`), link, nil
+				case "https://example.invalid/apps.json":
+					return []byte(`{"updatedtool":{"categories":["imaging"],"apps":{"updatedtool 1.0":{"image":"updatedtool_1.0","version":"20260102","exec":"updatedtool"}}}}`), link, nil
+				default:
+					return nil, "", fmt.Errorf("unexpected url %s", link)
+				}
+			}
+			changed, _, err := refreshCatalogAt(refreshRead, catalog{Name: "alias", URL: "https://example.invalid/cat.json"}, alias, startGen, func() (bool, error) {
+				retarget(target2)
+				return true, nil
+			})
+			if err != nil || !changed {
+				t.Fatalf("refreshCatalogAt failed after post-lock retarget: changed=%v err=%v", changed, err)
+			}
+			if data, err := os.ReadFile(filepath.Join(target1, "apps.json")); err != nil || !strings.Contains(string(data), "updatedtool") {
+				t.Fatalf("expected target1 to receive refresh write, err=%v data=%q", err, string(data))
+			}
+			if data, err := os.ReadFile(filepath.Join(target2, "apps.json")); err != nil || !strings.Contains(string(data), "tooltwo") {
+				t.Fatalf("locked target2 was modified by retargeted refresh! err=%v data=%q", err, string(data))
+			}
+
+			// 3. Reader retargeted DURING lock acquisition must retry and wait
+			// for target2's exclusive lock before returning target2.
+			retarget(target1)
+			prevSecondHook := beforeSecondSharedLock
+			retargetedInReader := false
+			readerHitHook := make(chan struct{})
+			beforeSecondSharedLock = func(dir string) {
+				if dir == alias && !retargetedInReader {
+					retargetedInReader = true
+					retarget(target2)
+					close(readerHitHook)
+				}
+			}
+			readerDirCh := make(chan string, 1)
+			readerErrCh := make(chan error, 1)
+			go func() {
+				u, _, locked, _, lockedDir, err := lockCatalogDirSharedWithMissing(alias)
+				if err == nil && locked {
+					u()
+				}
+				readerDirCh <- lockedDir
+				readerErrCh <- err
+			}()
+			<-readerHitHook
+			// Reader must remain blocked while t2Lk is held.
+			select {
+			case err := <-readerErrCh:
+				beforeSecondSharedLock = prevSecondHook
+				t.Fatalf("reader returned without waiting for retargeted target2 lock: err=%v dir=%q", err, <-readerDirCh)
+			case <-time.After(40 * time.Millisecond):
+			}
+			t2Lk.unlock()
+			t2Lk = nil
+			select {
+			case err := <-readerErrCh:
+				beforeSecondSharedLock = prevSecondHook
+				gotDir := <-readerDirCh
+				if err != nil {
+					t.Fatalf("reader failed after target2 lock released: %v", err)
+				}
+				if gotDir != canonicalCatalogDir(target2) {
+					t.Fatalf("expected lockedDir=%q after retarget retry, got %q", canonicalCatalogDir(target2), gotDir)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("reader timed out after target2 lock released")
+			}
+
+			// 4. Exclusive lock retargeted DURING acquisition must retry and
+			// wait for target2's exclusive lock before returning target2.
+			retarget(target1)
+			t1Lk, err := lockFileExclusive(catalogTargetLockPath(target1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t2Lk, err = lockFileExclusive(catalogTargetLockPath(target2))
+			if err != nil {
+				t1Lk.unlock()
+				t.Fatal(err)
+			}
+			exclDirCh := make(chan string, 1)
+			exclErrCh := make(chan error, 1)
+			go func() {
+				lk, err := lockCatalogDir(alias)
+				var d string
+				if err == nil {
+					d = lk.dir
+					lk.unlock()
+				}
+				exclDirCh <- d
+				exclErrCh <- err
+			}()
+			time.Sleep(30 * time.Millisecond)
+			retarget(target2)
+			t1Lk.unlock()
+			// Must remain blocked on target2 while t2Lk is held.
+			select {
+			case err := <-exclErrCh:
+				t.Fatalf("lockCatalogDir returned without waiting for retargeted target2 lock: err=%v dir=%q", err, <-exclDirCh)
+			case <-time.After(40 * time.Millisecond):
+			}
+			t2Lk.unlock()
+			t2Lk = nil
+			select {
+			case err := <-exclErrCh:
+				gotDir := <-exclDirCh
+				if err != nil {
+					t.Fatalf("lockCatalogDir failed after target2 lock released: %v", err)
+				}
+				if gotDir != canonicalCatalogDir(target2) {
+					t.Fatalf("expected lk.dir=%q after retarget retry, got %q", canonicalCatalogDir(target2), gotDir)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("lockCatalogDir timed out after target2 lock released")
+			}
+		})
 		hlDir := filepath.Join(tmp, "lock-identity")
 		if err := os.MkdirAll(hlDir, 0o755); err != nil {
 			t.Fatal(err)
