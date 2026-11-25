@@ -153,20 +153,17 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	}
 	empty = appsLink == "" && eessiLink == ""
 	apps := []byte("{}")
+	needsEmptyAppsCheck := false
 	if appsLink != "" {
 		if apps, _, err = read(appsLink); err != nil {
 			return false, false, err
 		}
 		containers, err := parseCatalog(apps)
-		if err == nil && len(containers) == 0 && eessiLink == "" {
-			if cachedWasEESSIOnly(dir) {
-				empty = true
-			} else {
-				err = errors.New("no containers")
-			}
-		}
 		if err != nil {
 			return false, false, fmt.Errorf("downloaded catalog is invalid: %w", err)
+		}
+		if len(containers) == 0 && eessiLink == "" {
+			needsEmptyAppsCheck = true
 		}
 	}
 	var eessiData []byte
@@ -178,18 +175,39 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			return false, false, fmt.Errorf("downloaded EESSI catalog is invalid: %w", err)
 		}
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false, false, fmt.Errorf("writing catalog: %w", err)
+	if needsEmptyAppsCheck {
+		// Only accept an empty {} apps.json with no EESSI catalog when dir
+		// already caches an empty apps.json (e.g. a retired EESSI-only domain).
+		// Check under the directory lock before writing url so a concurrent
+		// container refresh cannot be overwritten.
+		if _, err := os.Stat(dir); err != nil {
+			return false, false, errors.New("downloaded catalog is invalid: no containers")
+		}
+		unlock, err := lockCatalogDir(dir)
+		if err != nil {
+			return false, false, fmt.Errorf("writing catalog: %w", err)
+		}
+		defer unlock()
+		if !cachedAppsIsEmpty(dir) {
+			return false, false, errors.New("downloaded catalog is invalid: no containers")
+		}
+		empty = true
+	} else {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return false, false, fmt.Errorf("writing catalog: %w", err)
+		}
 	}
 	// 0o600, as catalogs.json: a query string may carry a token.
 	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
 		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
-	unlock, err := lockCatalogDir(dir)
-	if err != nil {
-		return false, false, fmt.Errorf("writing catalog: %w", err)
+	if !needsEmptyAppsCheck {
+		unlock, err := lockCatalogDir(dir)
+		if err != nil {
+			return false, false, fmt.Errorf("writing catalog: %w", err)
+		}
+		defer unlock()
 	}
-	defer unlock()
 	// Stage every changed file and back up replaced files first so a mid-commit
 	// rename failure rolls back earlier renames instead of leaving a mixed cache.
 	type pendingFile struct {
@@ -330,25 +348,10 @@ func downloadCatalog(client *http.Client, catalogURL string, maxSize int64) ([]b
 	return data, resp.Request.URL.String(), nil
 }
 
-// cachedWasEESSIOnly reports whether dir currently caches an EESSI-only
-// generation (has eessi.json or eessiCatalogUrl and zero cached containers), so
-// removing eessiCatalogUrl while apps.json remains {} retires EESSI cleanly.
-func cachedWasEESSIOnly(dir string) bool {
-	hasEESSI := false
-	if _, err := os.Stat(filepath.Join(dir, "eessi.json")); err == nil {
-		hasEESSI = true
-	} else if catData, err := os.ReadFile(filepath.Join(dir, "catalog.json")); err == nil {
-		if meta, err := parseCatalogEESSI(catData); err == nil && meta.EESSICatalogURL != "" {
-			hasEESSI = true
-		}
-	}
-	if !hasEESSI {
-		return false
-	}
+// cachedAppsIsEmpty reports whether dir already caches a valid empty apps.json
+// (zero containers). Must be called while holding lockCatalogDir(dir).
+func cachedAppsIsEmpty(dir string) bool {
 	appsData, err := os.ReadFile(filepath.Join(dir, "apps.json"))
-	if errors.Is(err, os.ErrNotExist) {
-		return true
-	}
 	if err != nil {
 		return false
 	}

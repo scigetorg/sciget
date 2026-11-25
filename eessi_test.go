@@ -417,6 +417,16 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	if !strings.Contains(stdout.String(), "updated.") || !strings.Contains(stdout.String(), "no apps list yet") {
 		t.Fatalf("expected refresh to report updated + empty when EESSI-only domain retires EESSI: %s", stdout.String())
 	}
+	// A subsequent refresh of that retired domain with the same empty {} apps.json
+	// must continue to succeed instead of failing with "no containers".
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("second refresh after EESSI retirement failed (%d): %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "is up to date.") {
+		t.Fatalf("expected second refresh to report up to date: %s", stdout.String())
+	}
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"eessi", "find", "paraview"}, &stdout, &stderr); code != 0 || stdout.Len() != 0 {

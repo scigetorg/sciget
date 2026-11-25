@@ -1,4 +1,4 @@
-//go:build unix
+//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
 
 package main
 
@@ -9,7 +9,7 @@ import (
 	"syscall"
 )
 
-// lockCatalogDir acquires an exclusive advisory file lock on dir so concurrent
+// lockCatalogDir acquires an exclusive advisory flock on dir so concurrent
 // refreshes cannot interleave commits or rollbacks.
 func lockCatalogDir(dir string) (func(), error) {
 	f, err := os.OpenFile(filepath.Join(dir, ".refresh.lock"), os.O_CREATE|os.O_RDWR, 0o600)

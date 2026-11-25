@@ -1,4 +1,4 @@
-//go:build !unix
+//go:build !unix && !windows
 
 package main
 
@@ -9,8 +9,8 @@ import (
 
 var catalogDirLocks sync.Map
 
-// lockCatalogDir serializes in-process refreshes on dir on platforms without
-// POSIX flock.
+// lockCatalogDir serializes in-process refreshes on platforms without Unix or
+// Windows file locking APIs.
 func lockCatalogDir(dir string) (func(), error) {
 	key := filepath.Clean(dir)
 	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
