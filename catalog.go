@@ -165,13 +165,17 @@ type catalogGen struct {
 
 // catalogDirLock is an exclusive lock held across a catalog's slot and target
 // lock files. dir is the canonical target directory verified while holding the
-// locks; callers must perform file I/O against dir rather than re-following a
-// symlinked slot path.
+// locks, slotDir is the canonical parent joined with the slot leaf name, and
+// linkLeaf records whether slotDir itself was a symlink or NTFS junction.
+// Callers must perform post-lock file I/O and removals against dir / slotDir
+// rather than re-following an unresolved path.
 type catalogDirLock struct {
-	dir    string
-	gen    catalogGen
-	bump   func() error
-	unlock func()
+	dir      string
+	slotDir  string
+	linkLeaf bool
+	gen      catalogGen
+	bump     func() error
+	unlock   func()
 }
 
 // isLinkLeaf reports whether path itself is a symlink or (on Windows) an NTFS
@@ -672,13 +676,18 @@ func hashLockPath(parent, base string) string {
 // inside its resolved parent) preserves lock identity across removals and
 // avoids needing write access outside the resolved catalogs tree, and hashing
 // the lowercased basename keeps the filename well under 255-byte limits.
-func catalogLockPath(dir string) string {
+func canonicalSlotPath(dir string) string {
 	cleaned := filepath.Clean(dir)
 	parent, ok := resolveCanonicalPath(filepath.Dir(cleaned), false)
 	if !ok {
 		parent = filepath.Dir(cleaned)
 	}
-	return hashLockPath(parent, filepath.Base(cleaned))
+	return filepath.Join(parent, filepath.Base(cleaned))
+}
+
+func catalogLockPath(dir string) string {
+	slotDir := canonicalSlotPath(dir)
+	return hashLockPath(filepath.Dir(slotDir), filepath.Base(slotDir))
 }
 
 func catalogTargetLockPathForClean(clean string) string {
@@ -796,11 +805,21 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogDirLoc
 var afterInDirFallbackLock = func(dir string) {}
 
 func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft int) (*catalogDirLock, error) {
-	clean := canonicalCatalogDir(dir)
-	slotPath := catalogLockPath(dir)
-	targetPath := catalogTargetLockPathForClean(clean)
-	inDirPath := filepath.Join(clean, ".lock")
-	linkLeaf := isLinkLeaf(dir)
+	slotDir := canonicalSlotPath(dir)
+	slotPath := hashLockPath(filepath.Dir(slotDir), filepath.Base(slotDir))
+	linkLeaf := isLinkLeaf(slotDir)
+	clean, targetResolved := resolveCanonicalPath(slotDir, false)
+	if !targetResolved {
+		if allowInDirFallback || !linkLeaf {
+			return nil, fmt.Errorf("cannot resolve catalog directory %s", dir)
+		}
+		clean = ""
+	}
+	var targetPath, inDirPath string
+	if clean != "" {
+		targetPath = catalogTargetLockPathForClean(clean)
+		inDirPath = filepath.Join(clean, ".lock")
+	}
 	if allowInDirFallback {
 		// Ensure both external lock parent directories exist before computing
 		// OS filesystem identity ordering keys so concurrent first refreshes
@@ -809,9 +828,11 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 		_ = os.MkdirAll(filepath.Dir(slotPath), 0o755)
 		_ = os.MkdirAll(filepath.Dir(targetPath), 0o755)
 	}
-	slotSameAsTarget := sameLockFile(slotPath, targetPath)
+	slotSameAsTarget := targetPath != "" && sameLockFile(slotPath, targetPath)
 	var extPaths []string
-	if !allowInDirFallback && linkLeaf && !slotSameAsTarget {
+	if targetPath == "" {
+		extPaths = []string{slotPath}
+	} else if !allowInDirFallback && linkLeaf && !slotSameAsTarget {
 		// When removing a dangling leaf link whose target parent does not even
 		// exist, lock only slotPath without creating the missing target parent
 		// (a single lock can never deadlock with concurrent refreshes).
@@ -834,11 +855,21 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 		targetLk = nil
 	}
 	targetChanged := func() bool {
-		cleanAfter := canonicalCatalogDir(dir)
-		return cleanAfter != clean ||
-			!sameLockFile(catalogLockPath(dir), slotPath) ||
-			!sameLockFile(catalogTargetLockPathForClean(cleanAfter), targetPath) ||
-			isLinkLeaf(dir) != linkLeaf
+		slotAfter := canonicalSlotPath(dir)
+		if slotAfter != slotDir || !sameLockFile(hashLockPath(filepath.Dir(slotAfter), filepath.Base(slotAfter)), slotPath) {
+			return true
+		}
+		if isLinkLeaf(slotAfter) != linkLeaf {
+			return true
+		}
+		cleanAfter, okAfter := resolveCanonicalPath(slotAfter, false)
+		if okAfter != targetResolved {
+			return true
+		}
+		if !targetResolved {
+			return false
+		}
+		return cleanAfter != clean || !sameLockFile(catalogTargetLockPathForClean(cleanAfter), targetPath)
 	}
 	needInDirFallback := false
 	var waitFirst string
@@ -850,10 +881,14 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 				}
 				return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
 			}
-			extPaths = catalogExternalLockPathsFor(slotPath, targetPath)
-			if !allowInDirFallback && linkLeaf && !slotSameAsTarget {
-				if _, err := os.Stat(filepath.Dir(targetPath)); errors.Is(err, os.ErrNotExist) {
-					extPaths = []string{slotPath}
+			if targetPath == "" {
+				extPaths = []string{slotPath}
+			} else {
+				extPaths = catalogExternalLockPathsFor(slotPath, targetPath)
+				if !allowInDirFallback && linkLeaf && !slotSameAsTarget {
+					if _, err := os.Stat(filepath.Dir(targetPath)); errors.Is(err, os.ErrNotExist) {
+						extPaths = []string{slotPath}
+					}
 				}
 			}
 			if waitFirst != "" && len(extPaths) == 2 && sameLockFile(extPaths[1], waitFirst) {
@@ -916,7 +951,7 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 			if sameLockFile(p, slotPath) {
 				slotLk = lk
 			}
-			if sameLockFile(p, targetPath) {
+			if targetPath != "" && sameLockFile(p, targetPath) {
 				targetLk = lk
 			}
 		}
@@ -961,8 +996,10 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 			return catalogGen{slot: slotG, target: inLk.gen}
 		}
 		combined := &catalogDirLock{
-			dir: clean,
-			gen: computeGen(),
+			dir:      clean,
+			slotDir:  slotDir,
+			linkLeaf: linkLeaf,
+			gen:      computeGen(),
 			unlock: func() {
 				inLk.unlock()
 				unlockAll()
@@ -999,7 +1036,7 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 	// held so concurrent holders finish and target's monotonic generation is
 	// preserved. Never retire the target's in-dir lock when removing a leaf
 	// link (which leaves the target intact) or when targetPath was skipped.
-	if targetLk != nil && !(linkLeaf && !allowInDirFallback) {
+	if targetLk != nil && clean != "" && !(linkLeaf && !allowInDirFallback) {
 		if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
 			if _, inStatErr := os.Stat(inDirPath); inStatErr == nil {
 				inLk, inErr := lockFileExclusive(inDirPath)
@@ -1032,7 +1069,7 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 		}
 	}
 	var readOnlyTargetGen uint64
-	if linkLeaf && !allowInDirFallback && targetLk == nil {
+	if linkLeaf && !allowInDirFallback && targetLk == nil && clean != "" {
 		if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
 			if inUnlock, inGen, inLocked, inErr := lockFileShared(inDirPath); inErr == nil && inLocked {
 				inUnlock()
@@ -1053,8 +1090,10 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 		return catalogGen{slot: slotG, target: targetG}
 	}
 	combined := &catalogDirLock{
-		dir: clean,
-		gen: computeGen(),
+		dir:      clean,
+		slotDir:  slotDir,
+		linkLeaf: linkLeaf,
+		gen:      computeGen(),
 		unlock: func() {
 			if retiredInLk != nil {
 				retiredInLk.unlock()
@@ -1108,8 +1147,15 @@ var maxSharedLockAttempts = 64
 func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []string, string, error) {
 	var waitFirst string
 	for attempt := range maxSharedLockAttempts {
-		slotPath := catalogLockPath(dir)
-		clean := canonicalCatalogDir(dir)
+		slotDir := canonicalSlotPath(dir)
+		slotPath := hashLockPath(filepath.Dir(slotDir), filepath.Base(slotDir))
+		clean, ok := resolveCanonicalPath(slotDir, false)
+		if !ok {
+			// Broken symlink containing ".." through a missing directory or a
+			// symlink loop: never fall back to using the unresolved symlink as
+			// lockedDir (which could later resolve to an unlocked target).
+			return func() {}, catalogGen{}, false, nil, "", nil
+		}
 		targetPath := catalogTargetLockPathForClean(clean)
 		slotSameAsTarget := sameLockFile(slotPath, targetPath)
 		extPaths := catalogExternalLockPathsFor(slotPath, targetPath)
@@ -1131,10 +1177,12 @@ func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []st
 			}
 		}
 		targetChanged := func() bool {
-			cleanAfter := canonicalCatalogDir(dir)
-			return cleanAfter != clean ||
-				!sameLockFile(catalogLockPath(dir), slotPath) ||
-				!sameLockFile(catalogTargetLockPathForClean(cleanAfter), targetPath)
+			slotAfter := canonicalSlotPath(dir)
+			if slotAfter != slotDir || !sameLockFile(hashLockPath(filepath.Dir(slotAfter), filepath.Base(slotAfter)), slotPath) {
+				return true
+			}
+			cleanAfter, okAfter := resolveCanonicalPath(slotAfter, false)
+			return !okAfter || cleanAfter != clean || !sameLockFile(catalogTargetLockPathForClean(cleanAfter), targetPath)
 		}
 		for _, p := range extPaths {
 			var (
@@ -1282,8 +1330,15 @@ func readCatalogSnapshotLocked(dir string) ([]container, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if !locked {
-			return nil, nil, &notDownloadedError{path: filepath.Join(lockedDir, "apps.json")}
+		if !locked || lockedDir == "" {
+			if locked {
+				unlock()
+			}
+			return nil, nil, &notDownloadedError{path: filepath.Join(dir, "apps.json")}
+		}
+		if isLinkLeaf(lockedDir) {
+			unlock()
+			continue
 		}
 		if err := checkCatalogClean(lockedDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 			unlock()
@@ -1345,7 +1400,15 @@ func readCatalogSnapshot(dir string) ([]container, []string, error) {
 		return nil, nil, err
 	}
 	if locked {
+		if lockedDir == "" || isLinkLeaf(lockedDir) {
+			unlock()
+			return readCatalogSnapshotLocked(dir)
+		}
 		beforeCatalogSnapshotRead(dir)
+		if isLinkLeaf(lockedDir) {
+			unlock()
+			return readCatalogSnapshotLocked(dir)
+		}
 		if err := checkCatalogClean(lockedDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 			unlock()
 			if len(missing) > 0 {
@@ -1384,6 +1447,9 @@ func readCatalogSnapshot(dir string) ([]container, []string, error) {
 			}
 		}
 		return containers, mirrors, nil
+	}
+	if lockedDir == "" || isLinkLeaf(lockedDir) {
+		return nil, nil, &notDownloadedError{path: filepath.Join(dir, "apps.json")}
 	}
 	unlockedChanged := func() (bool, error) {
 		if exists, statErr := catalogLockExists(lockedDir); statErr != nil || exists {

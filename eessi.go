@@ -581,10 +581,17 @@ func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, 
 		if lockErr != nil {
 			return nil, nil, false, lockErr
 		}
-		if !locked {
+		if !locked || lockedDir == "" {
+			if locked {
+				unlock()
+			}
 			return nil, nil, false, nil
 		}
 		beforeCatalogSnapshotRead(dir)
+		if isLinkLeaf(lockedDir) {
+			unlock()
+			continue
+		}
 		retryIfMissingAppeared := func() (bool, error) {
 			if len(missing) == 0 {
 				return false, nil

@@ -364,6 +364,11 @@ func removeCatalog(w io.Writer, name string, system bool) error {
 // the catalog lock; tests may set it to synchronize removal races.
 var beforeRemoveCatalogCache = func(dir string) {}
 
+// afterRemoveCatalogLock runs immediately after removeCatalogCache acquires the
+// catalog lock and before deleting; tests may set it to reproduce post-lock
+// parent-retarget races.
+var afterRemoveCatalogLock = func(dir string) {}
+
 // removeCatalogCache deletes a catalog's cache directory under its external
 // lock if no registered catalog still points to dir, and bumps the lock
 // generation so any delayed refresh started before removal refuses to
@@ -390,11 +395,12 @@ func removeCatalogCache(dir string) error {
 		return err
 	}
 	defer lk.unlock()
+	afterRemoveCatalogLock(dir)
 	var registered bool
-	if isLinkLeaf(dir) {
-		registered, err = catalogSlotReferenced(dir)
+	if lk.linkLeaf {
+		registered, err = catalogSlotReferenced(lk.slotDir)
 	} else {
-		registered, err = catalogTargetRegistered(dir)
+		registered, err = catalogTargetRegistered(lk.dir)
 	}
 	if err != nil {
 		return err
@@ -402,10 +408,25 @@ func removeCatalogCache(dir string) error {
 	if registered {
 		return nil
 	}
+	if lk.linkLeaf {
+		if _, statErr := os.Lstat(lk.slotDir); statErr == nil && !isLinkLeaf(lk.slotDir) {
+			return errors.New("catalog cache changed during removal; run again")
+		}
+		if err := lk.bump(); err != nil {
+			return err
+		}
+		if err := os.Remove(lk.slotDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if _, statErr := os.Lstat(lk.dir); statErr == nil && isLinkLeaf(lk.dir) {
+		return errors.New("catalog cache changed during removal; run again")
+	}
 	if err := lk.bump(); err != nil {
 		return err
 	}
-	return os.RemoveAll(dir)
+	return os.RemoveAll(lk.dir)
 }
 
 // useCatalog puts a catalog in use, moving it first or (last) last, or with

@@ -107,8 +107,12 @@ func refreshCatalogs() ([]refreshResult, error) {
 	for i, cat := range used {
 		dirs[i] = cat.dir(cacheDir)
 		slotPaths[i] = catalogLockPath(dirs[i])
-		targetPaths[i] = catalogTargetLockPath(dirs[i])
 		startGens[i], startDirs[i], startErrs[i] = readCatalogLockState(dirs[i])
+		if startDirs[i] != "" {
+			targetPaths[i] = catalogTargetLockPathForClean(startDirs[i])
+		} else {
+			targetPaths[i] = catalogTargetLockPath(dirs[i])
+		}
 	}
 	var results []refreshResult
 	for i, cat := range used {
@@ -249,8 +253,8 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 	}
 	defer lk.unlock()
 	ioDir := lk.dir
-	if ioDir == "" {
-		ioDir = canonicalCatalogDir(dir)
+	if ioDir == "" || isLinkLeaf(ioDir) {
+		return false, false, catalogGen{}, false, errors.New("catalog cache changed during refresh; run 'sciget refresh' again")
 	}
 	if lk.gen != startGen || (startDir != "" && ioDir != startDir) {
 		return false, false, catalogGen{}, false, errors.New("catalog cache changed during refresh; run 'sciget refresh' again")
@@ -265,6 +269,9 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 		}
 	}
 	if needsEmptyAppsCheck {
+		if info, statErr := os.Lstat(ioDir); statErr != nil || !info.IsDir() || isLinkLeaf(ioDir) {
+			return false, false, catalogGen{}, false, errors.New("catalog cache changed during refresh; run 'sciget refresh' again")
+		}
 		if !cachedAppsIsEmpty(ioDir) && !cachedHasEESSI(ioDir) {
 			return false, false, catalogGen{}, false, errors.New("downloaded catalog is invalid: no containers")
 		}
@@ -272,6 +279,9 @@ func refreshCatalogAtGen(read func(link string) ([]byte, string, error), cat cat
 	} else {
 		if err := os.MkdirAll(ioDir, 0o755); err != nil {
 			return false, false, catalogGen{}, false, fmt.Errorf("writing catalog: %w", err)
+		}
+		if info, statErr := os.Lstat(ioDir); statErr != nil || !info.IsDir() || isLinkLeaf(ioDir) {
+			return false, false, catalogGen{}, false, errors.New("catalog cache changed during refresh; run 'sciget refresh' again")
 		}
 	}
 	if err := lk.bump(); err != nil {

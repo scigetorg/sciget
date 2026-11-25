@@ -3452,6 +3452,85 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatalf("lockCatalogDir timed out after target2 lock released")
 			}
+
+			// 5. Broken symlink containing ".." through a missing directory
+			// (alias -> missing/../target2) must never fall back to reading or
+			// refreshing through the unresolved symlink, and removeCatalogCache
+			// must unlink only the broken link without touching target2.
+			brokenAlias := filepath.Join(slotDir, "broken-1234567890ab")
+			if err := os.Symlink(subTmp+string(filepath.Separator)+"nonexistent-dir"+string(filepath.Separator)+".."+string(filepath.Separator)+"target2", brokenAlias); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := readCatalogSnapshot(brokenAlias); err == nil {
+				t.Fatalf("readCatalogSnapshot on broken missing/.. symlink must fail")
+			}
+			if _, _, ok, err := readCatalogEESSISnapshot(brokenAlias); err != nil || ok {
+				t.Fatalf("readCatalogEESSISnapshot on broken missing/.. symlink must return ok=false, got ok=%v err=%v", ok, err)
+			}
+			if lk, err := lockCatalogDir(brokenAlias); err == nil {
+				lk.unlock()
+				t.Fatalf("lockCatalogDir on broken missing/.. symlink must fail")
+			}
+			if err := removeCatalogCache(brokenAlias); err != nil {
+				t.Fatalf("removeCatalogCache on broken missing/.. symlink failed: %v", err)
+			}
+			if _, err := os.Lstat(brokenAlias); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected broken symlink to be unlinked, lstat err=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(target2, "apps.json")); err != nil {
+				t.Fatalf("target2 must remain intact after removing broken symlink: %v", err)
+			}
+
+			// 6. Retargeting a parent symlink AFTER lockCatalogDirForRemove
+			// must delete only the locked root1 directory and leave locked
+			// root2 untouched.
+			root1 := filepath.Join(subTmp, "rm-root1")
+			root2 := filepath.Join(subTmp, "rm-root2")
+			rmDir1 := filepath.Join(root1, "catalogs", "alpha-1234567890ab")
+			rmDir2 := filepath.Join(root2, "catalogs", "alpha-1234567890ab")
+			for _, d := range []string{rmDir1, rmDir2} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(d, "apps.json"), []byte(`{}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			parentLink := filepath.Join(subTmp, "rm-cache-link")
+			retargetParent := func(to string) {
+				tmpL := filepath.Join(subTmp, ".rm-parent-tmp")
+				_ = os.Remove(tmpL)
+				if err := os.Symlink(to, tmpL); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmpL, parentLink); err != nil {
+					t.Fatal(err)
+				}
+			}
+			retargetParent(root1)
+			r2Lk, err := lockFileExclusive(catalogTargetLockPath(rmDir2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r2Lk.unlock()
+			rmViaLink := filepath.Join(parentLink, "catalogs", "alpha-1234567890ab")
+			prevAfterRemove := afterRemoveCatalogLock
+			afterRemoveCatalogLock = func(dir string) {
+				if dir == rmViaLink {
+					retargetParent(root2)
+				}
+			}
+			rmErr := removeCatalogCache(rmViaLink)
+			afterRemoveCatalogLock = prevAfterRemove
+			if rmErr != nil {
+				t.Fatalf("removeCatalogCache failed after post-lock parent retarget: %v", rmErr)
+			}
+			if _, err := os.Lstat(rmDir1); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected locked rmDir1 to be removed, lstat err=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(rmDir2, "apps.json")); err != nil {
+				t.Fatalf("locked rmDir2 was removed after post-lock parent retarget: %v", err)
+			}
 		})
 		hlDir := filepath.Join(tmp, "lock-identity")
 		if err := os.MkdirAll(hlDir, 0o755); err != nil {
