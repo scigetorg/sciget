@@ -1924,6 +1924,61 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if changed, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, existingWritableDir); err != nil || changed {
 				t.Fatalf("second refresh under 0555 catalogs/ failed: changed=%v err=%v", changed, err)
 			}
+			// If an external lock file appears while an existing writer still
+			// holds only the in-dir .lock (e.g. after chmod 0755 and O_CREATE
+			// before flock), readers acquiring the external lock must also
+			// wait on .lock and never observe mid-write files.
+			inDirWriterLk, err := lockCatalogDir(existingWritableDir)
+			if err != nil {
+				t.Fatalf("acquiring fallback in-dir lock failed: %v", err)
+			}
+			if err := os.Chmod(roCatParentDir, 0o755); err != nil {
+				inDirWriterLk.unlock()
+				t.Fatal(err)
+			}
+			earlyExtPath := catalogLockPath(existingWritableDir)
+			if err := os.WriteFile(earlyExtPath, nil, 0o600); err != nil {
+				inDirWriterLk.unlock()
+				t.Fatal(err)
+			}
+			earlyIncomplete := filepath.Join(existingWritableDir, "apps.json.incomplete")
+			if err := os.WriteFile(earlyIncomplete, []byte("partial"), 0o600); err != nil {
+				inDirWriterLk.unlock()
+				t.Fatal(err)
+			}
+			type earlySnapResult struct {
+				containers []container
+				err        error
+			}
+			earlyReaderDone := make(chan earlySnapResult, 1)
+			go func() {
+				c, _, err := readCatalogSnapshot(existingWritableDir)
+				earlyReaderDone <- earlySnapResult{containers: c, err: err}
+			}()
+			select {
+			case res := <-earlyReaderDone:
+				os.Remove(earlyIncomplete)
+				os.Remove(earlyExtPath)
+				inDirWriterLk.unlock()
+				t.Fatalf("reader bypassed active .lock writer via newly visible external lock: containers=%v err=%v", res.containers, res.err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if err := os.Remove(earlyIncomplete); err != nil {
+				inDirWriterLk.unlock()
+				t.Fatal(err)
+			}
+			inDirWriterLk.unlock()
+			if res := <-earlyReaderDone; res.err != nil || len(res.containers) != 1 || res.containers[0].tool != "fsl" {
+				t.Fatalf("reader waiting on early external lock + .lock failed after writer unlock: containers=%v err=%v", res.containers, res.err)
+			}
+			// Reset external lock to test the full pre-migration -> migration
+			// handoff below.
+			if err := os.Remove(earlyExtPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(roCatParentDir, 0o555); err != nil {
+				t.Fatal(err)
+			}
 			// Once catalogs/ becomes writable again, refresh must migrate the
 			// generation to the external lock and retire the in-dir lock while
 			// keeping readers blocked on both locks throughout the migration.

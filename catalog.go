@@ -396,8 +396,32 @@ func lockCatalogDirShared(dir string) (func(), uint64, bool, error) {
 	clean := canonicalCatalogDir(dir)
 	for range 4 {
 		unlock, gen, locked, err := lockFileShared(extPath)
-		if err != nil || locked {
-			return unlock, gen, locked, err
+		if err != nil {
+			return nil, 0, false, err
+		}
+		if locked {
+			// If a fallback in-dir lock still exists (e.g. extPath was just
+			// created before a migrating writer acquired extPath while an
+			// earlier writer still holds .lock), also lock .lock in the same
+			// ext -> inDir lock order so we wait for any active .lock writer.
+			if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
+				inUnlock, inGen, inLocked, inErr := lockFileShared(filepath.Join(clean, ".lock"))
+				if inErr != nil {
+					unlock()
+					return nil, 0, false, inErr
+				}
+				if inLocked {
+					if inGen > gen {
+						gen = inGen
+					}
+					extUnlock := unlock
+					return func() {
+						inUnlock()
+						extUnlock()
+					}, gen, true, nil
+				}
+			}
+			return unlock, gen, true, nil
 		}
 		beforeInDirSharedLock(dir)
 		info, statErr := os.Stat(clean)
