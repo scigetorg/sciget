@@ -372,6 +372,11 @@ func removeCatalogCache(dir string) error {
 	beforeRemoveCatalogCache(dir)
 	lk, err := lockCatalogDirForRemove(dir)
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			}
+		}
 		return err
 	}
 	defer lk.unlock()

@@ -1925,19 +1925,134 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				t.Fatalf("second refresh under 0555 catalogs/ failed: changed=%v err=%v", changed, err)
 			}
 			// Once catalogs/ becomes writable again, refresh must migrate the
-			// generation to the external lock and retire the in-dir lock.
+			// generation to the external lock and retire the in-dir lock while
+			// keeping readers blocked on both locks throughout the migration.
+			preMigFile, err := os.Open(inDirLock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inDirHookReached := make(chan struct{})
+			inDirHookRelease := make(chan struct{})
+			prevBeforeInDir := beforeInDirSharedLock
+			beforeInDirSharedLock = func(dir string) {
+				if dir == existingWritableDir {
+					close(inDirHookReached)
+					<-inDirHookRelease
+				}
+			}
+			t.Cleanup(func() { beforeInDirSharedLock = prevBeforeInDir })
+			type snapResult struct {
+				containers []container
+				err        error
+			}
+			pausedReaderDone := make(chan snapResult, 1)
+			go func() {
+				c, _, err := readCatalogSnapshot(existingWritableDir)
+				pausedReaderDone <- snapResult{containers: c, err: err}
+			}()
+			<-inDirHookReached
+
 			if err := os.Chmod(roCatParentDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
+			migLk, err := lockCatalogDir(existingWritableDir)
+			if err != nil {
+				close(inDirHookRelease)
+				preMigFile.Close()
+				t.Fatalf("migrating lockCatalogDir failed: %v", err)
+			}
+			if _, err := os.Stat(inDirLock); !errors.Is(err, os.ErrNotExist) {
+				migLk.unlock()
+				close(inDirHookRelease)
+				preMigFile.Close()
+				t.Fatalf("expected in-dir lock %q to be unlinked during migration, stat err=%v", inDirLock, err)
+			}
+			// Simulate an in-progress refresh writing temporary files.
+			incompleteMarker := filepath.Join(existingWritableDir, "apps.json.incomplete")
+			if err := os.WriteFile(incompleteMarker, []byte("partial"), 0o600); err != nil {
+				migLk.unlock()
+				close(inDirHookRelease)
+				preMigFile.Close()
+				t.Fatal(err)
+			}
+			// Both a reader that opened .lock before migration (and pauses
+			// before flock) and a reader that already missed extPath must
+			// stay blocked until migLk is released.
+			preMigLocked := make(chan error, 1)
+			go func() {
+				unlockPreMig, err := lockOpenFileShared(preMigFile)
+				if err == nil {
+					_ = unlockPreMig()
+				}
+				preMigLocked <- err
+			}()
+			close(inDirHookRelease)
+			select {
+			case err := <-preMigLocked:
+				os.Remove(incompleteMarker)
+				migLk.unlock()
+				t.Fatalf("pre-migration .lock fd acquired shared lock while migrating writer still held lock: err=%v", err)
+			case res := <-pausedReaderDone:
+				os.Remove(incompleteMarker)
+				migLk.unlock()
+				t.Fatalf("reader bypassed migration lock and read during active write: containers=%v err=%v", res.containers, res.err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if err := os.Remove(incompleteMarker); err != nil {
+				migLk.unlock()
+				t.Fatal(err)
+			}
+			if err := migLk.bump(); err != nil {
+				migLk.unlock()
+				t.Fatal(err)
+			}
+			migLk.unlock()
+			if err := <-preMigLocked; err != nil {
+				t.Fatalf("pre-migration .lock fd failed after writer unlock: %v", err)
+			}
+			if res := <-pausedReaderDone; res.err != nil || len(res.containers) != 1 || res.containers[0].tool != "fsl" {
+				t.Fatalf("paused migration reader failed after writer unlock: containers=%v err=%v", res.containers, res.err)
+			}
+			beforeInDirSharedLock = prevBeforeInDir
 			if _, _, err := refreshCatalog(fileRead, catalog{Name: "neuro", URL: catFile}, existingWritableDir); err != nil {
 				t.Fatalf("refresh after restoring 0755 catalogs/ failed: %v", err)
 			}
-			if _, err := os.Stat(inDirLock); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("expected in-dir lock %q to be retired after migration, stat err=%v", inDirLock, err)
+			if gen, err := readCatalogLockGen(existingWritableDir); err != nil || gen < 4 {
+				t.Fatalf("expected migrated external lock generation >= 4, got gen=%d err=%v", gen, err)
 			}
-			if gen, err := readCatalogLockGen(existingWritableDir); err != nil || gen < 3 {
-				t.Fatalf("expected migrated external lock generation >= 3, got gen=%d err=%v", gen, err)
-			}
+
+			// Removing a never-refreshed catalog when cache/catalogs is 0555
+			// must succeed without failing to create a lock for an absent dir.
+			t.Run("remove never-refreshed catalog under read-only catalogs dir", func(t *testing.T) {
+				subTmp := t.TempDir()
+				isolateTestEnv(t, subTmp)
+				layers, err := readCatalogLayers()
+				if err != nil {
+					t.Fatal(err)
+				}
+				roDir := filepath.Join(layers.cacheDir, "catalogs")
+				if err := os.MkdirAll(roDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := writeCatalogList(layers.userPath, []catalog{{Name: "neuro", URL: catFile, Use: true}}, false); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(roDir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(roDir, 0o755) })
+				var out, errBuf bytes.Buffer
+				if code := run([]string{"catalog", "remove", "neuro"}, &out, &errBuf); code != 0 {
+					t.Fatalf("catalog remove under 0555 catalogs/ failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+				}
+				cats, err := loadCatalogList(layers.userPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(cats) != 0 {
+					t.Fatalf("expected empty catalog list after remove, got %v", cats)
+				}
+			})
 		}
 	}
 

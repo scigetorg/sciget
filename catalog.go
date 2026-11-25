@@ -321,6 +321,9 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogLock, 
 					if _, postStatErr := os.Stat(extPath); postStatErr == nil {
 						inLk.unlock()
 						return lockCatalogDirWithMode(dir, false)
+					} else if !errors.Is(postStatErr, os.ErrNotExist) {
+						inLk.unlock()
+						return nil, postStatErr
 					}
 					return inLk, nil
 				}
@@ -331,6 +334,8 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogLock, 
 	// If an earlier refresh fell back to the in-dir lock while the parent
 	// directory was read-only, drain and retire it under the external lock so
 	// any concurrent holders finish and monotonic generation is preserved.
+	// Keep inLk held until extLk is released so any reader that opened .lock
+	// before it was unlinked still blocks until this operation completes.
 	if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
 		if _, inStatErr := os.Stat(inDirPath); inStatErr == nil {
 			inLk, inErr := lockFileExclusive(inDirPath)
@@ -345,16 +350,28 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogLock, 
 			}
 			if runtime.GOOS != "windows" {
 				// Unlink while holding both locks so no new reader or writer
-				// can open the retired in-dir lock once inLk is released.
+				// can open the retired in-dir lock, and keep inLk locked until
+				// extLk unlocks so any reader holding a pre-unlink fd waits.
 				if rmErr := os.Remove(inDirPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 					inLk.unlock()
 					extLk.unlock()
 					return nil, rmErr
 				}
-				inLk.unlock()
-			} else {
+				origUnlock := extLk.unlock
+				extLk.unlock = func() {
+					inLk.unlock()
+					origUnlock()
+				}
+			} else if !allowInDirFallback {
 				inLk.unlock()
 				_ = os.Remove(inDirPath)
+			} else {
+				origUnlock := extLk.unlock
+				extLk.unlock = func() {
+					inLk.unlock()
+					_ = os.Remove(inDirPath)
+					origUnlock()
+				}
 			}
 		}
 	}
@@ -369,16 +386,48 @@ func lockCatalogDirForRemove(dir string) (*catalogLock, error) {
 	return lockCatalogDirWithMode(dir, false)
 }
 
+// beforeInDirSharedLock runs after lockCatalogDirShared finds no external lock
+// and before it opens the fallback in-dir lock; tests may set it to reproduce
+// migration races.
+var beforeInDirSharedLock = func(dir string) {}
+
 func lockCatalogDirShared(dir string) (func(), uint64, bool, error) {
-	unlock, gen, locked, err := lockFileShared(catalogLockPath(dir))
-	if err != nil || locked {
-		return unlock, gen, locked, err
-	}
+	extPath := catalogLockPath(dir)
 	clean := canonicalCatalogDir(dir)
-	if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
-		return lockFileShared(filepath.Join(clean, ".lock"))
+	for range 4 {
+		unlock, gen, locked, err := lockFileShared(extPath)
+		if err != nil || locked {
+			return unlock, gen, locked, err
+		}
+		beforeInDirSharedLock(dir)
+		info, statErr := os.Stat(clean)
+		if statErr != nil || !info.IsDir() {
+			return func() {}, 0, false, nil
+		}
+		inUnlock, inGen, inLocked, inErr := lockFileShared(filepath.Join(clean, ".lock"))
+		if inErr != nil {
+			return nil, 0, false, inErr
+		}
+		if !inLocked {
+			if _, extErr := os.Stat(extPath); extErr == nil {
+				continue
+			} else if !errors.Is(extErr, os.ErrNotExist) {
+				return nil, 0, false, extErr
+			}
+			return func() {}, 0, false, nil
+		}
+		// Verify extPath did not appear before we acquired the in-dir lock
+		// (e.g. if our open of .lock raced with a migration that unlinked it).
+		if _, extErr := os.Stat(extPath); extErr == nil {
+			inUnlock()
+			continue
+		} else if !errors.Is(extErr, os.ErrNotExist) {
+			inUnlock()
+			return nil, 0, false, extErr
+		}
+		return inUnlock, inGen, true, nil
 	}
-	return func() {}, 0, false, nil
+	return lockFileShared(extPath)
 }
 
 // beforeCatalogSharedLock runs immediately before readCatalogSnapshot acquires
