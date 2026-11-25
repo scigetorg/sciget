@@ -45,22 +45,25 @@ canon_dir() {
     (cd -P -- "$1" 2>/dev/null && pwd -P) || printf '%s\n' "${1%/}"
 }
 canon_file() {
-    if command -v readlink >/dev/null 2>&1 && readlink -f -- "$1" >/dev/null 2>&1; then
-        readlink -f -- "$1"
-        return 0
-    fi
-    local target="$1" dir base
-    while [ -L "${target}" ]; do
+    (
+        export PATH="/usr/bin:/bin"
+        if command -v readlink >/dev/null 2>&1 && readlink -f -- "$1" >/dev/null 2>&1; then
+            readlink -f -- "$1"
+            exit 0
+        fi
+        target="$1"
+        while [ -L "${target}" ]; do
+            dir="$(cd -P -- "$(dirname -- "${target}")" 2>/dev/null && pwd -P)"
+            target="$(readlink -- "${target}")"
+            case "${target}" in
+            /*) ;;
+            *) target="${dir}/${target}" ;;
+            esac
+        done
         dir="$(cd -P -- "$(dirname -- "${target}")" 2>/dev/null && pwd -P)"
-        target="$(readlink -- "${target}")"
-        case "${target}" in
-        /*) ;;
-        *) target="${dir}/${target}" ;;
-        esac
-    done
-    dir="$(cd -P -- "$(dirname -- "${target}")" 2>/dev/null && pwd -P)"
-    base="$(basename -- "${target}")"
-    printf '%s/%s\n' "${dir}" "${base}"
+        base="$(basename -- "${target}")"
+        printf '%s/%s\n' "${dir}" "${base}"
+    )
 }
 modroot_real="$(canon_dir "${modroot}")"
 if [[ "${modroot}" == */init/modules ]]; then
@@ -119,7 +122,7 @@ for p in "${mp_parts[@]+"${mp_parts[@]}"}"; do
     esac
     p_real="$(canon_dir "${p}")"
     if [ "${p_real}" = "${modroot_real}" ]; then
-        filtered_mp="${filtered_mp:+${filtered_mp}:}${p}"
+        filtered_mp="${filtered_mp:+${filtered_mp}:}${p_real}"
         continue
     fi
     case "${p_real}" in
@@ -129,11 +132,11 @@ for p in "${mp_parts[@]+"${mp_parts[@]}"}"; do
         */accel/*)
             if [ "${want_gpu}" = "1" ]; then
                 has_accel_mp="1"
-                filtered_mp="${filtered_mp:+${filtered_mp}:}${p}"
+                filtered_mp="${filtered_mp:+${filtered_mp}:}${p_real}"
             fi
             ;;
         *)
-            filtered_mp="${filtered_mp:+${filtered_mp}:}${p}"
+            filtered_mp="${filtered_mp:+${filtered_mp}:}${p_real}"
             ;;
         esac
         ;;
@@ -221,7 +224,7 @@ for p in "${path_parts[@]+"${path_parts[@]}"}"; do
     p_real="$(canon_dir "${p}")"
     case "${p_real}/" in
     "${eessi_version_prefix}"*)
-        eessi_path="${eessi_path:+${eessi_path}:}${p}"
+        eessi_path="${eessi_path:+${eessi_path}:}${p_real}"
         ;;
     esac
 done

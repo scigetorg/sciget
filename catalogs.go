@@ -175,31 +175,57 @@ func catalogListPath() (string, error) {
 }
 
 // catalogListLockTarget resolves symlinks along path (including dangling leaf
-// symlinks and symlinked parent directories) so a reader through a symlink and
-// a writer through the target file acquire the same lock file.
+// symlinks with relative targets inside symlinked parent directories) so a
+// reader through any symlink path and a writer through the target file acquire
+// the same lock file.
 func catalogListLockTarget(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
-	}
 	cur := filepath.Clean(path)
+	if !filepath.IsAbs(cur) {
+		if abs, err := filepath.Abs(cur); err == nil {
+			cur = abs
+		}
+	}
 	for range 40 {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return resolved
+		}
+		dir := resolveExistingPrefix(filepath.Dir(cur))
+		cur = filepath.Join(dir, filepath.Base(cur))
 		info, err := os.Lstat(cur)
 		if err != nil || info.Mode()&os.ModeSymlink == 0 {
-			break
+			return cur
 		}
 		target, err := os.Readlink(cur)
 		if err != nil {
-			break
+			return cur
 		}
 		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(cur), target)
+			target = filepath.Join(dir, target)
 		}
 		cur = filepath.Clean(target)
 	}
-	if dir, err := filepath.EvalSymlinks(filepath.Dir(cur)); err == nil {
-		return filepath.Join(dir, filepath.Base(cur))
-	}
 	return cur
+}
+
+// resolveExistingPrefix resolves symlinks on the longest existing directory
+// prefix of dir, reattaching any not-yet-created suffix components.
+func resolveExistingPrefix(dir string) string {
+	dir = filepath.Clean(dir)
+	var suffix []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		suffix = append(suffix, filepath.Base(dir))
+		dir = parent
+	}
 }
 
 // loadCatalogList reads catalogs.json at path. A missing file lists no

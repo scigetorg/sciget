@@ -371,6 +371,9 @@ func TestRefreshAndEESSICommands(t *testing.T) {
             export PATH="${MOCK_EESSI_BIN}:${PATH}"
         fi
     fi
+    if [ "$2" = "ParaView/6.0.1-foss-2025b" ] && [ -n "${MOCK_SITE_ALIAS_BIN:-}" ]; then
+        export PATH="${MOCK_SITE_ALIAS_BIN}:${PATH}"
+    fi
     # Simulate a host_injections site load hook prepending a site bin dir to PATH.
     if [ -n "${MOCK_SITE_HOOK_BIN:-}" ]; then
         export PATH="${MOCK_SITE_HOOK_BIN}:${PATH}"
@@ -396,7 +399,16 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(siteHookBinDir, "gmx"), []byte("#!/bin/sh\necho SITE_HOOK_GMX\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}\"\n"), 0o755); err != nil {
+		// A site hook supplying a forged `readlink` on PATH must never influence
+		// modulefile or executable canonicalization.
+		if err := os.WriteFile(filepath.Join(siteHookBinDir, "readlink"), []byte("#!/bin/sh\necho \""+filepath.Join(accelModDir, "forged.lua")+"\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		siteAliasBin := filepath.Join(tmp, "site-alias-bin")
+		if err := os.Symlink(binDir, siteAliasBin); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}|PATH:${PATH}\"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(binDir, "gmx"), []byte("#!/bin/sh\necho \"GMX_GPU:$*\"\n"), 0o755); err != nil {
@@ -415,6 +427,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		t.Setenv("MOCK_HOST_INJECT_DIR", hostInjectDir)
 		t.Setenv("MOCK_SITE_MOD_DIR", siteModDir)
 		t.Setenv("MOCK_SITE_HOOK_BIN", siteHookBinDir)
+		t.Setenv("MOCK_SITE_ALIAS_BIN", siteAliasBin)
 		t.Setenv("MOCK_LMOD_LOG", lmodLog)
 		t.Setenv("MOCK_EESSI_BIN", binDir)
 		t.Setenv("PATH", staleBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -422,15 +435,20 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		// Tool flags (--version, --gpu) after <tool> pass through to the binary without `--`,
 		// inherited MODULEPATH is replaced by modroot, site/host_injections/accel paths
 		// added by EESSI bootstrap are stripped before loading a CPU tool, site load
-		// hook PATH entries outside EESSI are ignored, stale LD_LIBRARY_PATH and PATH
-		// entries are scrubbed, and LMOD_EXACT_MATCH=yes is enforced.
+		// hook PATH entries (including forged readlink and site symlink aliases) are
+		// neutralized, stale LD_LIBRARY_PATH and PATH entries are scrubbed, and
+		// LMOD_EXACT_MATCH=yes is enforced.
 		stdout.Reset()
 		stderr.Reset()
 		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version", "--gpu"}, &stdout, &stderr); code != 0 {
 			t.Fatalf("eessi launch failed (%d): %s", code, stderr.String())
 		}
-		if got := strings.TrimSpace(stdout.String()); got != "PARAVIEW:--version --gpu|LD:" {
-			t.Fatalf("got %q, want %q", got, "PARAVIEW:--version --gpu|LD:")
+		gotLaunch := strings.TrimSpace(stdout.String())
+		if !strings.HasPrefix(gotLaunch, "PARAVIEW:--version --gpu|LD:|PATH:") {
+			t.Fatalf("got %q, want prefix %q", gotLaunch, "PARAVIEW:--version --gpu|LD:|PATH:")
+		}
+		if strings.Contains(gotLaunch, siteAliasBin) || strings.Contains(gotLaunch, siteHookBinDir) {
+			t.Fatalf("final PATH must not retain site hook dir or site symlink alias: %q", gotLaunch)
 		}
 		logBytes, err := os.ReadFile(lmodLog)
 		if err != nil {
@@ -1537,5 +1555,28 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	close(stopWrite)
 	if err := <-writeErrs; err != nil {
 		t.Fatalf("concurrent writeCatalogList failed: %v", err)
+	}
+
+	// Dangling relative symlink inside a symlinked parent directory must resolve
+	// to the exact same lock target as the not-yet-created target file.
+	if runtime.GOOS != "windows" {
+		realBase := filepath.Join(tmp, "real-base")
+		realSub := filepath.Join(realBase, "sub")
+		if err := os.MkdirAll(realSub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		parentLink := filepath.Join(tmp, "parent-link")
+		if err := os.Symlink(realSub, parentLink); err != nil {
+			t.Fatal(err)
+		}
+		danglingLink := filepath.Join(parentLink, "catalogs.json")
+		if err := os.Symlink(filepath.Join("..", "dangling-target.json"), danglingLink); err != nil {
+			t.Fatal(err)
+		}
+		wantTarget := catalogListLockTarget(filepath.Join(realBase, "dangling-target.json"))
+		gotTarget := catalogListLockTarget(danglingLink)
+		if gotTarget != wantTarget {
+			t.Fatalf("dangling symlink lock target = %q, want %q", gotTarget, wantTarget)
+		}
 	}
 }
