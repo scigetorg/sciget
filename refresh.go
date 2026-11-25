@@ -293,17 +293,25 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 
 	for i, s := range staged {
 		if err := renameCatalogFile(s.tmp, s.dest); err != nil {
-			// Roll back every file already renamed in this refresh.
+			// Roll back every file already renamed in this refresh; preserve
+			// any backup whose restoration fails and report rollback errors.
+			var rollbackErrs []error
 			for j := i - 1; j >= 0; j-- {
 				if staged[j].bak != "" {
-					_ = os.Rename(staged[j].bak, staged[j].dest)
+					if rerr := os.Rename(staged[j].bak, staged[j].dest); rerr != nil {
+						rollbackErrs = append(rollbackErrs, fmt.Errorf("restoring %s (backup kept at %s): %w", filepath.Base(staged[j].dest), staged[j].bak, rerr))
+					}
 					staged[j].bak = ""
 				} else {
-					_ = os.Remove(staged[j].dest)
+					if rerr := os.Remove(staged[j].dest); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+						rollbackErrs = append(rollbackErrs, fmt.Errorf("removing %s: %w", filepath.Base(staged[j].dest), rerr))
+					}
 				}
 			}
 			if staleEESSIBak != "" {
-				_ = os.Rename(staleEESSIBak, eessiPath)
+				if rerr := os.Rename(staleEESSIBak, eessiPath); rerr != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("restoring eessi.json (backup kept at %s): %w", staleEESSIBak, rerr))
+				}
 				staleEESSIBak = ""
 			}
 			for j := i; j < len(staged); j++ {
@@ -311,7 +319,11 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 				staged[j].tmp = ""
 			}
 			cleanupStaged()
-			return false, empty, fmt.Errorf("writing catalog: %w", err)
+			commitErr := fmt.Errorf("writing catalog: %w", err)
+			if len(rollbackErrs) > 0 {
+				return false, empty, errors.Join(commitErr, fmt.Errorf("rollback incomplete (run 'sciget refresh' to recover): %w", errors.Join(rollbackErrs...)))
+			}
+			return false, empty, commitErr
 		}
 		staged[i].tmp = ""
 		changed = true

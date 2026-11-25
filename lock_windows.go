@@ -30,23 +30,25 @@ func lockCatalogDir(dir string) (func(), error) {
 }
 
 // lockCatalogDirShared acquires a shared Windows file lock when a refresh lock
-// file exists, so readers wait for any in-progress commit or rollback.
-func lockCatalogDirShared(dir string) (func(), error) {
+// file exists, so readers wait for any in-progress commit or rollback. When the
+// lock file does not exist yet, it returns ok=false so the caller skips the
+// uncommitted directory.
+func lockCatalogDirShared(dir string) (func(), bool, error) {
 	f, err := os.Open(filepath.Join(dir, ".refresh.lock"))
 	if errors.Is(err, os.ErrNotExist) {
-		return func() {}, nil
+		return func() {}, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var ol windows.Overlapped
 	if err := windows.LockFileEx(windows.Handle(f.Fd()), 0, 0, 1, 0, &ol); err != nil {
 		f.Close()
-		return nil, err
+		return nil, false, err
 	}
 	return func() {
 		var uol windows.Overlapped
 		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
 		_ = f.Close()
-	}, nil
+	}, true, nil
 }

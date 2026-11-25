@@ -53,8 +53,9 @@ func lockCatalogDir(dir string) (func(), error) {
 }
 
 // lockCatalogDirShared acquires both an in-process mutex and a shared POSIX
-// fcntl read lock when a refresh lock file exists.
-func lockCatalogDirShared(dir string) (func(), error) {
+// fcntl read lock when a refresh lock file exists. When the lock file does not
+// exist yet, it returns ok=false so the caller skips the uncommitted directory.
+func lockCatalogDirShared(dir string) (func(), bool, error) {
 	key := filepath.Clean(dir)
 	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
@@ -62,11 +63,12 @@ func lockCatalogDirShared(dir string) (func(), error) {
 
 	f, err := os.Open(filepath.Join(dir, ".refresh.lock"))
 	if errors.Is(err, os.ErrNotExist) {
-		return mu.Unlock, nil
+		mu.Unlock()
+		return func() {}, false, nil
 	}
 	if err != nil {
 		mu.Unlock()
-		return nil, err
+		return nil, false, err
 	}
 	lk := unix.Flock_t{Type: unix.F_RDLCK, Whence: 0, Start: 0, Len: 0}
 	for {
@@ -78,12 +80,12 @@ func lockCatalogDirShared(dir string) (func(), error) {
 	if err != nil {
 		f.Close()
 		mu.Unlock()
-		return nil, err
+		return nil, false, err
 	}
 	return func() {
 		unlk := unix.Flock_t{Type: unix.F_UNLCK, Whence: 0, Start: 0, Len: 0}
 		_ = unix.FcntlFlock(f.Fd(), unix.F_SETLK, &unlk)
 		_ = f.Close()
 		mu.Unlock()
-	}, nil
+	}, true, nil
 }

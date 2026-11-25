@@ -34,14 +34,16 @@ func lockCatalogDir(dir string) (func(), error) {
 
 // lockCatalogDirShared acquires a shared advisory flock on dir when a refresh
 // lock file exists, so readers wait for any in-progress refresh commit or
-// rollback to finish.
-func lockCatalogDirShared(dir string) (func(), error) {
+// rollback to finish. When the lock file does not exist yet, it returns ok=false
+// so the caller skips the uncommitted catalog directory instead of racing a
+// first refresh.
+func lockCatalogDirShared(dir string) (func(), bool, error) {
 	f, err := os.Open(filepath.Join(dir, ".refresh.lock"))
 	if errors.Is(err, os.ErrNotExist) {
-		return func() {}, nil
+		return func() {}, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for {
 		err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH)
@@ -51,10 +53,10 @@ func lockCatalogDirShared(dir string) (func(), error) {
 	}
 	if err != nil {
 		f.Close()
-		return nil, err
+		return nil, false, err
 	}
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
-	}, nil
+	}, true, nil
 }
