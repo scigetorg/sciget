@@ -3664,6 +3664,132 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if data, err := os.ReadFile(filepath.Join(lateTarget, "apps.json")); err != nil || !strings.Contains(string(data), "latetool") {
 				t.Fatalf("lateTarget must remain untouched after rejected refresh: err=%v data=%q", err, string(data))
 			}
+
+			// 9. Hard-linked lock files across DIFFERENT parent directories
+			// must still open targetParent independently so refresh writes to
+			// the real target directory, never into slotParent.
+			hlSlotParent := filepath.Join(subTmp, "hl-slot-parent")
+			hlTargetParent := filepath.Join(subTmp, "hl-target-parent")
+			hlTarget := filepath.Join(hlTargetParent, "real-target")
+			if err := os.MkdirAll(hlSlotParent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(hlTarget, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFixture(hlTarget, "oldhltool", "oldhlpkg")
+			hlAlias := filepath.Join(hlSlotParent, "alias-hl")
+			if err := os.Symlink(hlTarget, hlAlias); err != nil {
+				t.Fatal(err)
+			}
+			hlSlotLock := catalogLockPath(hlAlias)
+			hlTargetLock := catalogTargetLockPath(hlTarget)
+			if err := os.WriteFile(hlSlotLock, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(hlSlotLock, hlTargetLock); err == nil {
+				changedHL, _, err := refreshCatalog(refreshRead, catalog{Name: "hl", URL: "https://example.invalid/cat.json"}, hlAlias)
+				if err != nil || !changedHL {
+					t.Fatalf("refreshCatalog with cross-parent hard-linked locks failed: changed=%v err=%v", changedHL, err)
+				}
+				if data, err := os.ReadFile(filepath.Join(hlTarget, "apps.json")); err != nil || !strings.Contains(string(data), "updatedtool") {
+					t.Fatalf("expected real target %q to receive refresh write, err=%v data=%q", hlTarget, err, string(data))
+				}
+				if _, err := os.Lstat(filepath.Join(hlSlotParent, "real-target")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("refresh wrongly created target dir inside slot parent: lstat err=%v", err)
+				}
+			}
+
+			// 10. Search-only (0111) lock parent directory must still allow
+			// readers and refreshes to open the catalog beneath it.
+			if os.Geteuid() != 0 {
+				searchParent := filepath.Join(subTmp, "search-only-parent")
+				searchCache := filepath.Join(searchParent, "cache")
+				if err := os.MkdirAll(searchCache, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFixture(searchCache, "searchtool", "searchpkg")
+				if err := os.WriteFile(catalogTargetLockPath(searchCache), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(searchParent, 0o111); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(searchParent, 0o755) })
+				csS, _, err := readCatalogSnapshot(searchCache)
+				if err != nil || len(csS) != 1 || csS[0].tool != "searchtool" {
+					t.Fatalf("readCatalogSnapshot failed under 0111 parent: err=%v cs=%+v", err, csS)
+				}
+				rawS, _, okS, err := readCatalogEESSISnapshot(searchCache)
+				if err != nil || !okS || !strings.Contains(string(rawS), `"searchpkg"`) {
+					t.Fatalf("readCatalogEESSISnapshot failed under 0111 parent: ok=%v err=%v data=%q", okS, err, string(rawS))
+				}
+				changedS, _, err := refreshCatalog(refreshRead, catalog{Name: "search", URL: "https://example.invalid/cat.json"}, searchCache)
+				if err != nil || !changedS {
+					t.Fatalf("refreshCatalog failed under 0111 parent: changed=%v err=%v", changedS, err)
+				}
+				_ = os.Chmod(searchParent, 0o755)
+			}
+
+			// 11. Removal after a parent move must check registration against
+			// the pinned directory's identity so a registered alias pointing to
+			// the moved original preserves its cache.
+			t.Run("remove preserves moved directory still referenced by registered alias", func(t *testing.T) {
+				isoTmp := t.TempDir()
+				isolateTestEnv(t, isoTmp)
+				layers, err := readCatalogLayers()
+				if err != nil {
+					t.Fatal(err)
+				}
+				movedParent := filepath.Join(isoTmp, "moved-parent")
+				origParent := filepath.Join(isoTmp, "orig-parent")
+				otherParent := filepath.Join(isoTmp, "other-parent")
+				origCache := filepath.Join(origParent, "cache")
+				otherCache := filepath.Join(otherParent, "cache")
+				for _, d := range []string{origCache, otherCache} {
+					if err := os.MkdirAll(d, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(d, "apps.json"), []byte(`{}`), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// Register alias pointing to movedParent/cache (which will be
+				// the exact directory origParent/cache after origParent moves).
+				aliasCat := catalog{Name: "keeper", URL: "https://example.invalid/keep.json", Use: true}
+				if err := writeCatalogList(layers.userPath, []catalog{aliasCat}, false); err != nil {
+					t.Fatal(err)
+				}
+				aliasPath := aliasCat.dir(layers.cacheDir)
+				if err := os.MkdirAll(filepath.Dir(aliasPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(movedParent, "cache"), aliasPath); err != nil {
+					t.Fatal(err)
+				}
+				prevHook := afterRemoveCatalogLock
+				afterRemoveCatalogLock = func(dir string) {
+					if dir == origCache {
+						if err := os.Rename(origParent, movedParent); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(otherParent, origParent); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				err = removeCatalogCache(origCache)
+				afterRemoveCatalogLock = prevHook
+				if err != nil {
+					t.Fatalf("removeCatalogCache failed: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(movedParent, "cache", "apps.json")); err != nil {
+					t.Fatalf("registered alias's moved cache was wrongly deleted: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(otherCache, "apps.json")); err != nil {
+					t.Fatalf("otherCache was wrongly touched: %v", err)
+				}
+			})
 		})
 		hlDir := filepath.Join(tmp, "lock-identity")
 		if err := os.MkdirAll(hlDir, 0o755); err != nil {

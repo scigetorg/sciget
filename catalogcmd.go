@@ -396,28 +396,25 @@ func removeCatalogCache(dir string) error {
 	}
 	defer lk.unlock()
 	afterRemoveCatalogLock(dir)
-	var registered bool
-	if lk.linkLeaf {
-		registered, err = catalogSlotReferenced(lk.slotDir)
-	} else {
-		registered, err = catalogTargetRegistered(lk.dir)
-	}
-	if err != nil {
-		return err
-	}
-	if registered {
-		return nil
-	}
 	if lk.linkLeaf {
 		if lk.slotParent == nil {
 			return errors.New("catalog cache changed during removal; run again")
 		}
+		var pinnedInfo os.FileInfo
 		if info, statErr := lk.slotParent.Lstat(lk.slotBase); statErr == nil {
 			if !rootEntryIsLink(lk.slotParent, lk.slotBase, info) {
 				return errors.New("catalog cache changed during removal; run again")
 			}
+			pinnedInfo = info
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
+		}
+		registered, err := catalogSlotInfoReferenced(lk.slotDir, lk.slotParent, lk.slotBase, pinnedInfo)
+		if err != nil {
+			return err
+		}
+		if registered {
+			return nil
 		}
 		if err := lk.bump(); err != nil {
 			return err
@@ -430,12 +427,21 @@ func removeCatalogCache(dir string) error {
 	if lk.targetParent == nil {
 		return errors.New("catalog cache changed during removal; run again")
 	}
+	var pinnedInfo os.FileInfo
 	if info, statErr := lk.targetParent.Lstat(lk.targetBase); statErr == nil {
 		if rootEntryIsLink(lk.targetParent, lk.targetBase, info) {
 			return errors.New("catalog cache changed during removal; run again")
 		}
+		pinnedInfo = info
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
+	}
+	registered, err := catalogTargetInfoRegistered(lk.dir, pinnedInfo)
+	if err != nil {
+		return err
+	}
+	if registered {
+		return nil
 	}
 	if err := lk.bump(); err != nil {
 		return err

@@ -245,7 +245,57 @@ func openPinnedSubdir(parent *os.Root, base string) (*os.Root, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	subInfo, err := sub.Stat(".")
+	if err != nil {
+		_ = sub.Close()
+		return nil, false, err
+	}
+	if !os.SameFile(subInfo, info) {
+		_ = sub.Close()
+		return nil, false, errRootChanged
+	}
 	return sub, true, nil
+}
+
+func openPinnedDirDirect(dir string) (*os.Root, bool, error) {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if isLinkLeaf(dir) {
+		return nil, false, errRootChanged
+	}
+	if !info.IsDir() {
+		return nil, false, nil
+	}
+	r, err := os.OpenRoot(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	rInfo, err := r.Stat(".")
+	if err != nil {
+		_ = r.Close()
+		return nil, false, err
+	}
+	if !os.SameFile(rInfo, info) {
+		_ = r.Close()
+		return nil, false, errRootChanged
+	}
+	return r, true, nil
+}
+
+func lockPathMatchesInfo(lockPath string, lockInfo os.FileInfo) bool {
+	if lockInfo == nil {
+		return true
+	}
+	st, err := os.Lstat(lockPath)
+	return err == nil && os.SameFile(st, lockInfo)
 }
 
 func removeRetiredInDirLockRoot(root *os.Root, name string) error {
@@ -578,12 +628,55 @@ func catalogDirRegistered(dir string) (bool, error) {
 // traverses dir through a symlink/junction chain (e.g. outer -> middle -> direct),
 // so removing an intermediate link never leaves a registered alias dangling.
 func catalogSlotReferenced(dir string) (bool, error) {
+	return catalogSlotInfoReferenced(dir, nil, "", nil)
+}
+
+func catalogSlotInfoReferenced(dir string, pinnedParent *os.Root, slotBase string, pinnedInfo os.FileInfo) (bool, error) {
 	layers, err := readCatalogLayers()
 	if err != nil {
 		return false, err
 	}
+	var parentInfo os.FileInfo
+	singleLinkInParent := false
+	if pinnedParent != nil && pinnedInfo != nil {
+		if pi, err := pinnedParent.Stat("."); err == nil {
+			parentInfo = pi
+		}
+		if f, err := pinnedParent.Open("."); err == nil {
+			names, _ := f.Readdirnames(-1)
+			_ = f.Close()
+			matches := 0
+			for _, name := range names {
+				if info, err := pinnedParent.Lstat(name); err == nil && os.SameFile(info, pinnedInfo) {
+					matches++
+					if matches > 1 {
+						break
+					}
+				}
+			}
+			singleLinkInParent = matches == 1
+		}
+	}
+	matchPinnedSlot := func(p string) bool {
+		if parentInfo == nil || pinnedInfo == nil {
+			return false
+		}
+		info, err := os.Lstat(p)
+		if err != nil || !os.SameFile(info, pinnedInfo) {
+			return false
+		}
+		pInfo, err := os.Stat(filepath.Dir(p))
+		if err != nil || !os.SameFile(pInfo, parentInfo) {
+			return false
+		}
+		return filepath.Base(p) == slotBase || singleLinkInParent
+	}
 	for _, c := range layers.combined() {
-		if pathTraversesSlot(c.dir(layers.cacheDir), dir) {
+		cand := c.dir(layers.cacheDir)
+		if pathTraversesSlot(cand, dir) {
+			return true, nil
+		}
+		if parentInfo != nil && pinnedInfo != nil && pathTraversesMatch(cand, matchPinnedSlot) {
 			return true, nil
 		}
 	}
@@ -595,16 +688,117 @@ func catalogSlotReferenced(dir string) (bool, error) {
 // or traverses dir through a symlink/junction chain, so recursively deleting
 // dir never destroys or breaks another registered catalog's cache.
 func catalogTargetRegistered(dir string) (bool, error) {
+	return catalogTargetInfoRegistered(dir, nil)
+}
+
+func catalogTargetInfoRegistered(dir string, pinnedInfo os.FileInfo) (bool, error) {
 	layers, err := readCatalogLayers()
 	if err != nil {
 		return false, err
 	}
+	matchPinnedDir := func(p string) bool {
+		if pinnedInfo == nil {
+			return false
+		}
+		if info, err := os.Lstat(p); err == nil && os.SameFile(info, pinnedInfo) {
+			return true
+		}
+		if info, err := os.Stat(p); err == nil && os.SameFile(info, pinnedInfo) {
+			return true
+		}
+		return false
+	}
 	for _, c := range layers.combined() {
-		if pathTraversesDir(c.dir(layers.cacheDir), dir) {
+		cand := c.dir(layers.cacheDir)
+		if pathTraversesDir(cand, dir) {
 			return true, nil
+		}
+		if pinnedInfo != nil {
+			if pathTraversesMatch(cand, matchPinnedDir) {
+				return true, nil
+			}
+			cur := canonicalCatalogDir(cand)
+			for {
+				if info, err := os.Stat(cur); err == nil && os.SameFile(info, pinnedInfo) {
+					return true, nil
+				}
+				parent := filepath.Dir(cur)
+				if parent == cur {
+					break
+				}
+				cur = parent
+			}
 		}
 	}
 	return false, nil
+}
+
+func pathTraversesMatch(path string, match func(string) bool) bool {
+	if match(path) {
+		return true
+	}
+	cur := path
+	if !filepath.IsAbs(cur) {
+		if abs, err := filepath.Abs(cur); err == nil {
+			cur = abs
+		}
+	}
+	vol := filepath.VolumeName(cur)
+	rest := cur[len(vol):]
+	resolved := vol + string(filepath.Separator)
+	var queue []string
+	for _, part := range strings.Split(filepath.ToSlash(rest), "/") {
+		if part != "" {
+			queue = append(queue, part)
+		}
+	}
+	symlinksFollowed := 0
+	for len(queue) > 0 {
+		comp := queue[0]
+		queue = queue[1:]
+		if comp == "." {
+			continue
+		}
+		if comp == ".." {
+			info, err := os.Stat(resolved)
+			if err != nil || !info.IsDir() {
+				return false
+			}
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, comp)
+		if match(next) {
+			return true
+		}
+		if target, err := os.Readlink(next); err == nil {
+			symlinksFollowed++
+			if symlinksFollowed > 40 {
+				return false
+			}
+			if filepath.IsAbs(target) {
+				tVol := filepath.VolumeName(target)
+				resolved = tVol + string(filepath.Separator)
+				target = target[len(tVol):]
+			} else if runtime.GOOS == "windows" && (strings.HasPrefix(target, `\`) || strings.HasPrefix(target, "/")) {
+				resolved = filepath.VolumeName(resolved) + string(filepath.Separator)
+			}
+			var targetParts []string
+			for _, part := range strings.Split(filepath.ToSlash(target), "/") {
+				if part != "" {
+					targetParts = append(targetParts, part)
+				}
+			}
+			queue = append(targetParts, queue...)
+			continue
+		}
+		if eval, err := filepath.EvalSymlinks(next); err == nil {
+			resolved = eval
+			continue
+		}
+		resolved = next
+	}
+	return match(resolved)
 }
 
 func readCatalogLockState(dir string) (catalogGen, string, bool, error) {
@@ -1161,9 +1355,12 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 		return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
 	}
 
-	var slotParent, targetParent *os.Root
+	var slotParent, targetParent, targetRoot *os.Root
 	closeRoots := func() {
-		if targetParent != nil && targetParent != slotParent {
+		if targetRoot != nil {
+			_ = targetRoot.Close()
+		}
+		if targetParent != nil {
 			_ = targetParent.Close()
 		}
 		if slotParent != nil {
@@ -1180,29 +1377,62 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 			return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
 		}
 		if spErr != nil {
-			unlockAll()
-			return nil, spErr
+			if allowInDirFallback && isReadOnlyOrPermError(spErr) && lockPathMatchesInfo(slotPath, slotLk.fileInfo) {
+				// Search-only (0111) slot parent: refresh writes only to the
+				// target directory, not to slotParent.
+			} else {
+				unlockAll()
+				return nil, spErr
+			}
+		} else {
+			slotParent = sp
 		}
-		slotParent = sp
 	}
 	if targetLk != nil && clean != "" {
-		if slotSameAsTarget && slotParent != nil {
-			targetParent = slotParent
-		} else {
-			tp, tpOK, tpErr := openVerifiedRoot(filepath.Dir(clean), filepath.Base(targetPath), targetLk.fileInfo)
-			if errors.Is(tpErr, errRootChanged) || (tpErr == nil && !tpOK) {
-				closeRoots()
-				unlockAll()
-				if retriesLeft > 0 {
-					return lockCatalogDirWithRetry(dir, allowInDirFallback, retriesLeft-1)
-				}
-				return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
+		// Always open and verify targetParent independently from slotParent so
+		// hard-linked lock files across different parent directories never
+		// redirect target writes into the slot parent.
+		tp, tpOK, tpErr := openVerifiedRoot(filepath.Dir(clean), filepath.Base(targetPath), targetLk.fileInfo)
+		if errors.Is(tpErr, errRootChanged) || (tpErr == nil && !tpOK) {
+			closeRoots()
+			unlockAll()
+			if retriesLeft > 0 {
+				return lockCatalogDirWithRetry(dir, allowInDirFallback, retriesLeft-1)
 			}
-			if tpErr != nil {
+			return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
+		}
+		if tpErr != nil {
+			if allowInDirFallback && isReadOnlyOrPermError(tpErr) && lockPathMatchesInfo(targetPath, targetLk.fileInfo) {
+				tr, trOK, trErr := openPinnedDirDirect(clean)
+				if errors.Is(trErr, errRootChanged) || (trErr == nil && !trOK) {
+					closeRoots()
+					unlockAll()
+					if retriesLeft > 0 {
+						return lockCatalogDirWithRetry(dir, allowInDirFallback, retriesLeft-1)
+					}
+					return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
+				}
+				if trErr != nil {
+					closeRoots()
+					unlockAll()
+					return nil, trErr
+				}
+				if !lockPathMatchesInfo(targetPath, targetLk.fileInfo) {
+					_ = tr.Close()
+					closeRoots()
+					unlockAll()
+					if retriesLeft > 0 {
+						return lockCatalogDirWithRetry(dir, allowInDirFallback, retriesLeft-1)
+					}
+					return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
+				}
+				targetRoot = tr
+			} else {
 				closeRoots()
 				unlockAll()
 				return nil, tpErr
 			}
+		} else {
 			targetParent = tp
 		}
 	}
@@ -1226,8 +1456,18 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 	// held so concurrent holders finish and target's monotonic generation is
 	// preserved. Never retire the target's in-dir lock when removing a leaf
 	// link (which leaves the target intact) or when targetPath was skipped.
-	if targetLk != nil && targetParent != nil && clean != "" && !(linkLeaf && !allowInDirFallback) {
-		sub, subOK, subErr := openPinnedSubdir(targetParent, targetBase)
+	if targetLk != nil && clean != "" && !(linkLeaf && !allowInDirFallback) && (targetParent != nil || targetRoot != nil) {
+		var sub *os.Root
+		var subOK bool
+		var subErr error
+		closeSub := false
+		if targetParent != nil {
+			sub, subOK, subErr = openPinnedSubdir(targetParent, targetBase)
+			closeSub = subOK
+		} else {
+			sub = targetRoot
+			subOK = true
+		}
 		if errors.Is(subErr, errRootChanged) {
 			closeRoots()
 			unlockAll()
@@ -1245,7 +1485,9 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 			if _, inStatErr := sub.Lstat(".lock"); inStatErr == nil {
 				inLk, inErr := lockFileExclusive(inDirPath)
 				if inErr != nil {
-					_ = sub.Close()
+					if closeSub {
+						_ = sub.Close()
+					}
 					closeRoots()
 					unlockAll()
 					return nil, inErr
@@ -1253,7 +1495,9 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 				if inLk.fileInfo != nil {
 					if st, stErr := sub.Lstat(".lock"); stErr != nil || !os.SameFile(st, inLk.fileInfo) {
 						inLk.unlock()
-						_ = sub.Close()
+						if closeSub {
+							_ = sub.Close()
+						}
 						closeRoots()
 						unlockAll()
 						if retriesLeft > 0 {
@@ -1264,7 +1508,9 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 				}
 				if syncErr := targetLk.syncGen(inLk.gen); syncErr != nil {
 					inLk.unlock()
-					_ = sub.Close()
+					if closeSub {
+						_ = sub.Close()
+					}
 					closeRoots()
 					unlockAll()
 					return nil, syncErr
@@ -1272,17 +1518,23 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 				if runtime.GOOS != "windows" {
 					if rmErr := sub.Remove(".lock"); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 						inLk.unlock()
-						_ = sub.Close()
+						if closeSub {
+							_ = sub.Close()
+						}
 						closeRoots()
 						unlockAll()
 						return nil, rmErr
 					}
-					_ = sub.Close()
+					if closeSub {
+						_ = sub.Close()
+					}
 					retiredInLk = inLk
 				} else if !allowInDirFallback {
 					inLk.unlock()
 					rmErr := removeRetiredInDirLockRoot(sub, ".lock")
-					_ = sub.Close()
+					if closeSub {
+						_ = sub.Close()
+					}
 					if rmErr != nil {
 						closeRoots()
 						unlockAll()
@@ -1290,9 +1542,11 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 					}
 				} else {
 					retiredInLk = inLk
-					retiredSubRoot = sub
+					if closeSub {
+						retiredSubRoot = sub
+					}
 				}
-			} else {
+			} else if closeSub {
 				_ = sub.Close()
 			}
 		}
@@ -1326,12 +1580,17 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 		slotBase:     filepath.Base(slotDir),
 		targetParent: targetParent,
 		targetBase:   targetBase,
+		targetRoot:   targetRoot,
 		gen:          computeGen(),
 		unlock: func() {
 			if retiredInLk != nil {
 				retiredInLk.unlock()
-				if runtime.GOOS == "windows" && retiredSubRoot != nil {
-					_ = removeRetiredInDirLockRoot(retiredSubRoot, ".lock")
+				if runtime.GOOS == "windows" {
+					if retiredSubRoot != nil {
+						_ = removeRetiredInDirLockRoot(retiredSubRoot, ".lock")
+					} else if targetRoot != nil {
+						_ = removeRetiredInDirLockRoot(targetRoot, ".lock")
+					}
 				}
 			}
 			if retiredSubRoot != nil {
@@ -1516,26 +1775,64 @@ func lockCatalogDirSharedWithMissing(dir string) (sharedCatalogLock, error) {
 					continue
 				}
 				if tpErr != nil {
-					release()
-					return sharedCatalogLock{}, tpErr
-				}
-				sub, subOK, subErr := openPinnedSubdir(tp, filepath.Base(clean))
-				_ = tp.Close()
-				if errors.Is(subErr, errRootChanged) {
-					release()
-					continue
-				}
-				if subErr != nil {
-					release()
-					return sharedCatalogLock{}, subErr
-				}
-				if subOK {
-					dirRoot = sub
+					if isReadOnlyOrPermError(tpErr) && lockPathMatchesInfo(targetPath, targetLockInfo) {
+						// Search-only (0111) parent directory: pin clean
+						// directly and re-verify the locked lock-file inode.
+						sub, subOK, subErr := openPinnedDirDirect(clean)
+						if errors.Is(subErr, errRootChanged) {
+							release()
+							continue
+						}
+						if subErr != nil {
+							release()
+							return sharedCatalogLock{}, subErr
+						}
+						if !lockPathMatchesInfo(targetPath, targetLockInfo) {
+							if sub != nil {
+								_ = sub.Close()
+							}
+							release()
+							continue
+						}
+						if subOK {
+							dirRoot = sub
+						}
+					} else {
+						release()
+						return sharedCatalogLock{}, tpErr
+					}
+				} else {
+					sub, subOK, subErr := openPinnedSubdir(tp, filepath.Base(clean))
+					_ = tp.Close()
+					if errors.Is(subErr, errRootChanged) {
+						release()
+						continue
+					}
+					if subErr != nil {
+						release()
+						return sharedCatalogLock{}, subErr
+					}
+					if subOK {
+						dirRoot = sub
+					}
 				}
 			} else {
 				if tp, tpErr := os.OpenRoot(filepath.Dir(clean)); tpErr == nil {
 					sub, subOK, subErr := openPinnedSubdir(tp, filepath.Base(clean))
 					_ = tp.Close()
+					if errors.Is(subErr, errRootChanged) {
+						release()
+						continue
+					}
+					if subErr != nil {
+						release()
+						return sharedCatalogLock{}, subErr
+					}
+					if subOK {
+						dirRoot = sub
+					}
+				} else if isReadOnlyOrPermError(tpErr) {
+					sub, subOK, subErr := openPinnedDirDirect(clean)
 					if errors.Is(subErr, errRootChanged) {
 						release()
 						continue
@@ -1611,7 +1908,11 @@ func lockCatalogDirSharedWithMissing(dir string) (sharedCatalogLock, error) {
 				if subOK {
 					dirRoot = sub
 				}
-			} else if r, rErr := os.OpenRoot(clean); rErr == nil {
+			} else if r, rOK, rErr := openPinnedDirDirect(clean); errors.Is(rErr, errRootChanged) {
+				continue
+			} else if rErr != nil {
+				return sharedCatalogLock{}, rErr
+			} else if rOK {
 				dirRoot = r
 			}
 			if exists, extErr := anyPathExists(extPaths); extErr != nil {
