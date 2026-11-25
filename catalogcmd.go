@@ -297,11 +297,11 @@ func newCatalogs(c catalog, system bool) (catalogs []catalog, empty []string, er
 		return nil, nil, err
 	}
 	if !isDomainsFile(data) {
-		_, apps, err := checkCatalogJSON(data, base)
+		parsed, apps, err := checkCatalogJSON(data, base)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s is not a valid catalog JSON: %w", c.URL, err)
 		}
-		if apps == "" {
+		if apps == "" && parsed.EESSICatalogURL == "" {
 			empty = []string{c.Name}
 		}
 		return []catalog{c}, empty, nil
@@ -316,11 +316,11 @@ func newCatalogs(c catalog, system bool) (catalogs []catalog, empty []string, er
 		if err := checkCatalogName(key); err != nil {
 			return nil, nil, fmt.Errorf("domain %q in %s is not a valid catalog name: %w", key, c.URL, err)
 		}
-		_, apps, err := checkCatalogJSON(parts[key], base)
+		parsed, apps, err := checkCatalogJSON(parts[key], base)
 		if err != nil {
 			return nil, nil, fmt.Errorf("domain %q in %s: %w", key, c.URL, err)
 		}
-		if apps == "" {
+		if apps == "" && parsed.EESSICatalogURL == "" {
 			empty = append(empty, d.Name)
 		}
 		catalogs = append(catalogs, d)

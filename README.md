@@ -81,7 +81,7 @@ keys, `{"schemaVersion": 1, "domains": {"neuroimaging": {...}, ...}}`;
 | `sciget refresh` | Download the latest catalogs in use |
 | `sciget find [words...]` | List the containers in the catalogs in use (`--all` includes hidden ones) |
 | `sciget info <tool/version>` | Show a container's details and where it is |
-| `sciget eessi [find\|info\|launch]` | Browse and launch curated EESSI CVMFS modules (explicit opt-in; no DOI) |
+| `sciget eessi [find\|info\|launch]` | Browse and launch curated EESSI CVMFS modules (explicit opt-in; no DOI). Put `launch` flags (`--stack`, `--gpu`, `--launcher`) before the tool name |
 | `sciget pull <tool/version>...` | Download containers into `container_dir`, `parallel_pulls` (3) at a time |
 | `sciget install <tool/version>...` | Download containers, then make a module for each, so `module load` works |
 | `sciget doctor` | Report problems, such as stopped downloads, and the commands that fix them |

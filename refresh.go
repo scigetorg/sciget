@@ -150,7 +150,7 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 			return false, false, err
 		}
 		containers, err := parseCatalog(apps)
-		if err == nil && len(containers) == 0 {
+		if err == nil && len(containers) == 0 && eessiLink == "" {
 			err = errors.New("no containers")
 		}
 		if err != nil {
@@ -162,7 +162,7 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		if eessiData, _, err = read(eessiLink); err != nil {
 			return false, false, err
 		}
-		if _, err := parseEESSICatalog(eessiData); err != nil {
+		if _, err := parseEESSICatalog(eessiData, parsedCatalog.EESSIStacks); err != nil {
 			return false, false, fmt.Errorf("downloaded EESSI catalog is invalid: %w", err)
 		}
 	}
@@ -173,37 +173,59 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	if err := os.WriteFile(filepath.Join(dir, "url"), []byte(cat.URL+"\n"), 0o600); err != nil {
 		return false, false, fmt.Errorf("writing catalog: %w", err)
 	}
-	// The files are not replaced as one: if a later write fails, the next
-	// refresh puts it right.
-	files := []struct {
+	// Stage every changed file as a temporary file first and remove stale
+	// eessi.json before committing apps.json, eessi.json, and catalog.json last,
+	// so a failed write or removal never leaves mixed cache generations.
+	type pendingFile struct {
 		name string
 		data []byte
 		mode os.FileMode
-	}{{"apps.json", apps, 0o644}, {"catalog.json", data, 0o600}}
+	}
+	files := []pendingFile{{"apps.json", apps, 0o644}}
 	if eessiLink != "" {
-		files = append(files, struct {
-			name string
-			data []byte
-			mode os.FileMode
-		}{"eessi.json", eessiData, 0o644})
+		files = append(files, pendingFile{"eessi.json", eessiData, 0o644})
+	}
+	files = append(files, pendingFile{"catalog.json", data, 0o600})
+
+	type stagedFile struct {
+		tmp  string
+		dest string
+	}
+	var staged []stagedFile
+	cleanupStaged := func() {
+		for _, s := range staged {
+			os.Remove(s.tmp)
+		}
 	}
 	for _, file := range files {
 		path := filepath.Join(dir, file.name)
 		if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, file.data) {
 			continue
 		}
-		if err := writeCatalog(path, file.data, file.mode); err != nil {
-			return changed, empty, fmt.Errorf("writing catalog: %w", err)
+		tmpPath, err := stageCatalog(path, file.data, file.mode)
+		if err != nil {
+			cleanupStaged()
+			return false, empty, fmt.Errorf("writing catalog: %w", err)
 		}
-		changed = true
+		staged = append(staged, stagedFile{tmp: tmpPath, dest: path})
 	}
 	if eessiLink == "" {
 		eessiPath := filepath.Join(dir, "eessi.json")
 		if err := os.Remove(eessiPath); err == nil {
 			changed = true
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return changed, empty, fmt.Errorf("removing stale EESSI catalog: %w", err)
+			cleanupStaged()
+			return false, empty, fmt.Errorf("removing stale EESSI catalog: %w", err)
 		}
+	}
+	for i, s := range staged {
+		if err := os.Rename(s.tmp, s.dest); err != nil {
+			for _, rem := range staged[i:] {
+				os.Remove(rem.tmp)
+			}
+			return changed, empty, fmt.Errorf("writing catalog: %w", err)
+		}
+		changed = true
 	}
 	return changed, empty, nil
 }
@@ -237,14 +259,12 @@ func downloadCatalog(client *http.Client, catalogURL string, maxSize int64) ([]b
 	return data, resp.Request.URL.String(), nil
 }
 
-// writeCatalog writes data, with mode, to a new temporary file beside path
-// and renames it to path, so readers see the old file or the new one, never a
-// partial write, and two refreshes at once never share a file. The
-// directory must exist.
-func writeCatalog(path string, data []byte, mode os.FileMode) error {
+// stageCatalog writes data, with mode, to a new temporary file beside path
+// and returns its path ready to be renamed to path.
+func stageCatalog(path string, data []byte, mode os.FileMode) (string, error) {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.incomplete")
 	if err != nil {
-		return err
+		return "", err
 	}
 	_, err = f.Write(data)
 	if err == nil {
@@ -253,11 +273,25 @@ func writeCatalog(path string, data []byte, mode os.FileMode) error {
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
-	if err == nil {
-		err = os.Rename(f.Name(), path)
-	}
 	if err != nil {
 		os.Remove(f.Name())
+		return "", err
 	}
-	return err
+	return f.Name(), nil
+}
+
+// writeCatalog writes data, with mode, to a new temporary file beside path
+// and renames it to path, so readers see the old file or the new one, never a
+// partial write, and two refreshes at once never share a file. The
+// directory must exist.
+func writeCatalog(path string, data []byte, mode os.FileMode) error {
+	tmp, err := stageCatalog(path, data, mode)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }

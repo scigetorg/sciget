@@ -26,7 +26,9 @@ type catalogJSON struct {
 	DownloadURLs    []string `json:"downloadUrls"`
 }
 
-// parseCatalogJSON returns the catalog JSON in data, checked.
+// parseCatalogJSON returns the catalog JSON in data, checked for container
+// catalog fields. EESSI-specific fields are validated on add/refresh via
+// checkCatalogJSON so older caches never break ordinary container commands.
 func parseCatalogJSON(data []byte) (catalogJSON, error) {
 	var c catalogJSON
 	if err := json.Unmarshal(data, &c); err != nil {
@@ -43,12 +45,16 @@ func parseCatalogJSON(data []byte) (catalogJSON, error) {
 			return catalogJSON{}, fmt.Errorf("download URL %q %w", u, err)
 		}
 	}
-	for _, stack := range c.EESSIStacks {
+	return c, nil
+}
+
+func checkEESSIStacks(stacks []string) error {
+	for _, stack := range stacks {
 		if !eessiStackPattern.MatchString(stack) {
-			return catalogJSON{}, fmt.Errorf("invalid eessi_stacks entry %q", stack)
+			return fmt.Errorf("invalid eessi_stacks entry %q", stack)
 		}
 	}
-	return c, nil
+	return nil
 }
 
 // checkCatalogJSON returns the catalog JSON in data, read from base, and
@@ -56,6 +62,9 @@ func parseCatalogJSON(data []byte) (catalogJSON, error) {
 func checkCatalogJSON(data []byte, base string) (catalogJSON, string, error) {
 	c, err := parseCatalogJSON(data)
 	if err != nil {
+		return catalogJSON{}, "", err
+	}
+	if err := checkEESSIStacks(c.EESSIStacks); err != nil {
 		return catalogJSON{}, "", err
 	}
 	if c.EESSICatalogURL != "" {
