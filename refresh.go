@@ -315,11 +315,13 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 				}
 				staleEESSIBak = ""
 			}
-			for j := i; j < len(staged); j++ {
-				os.Remove(staged[j].tmp)
-				staged[j].tmp = ""
+			if len(rollbackErrs) == 0 {
+				for j := i; j < len(staged); j++ {
+					os.Remove(staged[j].tmp)
+					staged[j].tmp = ""
+				}
+				cleanupStaged()
 			}
-			cleanupStaged()
 			commitErr := fmt.Errorf("writing catalog: %w", err)
 			if len(rollbackErrs) > 0 {
 				return false, empty, errors.Join(commitErr, fmt.Errorf("rollback incomplete (run 'sciget refresh' to recover): %w", errors.Join(rollbackErrs...)))
@@ -339,9 +341,10 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		return changed, empty, fmt.Errorf("cleaning catalog backups: %w", err)
 	}
 	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".bak") {
-			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return changed, empty, fmt.Errorf("removing stale catalog backup %s: %w", entry.Name(), err)
+		name := entry.Name()
+		if strings.HasSuffix(name, ".bak") || strings.HasSuffix(name, ".incomplete") {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return changed, empty, fmt.Errorf("removing stale catalog backup %s: %w", name, err)
 			}
 		}
 	}

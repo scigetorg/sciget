@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testEESSIJSON = `{
@@ -294,8 +298,10 @@ func TestRefreshAndEESSICommands(t *testing.T) {
         return 0
     fi
     export LOADEDMODULES="${LOADEDMODULES:+${LOADEDMODULES}:}$2"
-    if [ "$2" = "ParaView/6.0.1-foss-2025b" ] && [ -n "${MOCK_EESSI_BIN:-}" ]; then
-        export PATH="${MOCK_EESSI_BIN}:${PATH}"
+    if [ "$2" = "ParaView/6.0.1-foss-2025b" ] || [ "$2" = "HostCheck/1.0-foss-2025b" ]; then
+        if [ -n "${MOCK_EESSI_BIN:-}" ]; then
+            export PATH="${MOCK_EESSI_BIN}:${PATH}"
+        fi
     fi
     return 0
 }
@@ -351,8 +357,9 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		t.Fatalf("stale site PATH must not satisfy missing EESSI binary: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
 	}
 
-	// Even a binary that exists in host /bin or /usr/bin (e.g. "uname") must be
-	// refused when not provided by the loaded EESSI module.
+	// Even when the loaded EESSI module adds an EESSI bin directory to PATH,
+	// a binary that exists only in host /bin or /usr/bin (e.g. "uname") must be
+	// refused with exit 127 by the filtered type -P lookup.
 	hostOnlyBuild := eessiBuild{
 		id:        "hostcheck",
 		pkg:       "HostCheck",
@@ -364,8 +371,10 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if err := runEESSILaunch(hostOnlyBuild, nil, strings.NewReader(""), &stdout, &stderr); err == nil || stdout.Len() != 0 {
-		t.Fatalf("host /usr/bin/uname must not satisfy missing EESSI binary: err=%v out=%q errOut=%q", err, stdout.String(), stderr.String())
+	err = runEESSILaunch(hostOnlyBuild, nil, strings.NewReader(""), &stdout, &stderr)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 127 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "refusing host fallback") {
+		t.Fatalf("host /usr/bin/uname must be refused with exit 127 and fallback diagnostic: err=%v out=%q errOut=%q", err, stdout.String(), stderr.String())
 	}
 
 	// If Lmod still resolves a prefix-matched module despite LMOD_EXACT_MATCH,
@@ -880,11 +889,34 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	t.Cleanup(func() { renameCatalogFile = oldRename })
 	appsRenamed := false
 	eessiInjected := false
+	appsRenamedCh := make(chan struct{})
+	closeAppsRenamed := func() {
+		select {
+		case <-appsRenamedCh:
+		default:
+			close(appsRenamedCh)
+		}
+	}
+	t.Cleanup(closeAppsRenamed)
+	type readResult struct {
+		containers []container
+		err        error
+	}
+	readerDone := make(chan readResult, 1)
+	go func() {
+		<-appsRenamedCh
+		cs, err := readContainers()
+		readerDone <- readResult{containers: cs, err: err}
+	}()
 	renameCatalogFile = func(oldpath, newpath string) error {
 		if newpath == appsPath {
 			err := os.Rename(oldpath, newpath)
 			if err == nil {
 				appsRenamed = true
+				closeAppsRenamed()
+				// Give the concurrent readContainers goroutine time to hit the
+				// shared lock while apps.json on disk temporarily holds v2.
+				time.Sleep(50 * time.Millisecond)
 			}
 			return err
 		}
@@ -905,6 +937,15 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	}
 	renameCatalogFile = oldRename
 
+	// Concurrent container reader must wait for the rollback and never observe v2 (fsl/6.0.8).
+	res := <-readerDone
+	if res.err != nil {
+		t.Fatalf("concurrent readContainers failed: %v", res.err)
+	}
+	if len(res.containers) != 1 || res.containers[0].name() != "fsl/6.0.7" {
+		t.Fatalf("concurrent readContainers observed uncommitted update: got %+v, want [fsl/6.0.7]", res.containers)
+	}
+
 	// apps.json must have been rolled back to v1 (never mixed v2 apps + v1 eessi).
 	gotApps, err := os.ReadFile(appsPath)
 	if err != nil {
@@ -921,32 +962,44 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		t.Fatalf("eessi.json should remain at v1 after failed rename")
 	}
 
+	// Older caches without .refresh.lock remain readable by container commands.
+	lockPath := filepath.Join(cacheDir, ".refresh.lock")
+	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	legacyContainers, err := readContainers()
+	if err != nil || len(legacyContainers) != 1 || legacyContainers[0].name() != "fsl/6.0.7" {
+		t.Fatalf("older cache without .refresh.lock must stay readable: err=%v containers=%+v", err, legacyContainers)
+	}
+
 	// Preserve unreadable existing apps.json when staging/backup cannot read it.
-	if err := os.Chmod(appsPath, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(appsPath, 0o644) })
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
-		t.Fatalf("expected refresh to fail when existing apps.json is unreadable")
-	}
-	if err := os.Chmod(appsPath, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gotApps, err = os.ReadFile(appsPath)
-	if err != nil {
-		t.Fatalf("unreadable apps.json must not be deleted on failed refresh: %v", err)
-	}
-	if string(gotApps) != appsV1 {
-		t.Fatalf("apps.json modified on failed unreadable refresh: got %s, want %s", string(gotApps), appsV1)
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		if err := os.Chmod(appsPath, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(appsPath, 0o644) })
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
+			t.Fatalf("expected refresh to fail when existing apps.json is unreadable")
+		}
+		if err := os.Chmod(appsPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gotApps, err = os.ReadFile(appsPath)
+		if err != nil {
+			t.Fatalf("unreadable apps.json must not be deleted on failed refresh: %v", err)
+		}
+		if string(gotApps) != appsV1 {
+			t.Fatalf("apps.json modified on failed unreadable refresh: got %s, want %s", string(gotApps), appsV1)
+		}
 	}
 
 	// If the directory becomes read-only after eessi.json is renamed and before
 	// catalog.json is renamed (so rollback also fails), refresh reports the
-	// rollback failure and EESSI commands refuse to serve the uncommitted build
-	// until a later refresh recovers the cache.
-	if os.Geteuid() != 0 {
+	// rollback failure and both EESSI and container readers refuse to serve the
+	// uncommitted cache until a later refresh recovers it.
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
 		catV2 := `{"schemaVersion": 1, "title": "v2", "appJsonUrl": "apps.json", "eessiCatalogUrl": "eessi.json", "eessi_stacks": ["2025.06"]}`
 		if err := os.WriteFile(catFile, []byte(catV2), 0o644); err != nil {
 			t.Fatal(err)
@@ -958,7 +1011,6 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV1), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		catPath := filepath.Join(cacheDir, "catalog.json")
 		t.Cleanup(func() { _ = os.Chmod(cacheDir, 0o755) })
 		renameCatalogFile = func(oldpath, newpath string) error {
 			err := os.Rename(oldpath, newpath)
@@ -967,7 +1019,6 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			}
 			return err
 		}
-		_ = catPath
 		stdout.Reset()
 		stderr.Reset()
 		if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
@@ -982,6 +1033,9 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if code := run([]string{"eessi", "find", "paraview"}, &stdout, &stderr); code == 0 || strings.Contains(stdout.String(), "9.9.9-uncommitted") {
 			t.Fatalf("eessi find must refuse to serve uncommitted build after failed rollback: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
 		}
+		if cs, err := readContainers(); err == nil {
+			t.Fatalf("readContainers must refuse incomplete rollback cache, got %+v", cs)
+		}
 		if err := os.Chmod(cacheDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -994,6 +1048,9 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		stderr.Reset()
 		if code := run([]string{"eessi", "find", "paraview"}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "9.9.9-uncommitted") {
 			t.Fatalf("eessi find should work cleanly after recovery refresh: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+		}
+		if cs, err := readContainers(); err != nil || len(cs) != 1 || cs[0].name() != "fsl/6.0.7" {
+			t.Fatalf("readContainers should work cleanly after recovery refresh: err=%v containers=%+v", err, cs)
 		}
 	}
 }

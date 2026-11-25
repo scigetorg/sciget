@@ -80,11 +80,7 @@ func readContainers() ([]container, error) {
 	var all []container
 	seen := map[string]bool{}
 	for _, cat := range used {
-		containers, err := loadCatalog(filepath.Join(cat.dir(cacheDir), "apps.json"))
-		if err != nil {
-			return nil, &catalogError{name: cat.Name, err: err}
-		}
-		mirrors, err := loadMirrors(filepath.Join(cat.dir(cacheDir), "catalog.json"))
+		containers, mirrors, err := readCatalogSnapshot(cat.dir(cacheDir))
 		if err != nil {
 			return nil, &catalogError{name: cat.Name, err: err}
 		}
@@ -99,6 +95,99 @@ func readContainers() ([]container, error) {
 	// A stable sort keeps copies of a name in catalog order.
 	slices.SortStableFunc(all, compareContainers)
 	return all, nil
+}
+
+// checkCatalogClean returns an error if dir has leftover refresh backup or
+// staged files from an incomplete rollback.
+func checkCatalogClean(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasSuffix(name, ".bak") || strings.HasSuffix(name, ".incomplete") {
+			return errors.New("catalog cache is incomplete after a failed refresh; run 'sciget refresh' to recover")
+		}
+	}
+	return nil
+}
+
+func readCatalogSnapshotLocked(dir string) ([]container, []string, error) {
+	unlock, locked, err := lockCatalogDirShared(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !locked {
+		return nil, nil, &notDownloadedError{path: filepath.Join(dir, "apps.json")}
+	}
+	defer unlock()
+	if err := checkCatalogClean(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+	containers, err := loadCatalog(filepath.Join(dir, "apps.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	mirrors, err := loadMirrors(filepath.Join(dir, "catalog.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	return containers, mirrors, nil
+}
+
+// readCatalogSnapshot reads apps.json and catalog.json consistently. When dir
+// has a .refresh.lock, it holds the shared lock across both reads so an
+// in-progress refresh commit or rollback is never observed. Older caches
+// without a .refresh.lock are still read unlocked, then re-checked for a
+// concurrently created lock so a first refresh cannot slip uncommitted files
+// into the read.
+func readCatalogSnapshot(dir string) ([]container, []string, error) {
+	unlock, locked, err := lockCatalogDirShared(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if locked {
+		defer unlock()
+		if err := checkCatalogClean(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, nil, err
+		}
+		containers, err := loadCatalog(filepath.Join(dir, "apps.json"))
+		if err != nil {
+			return nil, nil, err
+		}
+		mirrors, err := loadMirrors(filepath.Join(dir, "catalog.json"))
+		if err != nil {
+			return nil, nil, err
+		}
+		return containers, mirrors, nil
+	}
+	if err := checkCatalogClean(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if _, statErr := os.Stat(filepath.Join(dir, ".refresh.lock")); statErr == nil {
+			return readCatalogSnapshotLocked(dir)
+		}
+		return nil, nil, err
+	}
+	containers, err := loadCatalog(filepath.Join(dir, "apps.json"))
+	if err != nil {
+		if _, statErr := os.Stat(filepath.Join(dir, ".refresh.lock")); statErr == nil {
+			return readCatalogSnapshotLocked(dir)
+		}
+		return nil, nil, err
+	}
+	mirrors, err := loadMirrors(filepath.Join(dir, "catalog.json"))
+	if err != nil {
+		if _, statErr := os.Stat(filepath.Join(dir, ".refresh.lock")); statErr == nil {
+			return readCatalogSnapshotLocked(dir)
+		}
+		return nil, nil, err
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".refresh.lock")); statErr == nil {
+		return readCatalogSnapshotLocked(dir)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, nil, statErr
+	}
+	return containers, mirrors, nil
 }
 
 // loadMirrors returns the download URLs in the catalog JSON at path, or
