@@ -291,11 +291,33 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		cpuModDir := filepath.Join(repoRoot, "versions", "2025.06", "software", "linux", "x86_64", "amd", "zen2", "modules", "all")
 		accelModDir := filepath.Join(repoRoot, "versions", "2025.06", "software", "linux", "x86_64", "amd", "zen2", "accel", "nvidia", "cc80", "modules", "all")
 		hostInjectDir := filepath.Join(repoRoot, "host_injections", "2025.06", "software", "linux", "x86_64", "amd", "zen2", "modules", "all")
-		binDir := filepath.Join(tmp, "bin")
-		for _, d := range []string{modRoot, cpuModDir, accelModDir, hostInjectDir, binDir} {
+		binDir := filepath.Join(repoRoot, "versions", "2025.06", "software", "linux", "x86_64", "amd", "zen2", "software", "bin")
+		siteModDir := filepath.Join(tmp, "site-eessi-modules")
+		siteHookBinDir := filepath.Join(tmp, "site-hook-bin")
+		for _, d := range []string{modRoot, cpuModDir, accelModDir, hostInjectDir, binDir, siteModDir, siteHookBinDir} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				t.Fatal(err)
 			}
+		}
+		for _, mf := range []string{
+			filepath.Join(modRoot, "EESSI", "2025.06.lua"),
+			filepath.Join(cpuModDir, "ParaView", "6.0.1-foss-2025b.lua"),
+			filepath.Join(cpuModDir, "HostCheck", "1.0-foss-2025b.lua"),
+			filepath.Join(cpuModDir, "GROMACS", "2026.2-foss-2025b.lua"),
+			filepath.Join(cpuModDir, "GROMACS", "2026.2-foss-2025b-CUDA-12.9.1.lua"),
+			filepath.Join(accelModDir, "GROMACS", "2026.2-foss-2025b-CUDA-12.9.1.lua"),
+			filepath.Join(siteModDir, "ParaView", "6.0.1-foss-2025b.lua"),
+		} {
+			if err := os.MkdirAll(filepath.Dir(mf), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(mf, []byte("-- mock modulefile\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		accelSymlinkToCPU := filepath.Join(accelModDir, "GROMACS", "2026.2-symlink-to-cpu.lua")
+		if err := os.Symlink(filepath.Join(cpuModDir, "GROMACS", "2026.2-foss-2025b.lua"), accelSymlinkToCPU); err != nil {
+			t.Fatal(err)
 		}
 		mockLmod := filepath.Join(tmp, "mock-lmod.sh")
 		lmodLog := filepath.Join(tmp, "lmod.log")
@@ -331,9 +353,9 @@ func TestRefreshAndEESSICommands(t *testing.T) {
         # Simulate real EESSI bootstrap prepending site modules, host_injections,
         # optional accelerator modules, and CPU software modules.
         if [ "${MOCK_EESSI_ACCEL:-1}" = "1" ]; then
-            export MODULEPATH="/site/eessi/modules:${MOCK_HOST_INJECT_DIR}:${MOCK_ACCEL_MOD_DIR}:${MOCK_CPU_MOD_DIR}:${MODULEPATH}"
+            export MODULEPATH="${MOCK_SITE_MOD_DIR}:${MOCK_HOST_INJECT_DIR}:${MOCK_ACCEL_MOD_DIR}:${MOCK_CPU_MOD_DIR}:${MODULEPATH}"
         else
-            export MODULEPATH="/site/eessi/modules:${MOCK_HOST_INJECT_DIR}:${MOCK_CPU_MOD_DIR}:${MODULEPATH}"
+            export MODULEPATH="${MOCK_SITE_MOD_DIR}:${MOCK_HOST_INJECT_DIR}:${MOCK_CPU_MOD_DIR}:${MODULEPATH}"
         fi
         return 0
     fi
@@ -348,6 +370,10 @@ func TestRefreshAndEESSICommands(t *testing.T) {
         if [ -n "${MOCK_EESSI_BIN:-}" ]; then
             export PATH="${MOCK_EESSI_BIN}:${PATH}"
         fi
+    fi
+    # Simulate a host_injections site load hook prepending a site bin dir to PATH.
+    if [ -n "${MOCK_SITE_HOOK_BIN:-}" ]; then
+        export PATH="${MOCK_SITE_HOOK_BIN}:${PATH}"
     fi
     return 0
 }
@@ -364,10 +390,19 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(staleBinDir, "gmx"), []byte("#!/bin/sh\necho STALE_SITE_GMX\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(siteHookBinDir, "paraview"), []byte("#!/bin/sh\necho SITE_HOOK_HIJACK\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(siteHookBinDir, "gmx"), []byte("#!/bin/sh\necho SITE_HOOK_GMX\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}\"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(binDir, "gmx"), []byte("#!/bin/sh\necho \"GMX_GPU:$*\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(siteHookBinDir, "paraview"), filepath.Join(binDir, "escaped")); err != nil {
 			t.Fatal(err)
 		}
 		t.Setenv("MODULEPATH", "/site/other/modules")
@@ -378,14 +413,17 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		t.Setenv("MOCK_CPU_MOD_DIR", cpuModDir)
 		t.Setenv("MOCK_ACCEL_MOD_DIR", accelModDir)
 		t.Setenv("MOCK_HOST_INJECT_DIR", hostInjectDir)
+		t.Setenv("MOCK_SITE_MOD_DIR", siteModDir)
+		t.Setenv("MOCK_SITE_HOOK_BIN", siteHookBinDir)
 		t.Setenv("MOCK_LMOD_LOG", lmodLog)
 		t.Setenv("MOCK_EESSI_BIN", binDir)
 		t.Setenv("PATH", staleBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		// Tool flags (--version, --gpu) after <tool> pass through to the binary without `--`,
 		// inherited MODULEPATH is replaced by modroot, site/host_injections/accel paths
-		// added by EESSI bootstrap are stripped before loading a CPU tool, stale
-		// LD_LIBRARY_PATH and PATH entries are scrubbed, and LMOD_EXACT_MATCH=yes is enforced.
+		// added by EESSI bootstrap are stripped before loading a CPU tool, site load
+		// hook PATH entries outside EESSI are ignored, stale LD_LIBRARY_PATH and PATH
+		// entries are scrubbed, and LMOD_EXACT_MATCH=yes is enforced.
 		stdout.Reset()
 		stderr.Reset()
 		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version", "--gpu"}, &stdout, &stderr); code != 0 {
@@ -403,8 +441,24 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 			t.Fatalf("lmod log = %q, want %q", string(logBytes), wantLog)
 		}
 
+		// An EESSI-side symlink executable pointing outside EESSI must be refused.
+		escapedBuild := eessiBuild{
+			id:        "escaped",
+			pkg:       "HostCheck",
+			cvmfsRepo: "software.eessi.io",
+			stack:     "2025.06",
+			module:    "HostCheck/1.0-foss-2025b",
+			version:   "1.0",
+			exec:      []string{"escaped"},
+		}
+		stdout.Reset()
+		stderr.Reset()
+		if err := runEESSILaunch(escapedBuild, nil, strings.NewReader(""), &stdout, &stderr); err == nil || stdout.Len() != 0 || !strings.Contains(stderr.String(), "resolved outside EESSI root") {
+			t.Fatalf("symlink escaping EESSI root must be refused: err=%v out=%q errOut=%q", err, stdout.String(), stderr.String())
+		}
+
 		// If a same-named site modulefile still appears in _LMFILES_, launch aborts.
-		t.Setenv("MOCK_LMOD_OVERRIDE_LMFILE", "/site/eessi/modules/ParaView/6.0.1-foss-2025b.lua")
+		t.Setenv("MOCK_LMOD_OVERRIDE_LMFILE", filepath.Join(siteModDir, "ParaView", "6.0.1-foss-2025b.lua"))
 		stdout.Reset()
 		stderr.Reset()
 		if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "outside EESSI root") {
@@ -423,12 +477,18 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		t.Setenv("MOCK_EESSI_ACCEL", "1")
 
 		// Even when an accelerator modulepath is active, if Lmod resolves a --gpu
-		// build to a CPU modulefile instead of an accel modulefile, launch aborts.
-		t.Setenv("MOCK_LMOD_OVERRIDE_LMFILE", filepath.Join(cpuModDir, "GROMACS", "2026.2-foss-2025b-CUDA-12.9.1.lua"))
-		stdout.Reset()
-		stderr.Reset()
-		if code := run([]string{"eessi", "launch", "--gpu", "gromacs", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "--gpu requested accelerator module") {
-			t.Fatalf("--gpu resolving to CPU modulefile must be rejected: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+		// build to a CPU modulefile (directly or via an accel-side symlink to CPU),
+		// launch aborts.
+		for _, badLMFile := range []string{
+			filepath.Join(cpuModDir, "GROMACS", "2026.2-foss-2025b-CUDA-12.9.1.lua"),
+			accelSymlinkToCPU,
+		} {
+			t.Setenv("MOCK_LMOD_OVERRIDE_LMFILE", badLMFile)
+			stdout.Reset()
+			stderr.Reset()
+			if code := run([]string{"eessi", "launch", "--gpu", "gromacs", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "--gpu requested accelerator module") {
+				t.Fatalf("--gpu resolving to CPU modulefile (%s) must be rejected: code=%d out=%q err=%q", badLMFile, code, stdout.String(), stderr.String())
+			}
 		}
 		t.Setenv("MOCK_LMOD_OVERRIDE_LMFILE", "")
 
@@ -1432,12 +1492,23 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 	}
 
-	// Concurrent catalog list writes and reads must never observe a truncated
-	// catalogs.json (EOF).
+	// Concurrent catalog list writes and reads (including through a symlink to
+	// catalogs.json) must never observe a truncated file (EOF).
 	listPath := filepath.Join(tmp, "concurrent-catalogs.json")
 	sampleList := []catalog{{Name: "neuro", URL: catFile, Use: true}}
 	if err := writeCatalogList(listPath, sampleList, false); err != nil {
 		t.Fatal(err)
+	}
+	readPath := listPath
+	if runtime.GOOS != "windows" {
+		linkDir := filepath.Join(tmp, "link-dir")
+		if err := os.MkdirAll(linkDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		readPath = filepath.Join(linkDir, "catalogs.json")
+		if err := os.Symlink(listPath, readPath); err != nil {
+			t.Fatal(err)
+		}
 	}
 	stopWrite := make(chan struct{})
 	writeErrs := make(chan error, 1)
@@ -1455,8 +1526,8 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			}
 		}
 	}()
-	for range 50 {
-		cats, err := loadCatalogList(listPath)
+	for range 100 {
+		cats, err := loadCatalogList(readPath)
 		if err != nil || len(cats) != 1 || cats[0].Name != "neuro" {
 			close(stopWrite)
 			<-writeErrs

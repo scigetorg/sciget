@@ -174,14 +174,43 @@ func catalogListPath() (string, error) {
 	return filepath.Join(filepath.Dir(path), "catalogs.json"), nil
 }
 
+// catalogListLockTarget resolves symlinks along path (including dangling leaf
+// symlinks and symlinked parent directories) so a reader through a symlink and
+// a writer through the target file acquire the same lock file.
+func catalogListLockTarget(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	cur := filepath.Clean(path)
+	for range 40 {
+		info, err := os.Lstat(cur)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			break
+		}
+		target, err := os.Readlink(cur)
+		if err != nil {
+			break
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(cur), target)
+		}
+		cur = filepath.Clean(target)
+	}
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(cur)); err == nil {
+		return filepath.Join(dir, filepath.Base(cur))
+	}
+	return cur
+}
+
 // loadCatalogList reads catalogs.json at path. A missing file lists no
 // catalogs. Anything but a JSON array of entries with a valid name, URL
 // and use is an error, as is a name listed twice. When a sibling lock file
-// exists for path, it holds a shared lock across the read so concurrent
-// in-place updates cannot expose a truncated file.
+// exists for the resolved target of path, it holds a shared lock across the
+// read so concurrent in-place updates cannot expose a truncated file.
 func loadCatalogList(path string) ([]catalog, error) {
+	lockTarget := catalogListLockTarget(path)
 	readLocked := func() ([]catalog, error) {
-		unlock, _, locked, err := lockCatalogDirShared(path)
+		unlock, _, locked, err := lockCatalogDirShared(lockTarget)
 		if err != nil {
 			return nil, fmt.Errorf("reading catalogs: %w", err)
 		}
@@ -201,7 +230,7 @@ func loadCatalogList(path string) ([]catalog, error) {
 		}
 		return catalogs, nil
 	}
-	unlock, _, locked, err := lockCatalogDirShared(path)
+	unlock, _, locked, err := lockCatalogDirShared(lockTarget)
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogs: %w", err)
 	}
@@ -218,7 +247,7 @@ func loadCatalogList(path string) ([]catalog, error) {
 	catalogs, err := parseCatalogList(data)
 	if err != nil {
 		if !locked {
-			if _, statErr := os.Stat(catalogLockPath(path)); statErr == nil {
+			if _, statErr := os.Stat(catalogLockPath(lockTarget)); statErr == nil {
 				return readLocked()
 			}
 		}
@@ -300,7 +329,8 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 
 // writeCatalogList writes catalogs to catalogs.json at path, in place, or
 // with system set as writeSystemFile does. User writes hold an exclusive lock
-// on path's sibling lock file so concurrent readers never observe O_TRUNC.
+// on the resolved target's sibling lock file so concurrent readers (including
+// through symlinks) never observe O_TRUNC.
 func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	if catalogs == nil {
 		catalogs = []catalog{} // written as [], not null
@@ -311,7 +341,7 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 		}
 		return nil
 	}
-	lk, err := lockCatalogDir(path)
+	lk, err := lockCatalogDir(catalogListLockTarget(path))
 	if err != nil {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}

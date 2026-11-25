@@ -41,6 +41,36 @@ if [ ! -d "${modroot}" ]; then
     echo "sciget eessi: EESSI repository is not mounted at ${modroot}" >&2
     exit 1
 fi
+canon_dir() {
+    (cd -P -- "$1" 2>/dev/null && pwd -P) || printf '%s\n' "${1%/}"
+}
+canon_file() {
+    if command -v readlink >/dev/null 2>&1 && readlink -f -- "$1" >/dev/null 2>&1; then
+        readlink -f -- "$1"
+        return 0
+    fi
+    local target="$1" dir base
+    while [ -L "${target}" ]; do
+        dir="$(cd -P -- "$(dirname -- "${target}")" 2>/dev/null && pwd -P)"
+        target="$(readlink -- "${target}")"
+        case "${target}" in
+        /*) ;;
+        *) target="${dir}/${target}" ;;
+        esac
+    done
+    dir="$(cd -P -- "$(dirname -- "${target}")" 2>/dev/null && pwd -P)"
+    base="$(basename -- "${target}")"
+    printf '%s/%s\n' "${dir}" "${base}"
+}
+modroot_real="$(canon_dir "${modroot}")"
+if [[ "${modroot}" == */init/modules ]]; then
+    repo_root_real="$(canon_dir "${modroot%/init/modules}")"
+    eessi_version_prefix="${repo_root_real}/versions/${stack}/"
+    eessi_sw_prefix="${repo_root_real}/versions/${stack}/software/"
+else
+    eessi_version_prefix="${modroot_real}/"
+    eessi_sw_prefix="${modroot_real}/"
+fi
 lmod_init="${EESSI_LMOD_INIT:-}"
 if [ -z "${lmod_init}" ]; then
     for candidate in "${LMOD_PKG:+${LMOD_PKG}/init/bash}" /opt/apps/lmod/lmod/init/bash /usr/share/lmod/lmod/init/bash /etc/profile.d/lmod.sh; do
@@ -55,6 +85,7 @@ if [ -z "${lmod_init}" ] || [ ! -r "${lmod_init}" ]; then
     exit 1
 fi
 export FPATH="${FPATH:-}"
+unset LMOD_PACKAGE_PATH LMOD_RC
 source "${lmod_init}"
 module --force purge >/dev/null
 # Clear loader/runtime search paths, site EESSI overrides, and reset PATH to a
@@ -78,11 +109,6 @@ esac
 # EESSI repository and stack so site module directories or host_injections
 # prepended by the EESSI bootstrap cannot shadow ${mod}. For CPU builds, also
 # exclude accelerator module roots; for GPU builds, require an accelerator root.
-if [[ "${modroot}" == */init/modules ]]; then
-    eessi_sw_prefix="${modroot%/init/modules}/versions/${stack}/software/"
-else
-    eessi_sw_prefix="${modroot}/"
-fi
 filtered_mp=""
 has_accel_mp="0"
 IFS=':' read -r -a mp_parts <<<"${MODULEPATH:-}"
@@ -91,13 +117,14 @@ for p in "${mp_parts[@]+"${mp_parts[@]}"}"; do
     case "${p}" in
     ""|*"/../"*|*"/.."|"../"*|"..") continue ;;
     esac
-    if [ "${p}" = "${modroot}" ]; then
+    p_real="$(canon_dir "${p}")"
+    if [ "${p_real}" = "${modroot_real}" ]; then
         filtered_mp="${filtered_mp:+${filtered_mp}:}${p}"
         continue
     fi
-    case "${p}" in
+    case "${p_real}" in
     "${eessi_sw_prefix}"*)
-        rel_p="${p#"${eessi_sw_prefix}"}"
+        rel_p="${p_real#"${eessi_sw_prefix}"}"
         case "/${rel_p}/" in
         */accel/*)
             if [ "${want_gpu}" = "1" ]; then
@@ -132,9 +159,9 @@ case ":${LOADEDMODULES:-}:" in
     exit 1
     ;;
 esac
-# Verify via _LMFILES_ that ${mod} resolved from the allowed EESSI software root
-# (and from an accelerator tree when --gpu was requested, never falling back to a
-# same-named CPU or site module).
+# Verify via _LMFILES_ (after resolving symlinks) that ${mod} resolved from the
+# allowed EESSI software root (and from an accelerator tree when --gpu was
+# requested, never via a symlink to a CPU or site module).
 IFS=':' read -r -a lm_mods <<<"${LOADEDMODULES:-}"
 IFS=':' read -r -a lm_files <<<"${_LMFILES_:-}"
 mod_file=""
@@ -148,30 +175,31 @@ if [ -z "${mod_file}" ]; then
     echo "sciget eessi: Lmod did not report modulefile path (_LMFILES_) for ${mod}" >&2
     exit 1
 fi
-case "${mod_file}" in
-*"/../"*|*"/.."|"../"*|"..")
-    echo "sciget eessi: refusing modulefile path with traversal: ${mod_file}" >&2
+if [ ! -e "${mod_file}" ]; then
+    echo "sciget eessi: Lmod reported missing modulefile ${mod_file} for ${mod}" >&2
     exit 1
-    ;;
+fi
+mod_file_real="$(canon_file "${mod_file}")"
+case "${mod_file_real}" in
 "${eessi_sw_prefix}"*) ;;
 *)
-    echo "sciget eessi: refusing module ${mod} loaded outside EESSI root ${eessi_sw_prefix}: ${mod_file}" >&2
+    echo "sciget eessi: refusing module ${mod} loaded outside EESSI root ${eessi_sw_prefix}: ${mod_file_real}" >&2
     exit 1
     ;;
 esac
-rel_mod_file="${mod_file#"${eessi_sw_prefix}"}"
+rel_mod_file="${mod_file_real#"${eessi_sw_prefix}"}"
 if [ "${want_gpu}" = "1" ]; then
     case "/${rel_mod_file}/" in
     */accel/*) ;;
     *)
-        echo "sciget eessi: --gpu requested accelerator module ${mod}, but Lmod loaded CPU module ${mod_file}" >&2
+        echo "sciget eessi: --gpu requested accelerator module ${mod}, but Lmod loaded CPU module ${mod_file_real}" >&2
         exit 1
         ;;
     esac
 else
     case "/${rel_mod_file}/" in
     */accel/*)
-        echo "sciget eessi: CPU build ${mod} unexpectedly resolved to accelerator module ${mod_file}" >&2
+        echo "sciget eessi: CPU build ${mod} unexpectedly resolved to accelerator module ${mod_file_real}" >&2
         exit 1
         ;;
     esac
@@ -188,12 +216,17 @@ eessi_path=""
 IFS=':' read -r -a path_parts <<<"${PATH}"
 for p in "${path_parts[@]+"${path_parts[@]}"}"; do
     case "${p}" in
-    ""|/usr/bin|/bin) continue ;;
-    *) eessi_path="${eessi_path:+${eessi_path}:}${p}" ;;
+    ""|/usr/bin|/bin|*"/../"*|*"/.."|"../"*|"..") continue ;;
+    esac
+    p_real="$(canon_dir "${p}")"
+    case "${p_real}/" in
+    "${eessi_version_prefix}"*)
+        eessi_path="${eessi_path:+${eessi_path}:}${p}"
+        ;;
     esac
 done
 if [ -z "${eessi_path}" ]; then
-    echo "sciget eessi: loaded module ${mod} did not add any EESSI bin directory to PATH" >&2
+    echo "sciget eessi: loaded module ${mod} did not add any EESSI bin directory under ${eessi_version_prefix} to PATH" >&2
     exit 127
 fi
 resolved_bin="$(PATH="${eessi_path}" type -P -- "${cmd_name}" || true)"
@@ -201,6 +234,15 @@ if [ -z "${resolved_bin}" ]; then
     echo "sciget eessi: executable ${cmd_name} not found in loaded EESSI modules (refusing host fallback)" >&2
     exit 127
 fi
+resolved_bin_real="$(canon_file "${resolved_bin}")"
+case "${resolved_bin_real}" in
+"${eessi_version_prefix}"*) ;;
+*)
+    echo "sciget eessi: refusing executable ${cmd_name} resolved outside EESSI root ${eessi_version_prefix}: ${resolved_bin_real}" >&2
+    exit 127
+    ;;
+esac
+export PATH="${eessi_path}:/usr/bin:/bin"
 exec -- "${resolved_bin}" "$@"
 `
 
