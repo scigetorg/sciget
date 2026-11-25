@@ -1003,6 +1003,9 @@ func TestRun(t *testing.T) {
 				}
 				names := []string{}
 				for _, e := range entries {
+					if !e.IsDir() && strings.HasSuffix(e.Name(), ".lock") {
+						continue
+					}
 					names = append(names, e.Name()[:strings.LastIndex(e.Name(), "-")])
 				}
 				slices.Sort(names)

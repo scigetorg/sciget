@@ -33,11 +33,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return exitCode(root.Execute(), stderr)
 }
 
+// exitStatusError carries a child process's non-zero exit status through cobra
+// without printing an extra "sciget: exit status N" line.
+type exitStatusError struct {
+	code int
+	err  error
+}
+
+func (e exitStatusError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return fmt.Sprintf("exit status %d", e.code)
+}
+
+func (e exitStatusError) Unwrap() error { return e.err }
+
 // exitCode prints err to stderr and returns 0 on success, 2 for a usage
-// error and 1 for any other failure.
+// error, the child's status for exitStatusError, and 1 for any other failure.
 func exitCode(err error, stderr io.Writer) int {
 	if err == nil {
 		return 0
+	}
+	var exitErr exitStatusError
+	if errors.As(err, &exitErr) {
+		return exitErr.code
 	}
 
 	// A joined error has one failure per line; each gets the prefix. An
@@ -92,6 +112,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newInstallCommand())
 	root.AddCommand(newDoctorCommand())
 	root.AddCommand(newApptainerCommand())
+	root.AddCommand(newEESSICommand())
 	root.AddCommand(newUICommand())
 	return root
 }

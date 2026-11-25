@@ -15,7 +15,8 @@ import (
 // catalogJSON is a catalog's own file: where its apps list is and which
 // mirrors serve its containers. Without an apps list it is an empty
 // catalog; without mirrors its containers come only from a share (--dir).
-// Other keys are ignored.
+// Other keys (including EESSI fields) are ignored here so older caches with
+// malformed EESSI fields never break ordinary container commands.
 type catalogJSON struct {
 	SchemaVersion int      `json:"schemaVersion"`
 	Title         string   `json:"title"`
@@ -24,7 +25,15 @@ type catalogJSON struct {
 	DownloadURLs  []string `json:"downloadUrls"`
 }
 
-// parseCatalogJSON returns the catalog JSON in data, checked.
+// catalogEESSIJSON holds the optional EESSI fields of a catalog JSON, decoded
+// separately from catalogJSON on add/refresh and EESSI subcommands.
+type catalogEESSIJSON struct {
+	EESSICatalogURL string   `json:"eessiCatalogUrl"`
+	EESSIStacks     []string `json:"eessi_stacks"`
+}
+
+// parseCatalogJSON returns the catalog JSON in data, checked for container
+// catalog fields alone.
 func parseCatalogJSON(data []byte) (catalogJSON, error) {
 	var c catalogJSON
 	if err := json.Unmarshal(data, &c); err != nil {
@@ -44,18 +53,65 @@ func parseCatalogJSON(data []byte) (catalogJSON, error) {
 	return c, nil
 }
 
+// parseCatalogEESSI decodes and validates the optional EESSI fields in a
+// catalog JSON document.
+func parseCatalogEESSI(data []byte) (catalogEESSIJSON, error) {
+	var e catalogEESSIJSON
+	if err := json.Unmarshal(data, &e); err != nil {
+		return catalogEESSIJSON{}, err
+	}
+	if err := checkEESSIStacks(e.EESSIStacks); err != nil {
+		return catalogEESSIJSON{}, err
+	}
+	return e, nil
+}
+
+func checkEESSIStacks(stacks []string) error {
+	for _, stack := range stacks {
+		if !eessiStackPattern.MatchString(stack) {
+			return fmt.Errorf("invalid eessi_stacks entry %q", stack)
+		}
+	}
+	return nil
+}
+
 // checkCatalogJSON returns the catalog JSON in data, read from base, and
 // the link to its apps list, or "" for an empty catalog.
 func checkCatalogJSON(data []byte, base string) (catalogJSON, string, error) {
 	c, err := parseCatalogJSON(data)
-	if err != nil || c.AppJSONURL == "" {
-		return c, "", err
+	if err != nil {
+		return catalogJSON{}, "", err
+	}
+	e, err := parseCatalogEESSI(data)
+	if err != nil {
+		return catalogJSON{}, "", err
+	}
+	if e.EESSICatalogURL != "" {
+		if _, err := resolveLink(base, e.EESSICatalogURL); err != nil {
+			return catalogJSON{}, "", fmt.Errorf("eessiCatalogUrl: %w", err)
+		}
+	}
+	if c.AppJSONURL == "" {
+		return c, "", nil
 	}
 	apps, err := resolveLink(base, c.AppJSONURL)
 	if err != nil {
 		return catalogJSON{}, "", fmt.Errorf("appJsonUrl: %w", err)
 	}
 	return c, apps, nil
+}
+
+// resolveEESSILink returns the resolved link for e.EESSICatalogURL relative to
+// base, or "" when no EESSI catalog is configured.
+func resolveEESSILink(e catalogEESSIJSON, base string) (string, error) {
+	if e.EESSICatalogURL == "" {
+		return "", nil
+	}
+	link, err := resolveLink(base, e.EESSICatalogURL)
+	if err != nil {
+		return "", fmt.Errorf("eessiCatalogUrl: %w", err)
+	}
+	return link, nil
 }
 
 // isURL reports whether link is a URL rather than a local path.

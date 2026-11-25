@@ -174,16 +174,27 @@ func catalogListPath() (string, error) {
 	return filepath.Join(filepath.Dir(path), "catalogs.json"), nil
 }
 
-// loadCatalogList reads catalogs.json at path. A missing file lists no
-// catalogs. Anything but a JSON array of entries with a valid name, URL
-// and use is an error, as is a name listed twice.
+// loadCatalogList reads catalogs.json at path while holding a shared lock
+// directly on the open file so concurrent in-place updates cannot expose a
+// truncated file, regardless of symlinks, junctions, or path casing. A missing
+// file lists no catalogs. Anything but a JSON array of entries with a valid
+// name, URL and use is an error, as is a name listed twice.
 func loadCatalogList(path string) ([]catalog, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogs: %w", err)
+	}
+	closeAndUnlock, err := lockOpenFileShared(f)
+	if err != nil {
+		return nil, fmt.Errorf("reading catalogs: %w", err)
+	}
+	data, readErr := io.ReadAll(f)
+	_ = closeAndUnlock()
+	if readErr != nil {
+		return nil, fmt.Errorf("reading catalogs: %w", readErr)
 	}
 	catalogs, err := parseCatalogList(data)
 	if err != nil {
@@ -263,17 +274,94 @@ func parseCatalogList(data []byte) ([]catalog, error) {
 	return catalogs, nil
 }
 
+// linkCatalogFile creates a hard link when staging a new catalogs.json; tests
+// may replace it to simulate filesystems that do not support hard links.
+var linkCatalogFile = os.Link
+
+// beforeCatalogCreateRename runs in the non-hardlink first-creation path right
+// before acquiring the creation lock; tests may set it to reproduce races.
+var beforeCatalogCreateRename = func(target string) {}
+
 // writeCatalogList writes catalogs to catalogs.json at path, in place, or
-// with system set as writeSystemFile does.
+// with system set as writeSystemFile does. User writes lock the open file
+// itself before truncating and writing so concurrent readers (including
+// through symlinks, junctions, or mixed case) never observe O_TRUNC and
+// writable files inside read-only directories stay updatable.
 func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	if catalogs == nil {
 		catalogs = []catalog{} // written as [], not null
 	}
-	write := writeJSONFile
 	if system {
-		write = writeSystemFile
+		if err := writeSystemFile(path, catalogs); err != nil {
+			return fmt.Errorf("writing catalogs: %w", err)
+		}
+		return nil
 	}
-	if err := write(path, catalogs); err != nil {
+	data, err := json.MarshalIndent(catalogs, "", "  ")
+	if err != nil {
+		return fmt.Errorf("writing catalogs: %w", err)
+	}
+	data = append(data, '\n')
+	if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
+		// Resolve any dangling symlink chain so first creation atomically
+		// publishes the target file via stage+link (falling back to a
+		// creation-locked rename on filesystems without hard links, and using
+		// a short temp name that fits even when the target basename is 255
+		// bytes) instead of exposing a zero-byte file before the exclusive
+		// lock is acquired. If resolution fails (e.g. a broken symlink like
+		// missing/../target) or the target directory does not exist, skip
+		// staging so os.OpenFile reports the genuine OS error.
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("writing catalogs: %w", err)
+		}
+		if target, ok := resolveCanonicalPath(path, true); ok {
+			if tmp, err := stageTemp(filepath.Dir(target), ".catalogs.*.tmp", data, 0o600); err == nil {
+				linkErr := linkCatalogFile(tmp, target)
+				if linkErr == nil {
+					_ = os.Remove(tmp)
+					return nil
+				}
+				if !errors.Is(linkErr, fs.ErrExist) {
+					beforeCatalogCreateRename(target)
+					createLockPath := hashLockPath(filepath.Dir(target), "create-"+filepath.Base(target))
+					if clk, clkErr := lockFileExclusive(createLockPath); clkErr == nil {
+						if _, postStat := os.Stat(target); errors.Is(postStat, fs.ErrNotExist) {
+							renameErr := os.Rename(tmp, target)
+							clk.unlock()
+							if renameErr == nil {
+								return nil
+							}
+							_ = os.Remove(tmp)
+						} else {
+							clk.unlock()
+							_ = os.Remove(tmp)
+						}
+					} else {
+						_ = os.Remove(tmp)
+					}
+				} else {
+					_ = os.Remove(tmp)
+				}
+			}
+		}
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("writing catalogs: %w", err)
+	}
+	closeAndUnlock, err := lockOpenFileExclusive(f)
+	if err != nil {
+		return fmt.Errorf("writing catalogs: %w", err)
+	}
+	if _, err = f.Seek(0, io.SeekStart); err == nil {
+		if err = f.Truncate(0); err == nil {
+			_, err = f.Write(data)
+		}
+	}
+	if closeErr := closeAndUnlock(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
 	return nil
