@@ -171,11 +171,12 @@ func readCatalogLockGen(dir string) (uint64, error) {
 	return gen, nil
 }
 
-// resolveCanonicalPath resolves symlinks component by component (like
-// `realpath -m`), including dangling leaves, missing intermediate directories,
-// relative symlink targets containing symlinked directories followed by "..",
-// and Windows drive-root-relative targets.
-func resolveCanonicalPath(path string) string {
+// resolveCanonicalPath resolves symlinks and Windows junctions component by
+// component, including dangling leaves and missing tail components. It refuses
+// to collapse ".." through a non-existent directory (returning ok=false),
+// matching OS pathname lookup so a broken target like "missing/../actual.json"
+// is never rewritten to a different path.
+func resolveCanonicalPath(path string) (string, bool) {
 	cur := path
 	if !filepath.IsAbs(cur) {
 		if abs, err := filepath.Abs(cur); err == nil {
@@ -199,19 +200,26 @@ func resolveCanonicalPath(path string) string {
 			continue
 		}
 		if comp == ".." {
+			info, err := os.Stat(resolved)
+			if err != nil || !info.IsDir() {
+				return "", false
+			}
 			resolved = filepath.Dir(resolved)
 			continue
 		}
 		next := filepath.Join(resolved, comp)
-		info, err := os.Lstat(next)
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		// For existing components, filepath.EvalSymlinks resolves symlinks,
+		// Windows NTFS junctions (ModeIrregular), and on-disk casing natively.
+		if eval, err := filepath.EvalSymlinks(next); err == nil {
+			resolved = eval
+			continue
+		}
+		// Component does not exist (or is a dangling symlink/reparse point):
+		// follow its link target if os.Readlink succeeds.
+		if target, err := os.Readlink(next); err == nil {
 			symlinksFollowed++
 			if symlinksFollowed > 40 {
-				return filepath.Clean(cur)
-			}
-			target, err := os.Readlink(next)
-			if err != nil {
-				return filepath.Clean(cur)
+				return "", false
 			}
 			if filepath.IsAbs(target) {
 				tVol := filepath.VolumeName(target)
@@ -231,17 +239,20 @@ func resolveCanonicalPath(path string) string {
 		}
 		resolved = next
 	}
-	return resolved
+	return resolved, true
 }
 
 // catalogLockPath returns the advisory lock file path for cache directory dir.
-// It resolves symlinks along dir first so two cache roots sharing a catalogs/
-// subtree through a symlink serialize on the same lock file, and places the
-// lock outside dir (in a sibling locks/ directory under cache_dir when dir is
-// under catalogs/, or beside dir otherwise) so deleting dir never breaks lock
-// identity.
+// It resolves symlinks and Windows junctions along dir first so two cache
+// roots sharing a catalogs/ subtree serialize on the same lock file, and
+// places the lock outside dir (in a sibling locks/ directory under cache_dir
+// when dir is under catalogs/, or beside dir otherwise) so deleting dir never
+// breaks lock identity.
 func catalogLockPath(dir string) string {
-	clean := resolveCanonicalPath(dir)
+	clean, ok := resolveCanonicalPath(dir)
+	if !ok {
+		clean = filepath.Clean(dir)
+	}
 	parent := filepath.Dir(clean)
 	base := filepath.Base(parent)
 	if base == "catalogs" || (runtime.GOOS == "windows" && strings.EqualFold(base, "catalogs")) {

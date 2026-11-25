@@ -84,7 +84,8 @@ func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 
 // lockOpenFileExclusive acquires an exclusive advisory flock directly on the
 // open file f (following symlinks natively without creating a sibling file).
-// The returned function releases the lock and closes f.
+// It takes ownership of f: on error it closes f before returning; on success
+// the returned function releases the lock and closes f.
 func lockOpenFileExclusive(f *os.File) (func() error, error) {
 	var err error
 	for {
@@ -94,6 +95,7 @@ func lockOpenFileExclusive(f *os.File) (func() error, error) {
 		}
 	}
 	if err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 	return func() error {
@@ -103,7 +105,8 @@ func lockOpenFileExclusive(f *os.File) (func() error, error) {
 }
 
 // lockOpenFileShared acquires a shared advisory flock directly on open file f.
-// The returned function releases the lock and closes f.
+// It takes ownership of f: on error it closes f before returning; on success
+// the returned function releases the lock and closes f.
 func lockOpenFileShared(f *os.File) (func() error, error) {
 	var err error
 	for {
@@ -113,6 +116,7 @@ func lockOpenFileShared(f *os.File) (func() error, error) {
 		}
 	}
 	if err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 	return func() error {

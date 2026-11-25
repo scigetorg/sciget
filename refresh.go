@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -184,8 +185,8 @@ func refreshCatalogAt(read func(link string) ([]byte, string, error), cat catalo
 			return false, false, fmt.Errorf("downloaded catalog is invalid: %w", err)
 		}
 		if len(containers) == 0 {
-			if !isJSONObject(apps) {
-				return false, false, errors.New("downloaded catalog is invalid: expected a JSON object")
+			if !isEmptyJSONObject(apps) {
+				return false, false, errors.New("downloaded catalog is invalid: no containers")
 			}
 			if eessiLink == "" {
 				needsEmptyAppsCheck = true
@@ -410,16 +411,22 @@ func downloadCatalog(client *http.Client, catalogURL string, maxSize int64) ([]b
 	return data, resp.Request.URL.String(), nil
 }
 
-func isJSONObject(data []byte) bool {
+// isEmptyJSONObject reports whether data is an empty JSON object ({}),
+// rejecting null, arrays, or non-empty objects whose tools had null/empty apps.
+func isEmptyJSONObject(data []byte) bool {
 	trimmed := bytes.TrimSpace(data)
-	return len(trimmed) > 0 && trimmed[0] == '{'
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var m map[string]json.RawMessage
+	return json.Unmarshal(trimmed, &m) == nil && m != nil && len(m) == 0
 }
 
 // cachedAppsIsEmpty reports whether dir already caches a valid empty apps.json
-// (zero containers). Must be called while holding lockCatalogDir(dir).
+// ({}, zero containers). Must be called while holding lockCatalogDir(dir).
 func cachedAppsIsEmpty(dir string) bool {
 	appsData, err := os.ReadFile(filepath.Join(dir, "apps.json"))
-	if err != nil || !isJSONObject(appsData) {
+	if err != nil || !isEmptyJSONObject(appsData) {
 		return false
 	}
 	containers, err := parseCatalog(appsData)

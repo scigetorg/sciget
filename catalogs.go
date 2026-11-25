@@ -189,7 +189,6 @@ func loadCatalogList(path string) ([]catalog, error) {
 	}
 	closeAndUnlock, err := lockOpenFileShared(f)
 	if err != nil {
-		f.Close()
 		return nil, fmt.Errorf("reading catalogs: %w", err)
 	}
 	data, readErr := io.ReadAll(f)
@@ -297,17 +296,22 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	data = append(data, '\n')
 	if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 		// Resolve any dangling symlink chain so first creation atomically
-		// publishes the target file via stage+link instead of exposing a
-		// zero-byte file before the exclusive lock is acquired.
-		target := resolveCanonicalPath(path)
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		// publishes the target file via stage+link (using a short temp name
+		// that fits even when the target basename is 255 bytes) instead of
+		// exposing a zero-byte file before the exclusive lock is acquired.
+		// If resolution fails (e.g. a broken symlink like missing/../target)
+		// or the target directory does not exist, skip staging so os.OpenFile
+		// reports the genuine OS error.
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return fmt.Errorf("writing catalogs: %w", err)
 		}
-		if tmp, err := stageCatalog(target, data, 0o600); err == nil {
-			linkErr := os.Link(tmp, target)
-			_ = os.Remove(tmp)
-			if linkErr == nil {
-				return nil
+		if target, ok := resolveCanonicalPath(path); ok {
+			if tmp, err := stageTemp(filepath.Dir(target), ".catalogs.*.tmp", data, 0o600); err == nil {
+				linkErr := os.Link(tmp, target)
+				_ = os.Remove(tmp)
+				if linkErr == nil {
+					return nil
+				}
 			}
 		}
 	}
@@ -317,7 +321,6 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 	}
 	closeAndUnlock, err := lockOpenFileExclusive(f)
 	if err != nil {
-		f.Close()
 		return fmt.Errorf("writing catalogs: %w", err)
 	}
 	if _, err = f.Seek(0, io.SeekStart); err == nil {

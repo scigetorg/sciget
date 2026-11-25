@@ -125,12 +125,13 @@ func openFileInodeKey(f *os.File) (string, error) {
 }
 
 // lockOpenFileExclusive acquires an in-process inode mutex and POSIX fcntl
-// write lock directly on open file f. The returned function unlocks and closes
-// f BEFORE releasing the in-process mutex so close(2) cannot drop another
-// goroutine's process-owned fcntl lock on the same inode.
+// write lock directly on open file f. It takes ownership of f and always
+// closes f BEFORE releasing the in-process mutex (on both success and error)
+// so close(2) cannot drop another goroutine's process-owned fcntl lock.
 func lockOpenFileExclusive(f *os.File) (func() error, error) {
 	key, err := openFileInodeKey(f)
 	if err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
@@ -144,6 +145,7 @@ func lockOpenFileExclusive(f *os.File) (func() error, error) {
 		}
 	}
 	if err != nil {
+		_ = f.Close()
 		mu.Unlock()
 		return nil, err
 	}
@@ -157,11 +159,12 @@ func lockOpenFileExclusive(f *os.File) (func() error, error) {
 }
 
 // lockOpenFileShared acquires an in-process inode mutex and POSIX fcntl read
-// lock directly on open file f. The returned function unlocks and closes f
-// BEFORE releasing the in-process mutex.
+// lock directly on open file f. It takes ownership of f and always closes f
+// BEFORE releasing the in-process mutex (on both success and error).
 func lockOpenFileShared(f *os.File) (func() error, error) {
 	key, err := openFileInodeKey(f)
 	if err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
@@ -175,6 +178,7 @@ func lockOpenFileShared(f *os.File) (func() error, error) {
 		}
 	}
 	if err != nil {
+		_ = f.Close()
 		mu.Unlock()
 		return nil, err
 	}

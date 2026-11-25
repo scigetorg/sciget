@@ -1647,6 +1647,10 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			targetFile := filepath.Join(targetDir, "catalogs.json")
+			if i == 0 {
+				// Also verify a 255-byte target filename fits staging cleanly.
+				targetFile = filepath.Join(targetDir, strings.Repeat("a", 250)+".json")
+			}
 			linkFile := filepath.Join(danglingDir, "link.json")
 			if err := os.Symlink(targetFile, linkFile); err != nil {
 				t.Fatal(err)
@@ -1676,6 +1680,50 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if err := <-readErrs; err != nil {
 				t.Fatalf("concurrent read during dangling-symlink first write failed: %v", err)
 			}
+		}
+
+		// A broken dangling symlink traversing ".." through a non-existent
+		// directory (missing/../actual.json) must fail instead of creating actual.json.
+		brokenDir := filepath.Join(tmp, "broken-dangling")
+		if err := os.MkdirAll(brokenDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		brokenLink := filepath.Join(brokenDir, "catalogs.json")
+		if err := os.Symlink("missing/../actual.json", brokenLink); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeCatalogList(brokenLink, sampleList, false); err == nil {
+			t.Fatalf("expected error writing through broken symlink missing/../actual.json")
+		}
+		if _, err := os.Stat(filepath.Join(brokenDir, "actual.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("broken symlink write must not create actual.json: stat err=%v", err)
+		}
+
+		// Malformed apps.json with null tool apps ({"fsl":{"apps":null}}) must
+		// NOT be treated as an empty EESSI-only container catalog or overwrite
+		// a populated cache.
+		badAppsDir := filepath.Join(tmp, "bad-apps-src")
+		if err := os.MkdirAll(badAppsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(badAppsDir, "apps.json"), []byte(`{"fsl":{"apps":null}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(badAppsDir, "eessi.json"), []byte(testEESSIJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		badCatFile := filepath.Join(badAppsDir, "cat.json")
+		if err := os.WriteFile(badCatFile, []byte(`{"schemaVersion": 1, "appJsonUrl": "apps.json", "eessiCatalogUrl": "eessi.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := refreshCatalog(func(link string) ([]byte, string, error) {
+			data, rerr := os.ReadFile(link)
+			return data, link, rerr
+		}, catalog{Name: "neuro", URL: badCatFile}, cacheDir); err == nil {
+			t.Fatalf("refreshCatalog must reject malformed apps.json {\"fsl\":{\"apps\":null}} even when eessi.json is valid")
+		}
+		if gotApps, err := os.ReadFile(appsPath); err != nil || string(gotApps) != appsV1 {
+			t.Fatalf("populated apps.json was overwritten by malformed null-apps catalog: err=%v got=%s", err, string(gotApps))
 		}
 
 		// Two cache roots sharing a catalogs/ subtree via symlink must resolve
