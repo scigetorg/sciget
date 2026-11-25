@@ -504,6 +504,31 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 			t.Fatalf("eessi launch must preserve tool exit code 7 cleanly: code=%d stderr=%q", code, stderr.String())
 		}
 
+		// In a fresh shell with neither EESSI_LMOD_INIT nor LMOD_PKG set, the
+		// launcher must discover EESSI's bundled versions/<stack>/init/lmod/bash.
+		bundledLmodDir := filepath.Join(filepath.Dir(filepath.Dir(modRoot)), "versions", "2025.06", "init", "lmod")
+		if err := os.MkdirAll(bundledLmodDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mockLmodBytes, err := os.ReadFile(mockLmod)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bundledLmodDir, "bash"), mockLmodBytes, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Run("bundled EESSI Lmod init discovery", func(t *testing.T) {
+			t.Setenv("EESSI_LMOD_INIT", "")
+			t.Setenv("LMOD_PKG", "")
+			var bOut, bErr bytes.Buffer
+			if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &bOut, &bErr); code != 0 {
+				t.Fatalf("eessi launch with bundled versions/<stack>/init/lmod/bash failed (%d): %s", code, bErr.String())
+			}
+			if !strings.HasPrefix(strings.TrimSpace(bOut.String()), "PARAVIEW:--version|LD:|PATH:") {
+				t.Fatalf("unexpected bundled Lmod launch output: %q", bOut.String())
+			}
+		})
+
 		// An EESSI-side symlink executable pointing outside EESSI must be refused.
 		escapedBuild := eessiBuild{
 			id:        "escaped",
@@ -2537,18 +2562,36 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			prevAfterFallback := afterInDirFallbackLock
 			t.Cleanup(func() { afterInDirFallbackLock = prevAfterFallback })
 			// On final attempt (retriesLeft == 0), target external lock appears
-			// right after in-dir lock acquisition -> must release and return error.
+			// right after in-dir lock acquisition -> must release and return
+			// the retry-exhaustion error rather than holding a split lock.
+			hookRan := false
+			var hookErr error
 			afterInDirFallbackLock = func(dir string) {
 				if dir == twoStageAlias {
-					_ = os.Chmod(twoStageTargetParent, 0o755)
-					_ = os.WriteFile(catalogTargetLockPath(twoStageAlias), nil, 0o600)
+					hookRan = true
+					if err := os.Chmod(twoStageTargetParent, 0o755); err != nil {
+						hookErr = err
+						return
+					}
+					if err := os.WriteFile(catalogTargetLockPath(twoStageAlias), nil, 0o600); err != nil {
+						hookErr = err
+					}
 				}
 			}
-			if lk, err := lockCatalogDirWithRetry(twoStageAlias, true, 0); err == nil {
-				lk.unlock()
-				t.Fatalf("final fallback attempt must fail instead of returning split target/.lock when external lock appeared")
-			}
+			lk, err := lockCatalogDirWithRetry(twoStageAlias, true, 0)
 			afterInDirFallbackLock = prevAfterFallback
+			if lk != nil {
+				lk.unlock()
+			}
+			if !hookRan || hookErr != nil {
+				t.Fatalf("expected fallback hook to run and create external lock: hookRan=%v hookErr=%v", hookRan, hookErr)
+			}
+			if _, statErr := os.Stat(catalogTargetLockPath(twoStageAlias)); statErr != nil {
+				t.Fatalf("expected external target lock to exist after hook: %v", statErr)
+			}
+			if err == nil || !strings.Contains(err.Error(), "catalog locks changed during refresh") {
+				t.Fatalf("final fallback attempt must return retry-exhaustion error when external lock appeared, got err=%v", err)
+			}
 		}
 
 		// Two enabled catalogs sharing a cache directory via symlink must both

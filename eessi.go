@@ -67,6 +67,7 @@ canon_file() {
     )
 }
 modroot_real="$(canon_dir "${modroot}")"
+repo_root_real=""
 if [[ "${modroot}" == */init/modules ]]; then
     repo_root_real="$(canon_dir "${modroot%/init/modules}")"
     eessi_version_prefix="${repo_root_real}/versions/${stack}/"
@@ -77,7 +78,12 @@ else
 fi
 lmod_init="${EESSI_LMOD_INIT:-}"
 if [ -z "${lmod_init}" ]; then
-    for candidate in "${LMOD_PKG:+${LMOD_PKG}/init/bash}" /opt/apps/lmod/lmod/init/bash /usr/share/lmod/lmod/init/bash /etc/profile.d/lmod.sh; do
+    for candidate in \
+        "${LMOD_PKG:+${LMOD_PKG}/init/bash}" \
+        "${repo_root_real:+${repo_root_real}/versions/${stack}/init/lmod/bash}" \
+        /opt/apps/lmod/lmod/init/bash \
+        /usr/share/lmod/lmod/init/bash \
+        /etc/profile.d/lmod.sh; do
         if [ -n "${candidate}" ] && [ -r "${candidate}" ]; then
             lmod_init="${candidate}"
             break
