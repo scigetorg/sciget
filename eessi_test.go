@@ -2979,29 +2979,70 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			!sameLockFile(orderNFC[1], orderNFD[1]) {
 			t.Fatalf("Unicode-equivalent lock order diverged: nfc=%q nfd=%q", orderNFC, orderNFD)
 		}
-		// Unicode-equivalent target basenames referring to the same on-disk
-		// entry (as NFC "Café" vs NFD "Cafe\u0301" on APFS) must hash to the
-		// exact same lock filename via canonicalOnDiskBase.
+		// Unicode-equivalent target basenames (NFC "Café" vs NFD "Cafe\u0301")
+		// must hash to the exact same lock filename BOTH before the target
+		// directory exists and after it exists.
 		normDir := filepath.Join(tmp, "unicode-base-norm")
 		if err := os.MkdirAll(normDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		nfcEntry := filepath.Join(normDir, "Caf\u00e9")
-		nfdEntry := filepath.Join(normDir, "Cafe\u0301")
-		if err := os.WriteFile(nfcEntry, nil, 0o600); err != nil {
+		if gotNFC, gotNFD := hashLockPath(normDir, "Caf\u00e9"), hashLockPath(normDir, "Cafe\u0301"); gotNFC != gotNFD {
+			t.Fatalf("pre-creation NFC vs NFD target basenames hashed to different lock paths: %q != %q", gotNFC, gotNFD)
+		}
+		nfcDirEntry := filepath.Join(normDir, "Caf\u00e9")
+		if err := os.MkdirAll(nfcDirEntry, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := os.Lstat(nfdEntry); errors.Is(err, os.ErrNotExist) {
-			if err := os.Link(nfcEntry, nfdEntry); err != nil {
+		if gotNFC, gotNFD := hashLockPath(normDir, "Caf\u00e9"), hashLockPath(normDir, "Cafe\u0301"); gotNFC != gotNFD {
+			t.Fatalf("post-creation NFC vs NFD target basenames hashed to different lock paths: %q != %q", gotNFC, gotNFD)
+		}
+		// Hard-linked symlinks are distinct directory entries; removing one
+		// catalog must unlink its symlink while keeping the other registered
+		// catalog's symlink intact.
+		t.Run("remove one of two hard-linked cache symlinks", func(t *testing.T) {
+			subTmp := t.TempDir()
+			isolateTestEnv(t, subTmp)
+			layers, err := readCatalogLayers()
+			if err != nil {
 				t.Fatal(err)
 			}
-		}
-		if gotNFC, gotNFD := hashLockPath(normDir, "Caf\u00e9"), hashLockPath(normDir, "Cafe\u0301"); gotNFC != gotNFD {
-			t.Fatalf("same-inode NFC vs NFD target basenames hashed to different lock paths: %q != %q", gotNFC, gotNFD)
-		}
-		// Locking a dangling symlink whose target parent does not exist yet
-		// must pre-create the target parent before sorting so lock ordering is
-		// identical to a subsequent call after parent creation.
+			targetDir := filepath.Join(subTmp, "shared-target")
+			if err := os.MkdirAll(targetDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(targetDir, "apps.json"), []byte(`{"fsl":{"apps":{"fsl 6.0.7":{"version":"20240101","image":"fsl_6.0.7"}}}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			catA := catalog{Name: "alpha", URL: catFile, Use: true}
+			catB := catalog{Name: "beta", URL: catFile, Use: true}
+			if err := writeCatalogList(layers.userPath, []catalog{catA, catB}, false); err != nil {
+				t.Fatal(err)
+			}
+			dirA := catA.dir(layers.cacheDir)
+			dirB := catB.dir(layers.cacheDir)
+			if err := os.MkdirAll(filepath.Dir(dirA), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(targetDir, dirA); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(dirA, dirB); err != nil {
+				t.Skipf("hard-linking symlinks not supported on this filesystem: %v", err)
+			}
+			var out, errBuf bytes.Buffer
+			if code := run([]string{"catalog", "remove", "alpha"}, &out, &errBuf); code != 0 {
+				t.Fatalf("catalog remove alpha failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+			}
+			if _, err := os.Lstat(dirA); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("removing alpha must unlink its hard-linked symlink, lstat err=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dirB, "apps.json")); err != nil {
+				t.Fatalf("beta's hard-linked symlink must remain intact: %v", err)
+			}
+		})
+		// Reader acquiring slot first while target parent is missing must not
+		// deadlock with a concurrent first refresh that creates the target
+		// parent and acquires target first.
 		danglingSlotParent := filepath.Join(tmp, "dangling-order-slots", "catalogs")
 		if err := os.MkdirAll(danglingSlotParent, 0o755); err != nil {
 			t.Fatal(err)
@@ -3012,13 +3053,87 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if err := os.Symlink(danglingTarget, danglingAlias); err != nil {
 			t.Fatal(err)
 		}
-		dlk, err := lockCatalogDir(danglingAlias)
-		if err != nil {
-			t.Fatalf("lockCatalogDir on dangling alias with missing target parent failed: %v", err)
+		if err := os.WriteFile(catalogLockPath(danglingAlias), nil, 0o600); err != nil {
+			t.Fatal(err)
 		}
-		dlk.unlock()
-		if _, err := os.Stat(danglingTargetParent); err != nil {
-			t.Fatalf("expected target parent to exist after lockCatalogDir: %v", err)
+		readerAtSecond := make(chan struct{})
+		releaseReader := make(chan struct{})
+		prevBeforeSecond := beforeSecondSharedLock
+		hookFired := false
+		beforeSecondSharedLock = func(dir string) {
+			if dir == danglingAlias && !hookFired {
+				hookFired = true
+				close(readerAtSecond)
+				<-releaseReader
+			}
+		}
+		t.Cleanup(func() { beforeSecondSharedLock = prevBeforeSecond })
+		readerDone := make(chan error, 1)
+		go func() {
+			unlock, _, locked, err := lockCatalogDirShared(danglingAlias)
+			if err == nil && locked {
+				unlock()
+			}
+			readerDone <- err
+		}()
+		<-readerAtSecond
+		beforeSecondSharedLock = prevBeforeSecond
+		// First refresh creates target parent and acquires target lock while
+		// reader holds slot lock; releasing reader must allow BOTH to finish
+		// without deadlocking.
+		if err := os.MkdirAll(danglingTargetParent, 0o755); err != nil {
+			close(releaseReader)
+			<-readerDone
+			t.Fatal(err)
+		}
+		targetOnlyLk, err := lockFileExclusive(catalogTargetLockPath(danglingAlias))
+		if err != nil {
+			close(releaseReader)
+			<-readerDone
+			t.Fatal(err)
+		}
+		writerDone := make(chan error, 1)
+		go func() {
+			lk, err := lockCatalogDir(danglingAlias)
+			if err == nil {
+				lk.unlock()
+			}
+			writerDone <- err
+		}()
+		close(releaseReader)
+		// Prove deterministically that the reader released slotLock when
+		// targetLock was busy (breaking any hold-and-wait cycle) before we
+		// release targetOnlyLk.
+		var gotSlot *catalogLock
+		for range 100 {
+			lk, tryErr := tryLockFileExclusive(catalogLockPath(danglingAlias))
+			if tryErr == nil {
+				gotSlot = lk
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if gotSlot == nil {
+			targetOnlyLk.unlock()
+			t.Fatalf("reader kept holding slotLock while blocked on targetLock (hold-and-wait deadlock risk)")
+		}
+		gotSlot.unlock()
+		targetOnlyLk.unlock()
+		select {
+		case err := <-readerDone:
+			if err != nil {
+				t.Fatalf("reader failed during concurrent first refresh: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("reader deadlocked with concurrent first refresh")
+		}
+		select {
+		case err := <-writerDone:
+			if err != nil {
+				t.Fatalf("writer failed during concurrent first refresh: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("writer deadlocked with concurrent reader")
 		}
 		if k := lockOrderKey(catalogTargetLockPath(danglingAlias)); k.kind != 1 {
 			t.Fatalf("expected existing-parent lockOrderKey kind=1 after pre-creation, got %+v", k)

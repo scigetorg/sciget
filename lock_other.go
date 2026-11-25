@@ -29,9 +29,23 @@ var (
 // lockFileExclusive serializes in-process writers on platforms without Unix or
 // Windows file locking APIs.
 func lockFileExclusive(lockPath string) (*catalogLock, error) {
+	return lockFileExclusiveMode(lockPath, false)
+}
+
+func tryLockFileExclusive(lockPath string) (*catalogLock, error) {
+	return lockFileExclusiveMode(lockPath, true)
+}
+
+func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, error) {
 	v, _ := catalogDirLocks.LoadOrStore(lockPath, &memCatalogLock{})
 	st := v.(*memCatalogLock)
-	st.mu.Lock()
+	if nonBlocking {
+		if !st.mu.TryLock() {
+			return nil, errLockBusy
+		}
+	} else {
+		st.mu.Lock()
+	}
 	lk := &catalogLock{
 		gen:    st.gen,
 		unlock: st.mu.Unlock,
@@ -53,6 +67,14 @@ func lockFileExclusive(lockPath string) (*catalogLock, error) {
 
 func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 	lk, err := lockFileExclusive(lockPath)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return lk.unlock, lk.gen, true, nil
+}
+
+func tryLockFileShared(lockPath string) (func(), uint64, bool, error) {
+	lk, err := tryLockFileExclusive(lockPath)
 	if err != nil {
 		return nil, 0, false, err
 	}

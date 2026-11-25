@@ -17,7 +17,11 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
+
+var errLockBusy = errors.New("lock busy")
 
 // container is one row of the catalog: a single container file, which may
 // back several catalog entries (a command-line entry and its graphical
@@ -555,14 +559,14 @@ func canonicalCatalogDir(dir string) string {
 }
 
 // canonicalOnDiskBase returns the single on-disk directory entry name inside
-// parent matching base by os.SameFile when the entry exists. On normalization-
-// insensitive filesystems such as macOS APFS (NFC "Café" vs NFD "Cafe\u0301")
-// and Windows NTFS (8.3 short names or mixed case), this ensures two spellings
-// for the same existing directory hash to the exact same lock filename.
+// parent matching base by os.SameFile when the entry is an existing directory.
+// Directories cannot be hard-linked, so restricting this to IsDir() preserves
+// distinct identities for hard-linked symlinks while unifying Windows 8.3
+// short names and mixed-case/Unicode spellings of existing directories.
 func canonicalOnDiskBase(parent, base string) string {
 	full := filepath.Join(parent, base)
 	targetInfo, err := os.Lstat(full)
-	if err != nil {
+	if err != nil || !targetInfo.IsDir() {
 		return base
 	}
 	entries, err := os.ReadDir(parent)
@@ -570,7 +574,7 @@ func canonicalOnDiskBase(parent, base string) string {
 		return base
 	}
 	for _, e := range entries {
-		if info, err := os.Lstat(filepath.Join(parent, e.Name())); err == nil && os.SameFile(info, targetInfo) {
+		if info, err := os.Lstat(filepath.Join(parent, e.Name())); err == nil && info.IsDir() && os.SameFile(info, targetInfo) {
 			return e.Name()
 		}
 	}
@@ -579,7 +583,8 @@ func canonicalOnDiskBase(parent, base string) string {
 
 func hashLockPath(parent, base string) string {
 	base = canonicalOnDiskBase(parent, base)
-	sum := sha256.Sum256([]byte(strings.ToLower(base)))
+	normalized := norm.NFC.String(strings.ToLower(base))
+	sum := sha256.Sum256([]byte(normalized))
 	return filepath.Join(parent, ".sciget-lock-"+hex.EncodeToString(sum[:16])+".lock")
 }
 
@@ -743,45 +748,88 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft in
 		for i := len(extLocks) - 1; i >= 0; i-- {
 			extLocks[i].unlock()
 		}
+		extLocks = nil
+		slotLk = nil
+		targetLk = nil
 	}
 	needInDirFallback := false
-	for _, p := range extPaths {
-		lk, err := lockFileExclusive(p)
-		if err != nil {
-			if isReadOnlyOrPermError(err) {
-				// Removing a leaf symlink or junction only unlinks the link in
-				// slot's parent; if the target's parent is read-only (0555 or
-				// EROFS) we still hold slotPath and never touch the target dir.
-				if !allowInDirFallback && linkLeaf && !sameLockFile(p, slotPath) {
-					skippedExt = append(skippedExt, p)
-					continue
+	var waitFirst string
+	for busyAttempt := range 64 {
+		if busyAttempt > 0 {
+			if extPaths = catalogExternalLockPaths(dir); !allowInDirFallback && linkLeaf && !slotSameAsTarget {
+				if _, err := os.Stat(filepath.Dir(targetPath)); errors.Is(err, os.ErrNotExist) {
+					extPaths = []string{slotPath}
 				}
-				if allowInDirFallback {
-					if _, extStatErr := os.Stat(p); errors.Is(extStatErr, os.ErrNotExist) {
-						if info, dirStatErr := os.Stat(clean); dirStatErr == nil && info.IsDir() {
-							// Only fall back to target/.lock when targetPath
-							// itself cannot be created. When an alias's own
-							// slot parent is read-only but targetPath is
-							// writable, targetPath alone serializes every
-							// reader and writer on the target directory.
-							if sameLockFile(p, targetPath) {
-								needInDirFallback = true
+			}
+			if waitFirst != "" && len(extPaths) == 2 && sameLockFile(extPaths[1], waitFirst) {
+				extPaths = []string{extPaths[1], extPaths[0]}
+			}
+			waitFirst = ""
+			if busyAttempt > 4 {
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+		skippedExt = nil
+		needInDirFallback = false
+		busyRetry := false
+		for _, p := range extPaths {
+			var (
+				lk  *catalogLock
+				err error
+			)
+			if len(extLocks) == 0 {
+				lk, err = lockFileExclusive(p)
+			} else {
+				lk, err = tryLockFileExclusive(p)
+			}
+			if errors.Is(err, errLockBusy) {
+				unlockAll()
+				waitFirst = p
+				busyRetry = true
+				break
+			}
+			if err != nil {
+				if isReadOnlyOrPermError(err) {
+					// Removing a leaf symlink or junction only unlinks the link in
+					// slot's parent; if the target's parent is read-only (0555 or
+					// EROFS) we still hold slotPath and never touch the target dir.
+					if !allowInDirFallback && linkLeaf && !sameLockFile(p, slotPath) {
+						skippedExt = append(skippedExt, p)
+						continue
+					}
+					if allowInDirFallback {
+						if _, extStatErr := os.Stat(p); errors.Is(extStatErr, os.ErrNotExist) {
+							if info, dirStatErr := os.Stat(clean); dirStatErr == nil && info.IsDir() {
+								// Only fall back to target/.lock when targetPath
+								// itself cannot be created. When an alias's own
+								// slot parent is read-only but targetPath is
+								// writable, targetPath alone serializes every
+								// reader and writer on the target directory.
+								if sameLockFile(p, targetPath) {
+									needInDirFallback = true
+								}
+								skippedExt = append(skippedExt, p)
+								continue
 							}
-							skippedExt = append(skippedExt, p)
-							continue
 						}
 					}
 				}
+				unlockAll()
+				return nil, err
 			}
-			unlockAll()
-			return nil, err
+			extLocks = append(extLocks, lk)
+			if sameLockFile(p, slotPath) {
+				slotLk = lk
+			}
+			if sameLockFile(p, targetPath) {
+				targetLk = lk
+			}
 		}
-		extLocks = append(extLocks, lk)
-		if sameLockFile(p, slotPath) {
-			slotLk = lk
+		if !busyRetry {
+			break
 		}
-		if sameLockFile(p, targetPath) {
-			targetLk = lk
+		if busyAttempt == 63 {
+			return nil, errors.New("catalog locks busy during refresh; run 'sciget refresh' again")
 		}
 	}
 
@@ -940,24 +988,55 @@ func lockCatalogDirShared(dir string) (func(), catalogGen, bool, error) {
 	return unlock, gen, locked, err
 }
 
+// beforeSecondSharedLock runs after lockCatalogDirSharedWithMissing acquires
+// the first external shared lock and before attempting the second; tests may
+// set it to reproduce reader-vs-writer lock-order transitions.
+var beforeSecondSharedLock = func(dir string) {}
+
 func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []string, error) {
 	slotPath := catalogLockPath(dir)
 	targetPath := catalogTargetLockPath(dir)
 	slotSameAsTarget := sameLockFile(slotPath, targetPath)
-	extPaths := catalogExternalLockPaths(dir)
 	clean := canonicalCatalogDir(dir)
-	for range 4 {
+	var waitFirst string
+	for attempt := range 64 {
+		extPaths := catalogExternalLockPaths(dir)
+		if waitFirst != "" && len(extPaths) == 2 && sameLockFile(extPaths[1], waitFirst) {
+			extPaths = []string{extPaths[1], extPaths[0]}
+		}
+		waitFirst = ""
+		if attempt > 4 {
+			time.Sleep(2 * time.Millisecond)
+		}
 		var unlocks []func()
 		var missing []string
 		var slotGen, targetGen uint64
 		targetLocked := false
+		busyRetry := false
 		release := func() {
 			for i := len(unlocks) - 1; i >= 0; i-- {
 				unlocks[i]()
 			}
 		}
 		for _, p := range extPaths {
-			u, g, ok, err := lockFileShared(p)
+			var (
+				u   func()
+				g   uint64
+				ok  bool
+				err error
+			)
+			if len(unlocks) == 0 {
+				u, g, ok, err = lockFileShared(p)
+			} else {
+				beforeSecondSharedLock(dir)
+				u, g, ok, err = tryLockFileShared(p)
+			}
+			if errors.Is(err, errLockBusy) {
+				release()
+				waitFirst = p
+				busyRetry = true
+				break
+			}
 			if err != nil {
 				release()
 				return nil, catalogGen{}, false, nil, err
@@ -974,6 +1053,9 @@ func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []st
 			} else {
 				missing = append(missing, p)
 			}
+		}
+		if busyRetry {
+			continue
 		}
 		if len(unlocks) > 0 {
 			// If a fallback in-dir lock still exists (e.g. an external lock

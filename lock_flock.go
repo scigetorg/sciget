@@ -28,6 +28,14 @@ func pathFileID(path string, _ bool) (dev, ino, nlink uint64, ok bool) {
 // lockFileExclusive acquires an exclusive advisory flock on lockPath so
 // concurrent writers cannot interleave updates, commits, rollbacks, or deletes.
 func lockFileExclusive(lockPath string) (*catalogLock, error) {
+	return lockFileExclusiveMode(lockPath, false)
+}
+
+func tryLockFileExclusive(lockPath string) (*catalogLock, error) {
+	return lockFileExclusiveMode(lockPath, true)
+}
+
+func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -35,14 +43,21 @@ func lockFileExclusive(lockPath string) (*catalogLock, error) {
 	if err != nil {
 		return nil, err
 	}
+	how := syscall.LOCK_EX
+	if nonBlocking {
+		how |= syscall.LOCK_NB
+	}
 	for {
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+		err = syscall.Flock(int(f.Fd()), how)
 		if !errors.Is(err, syscall.EINTR) {
 			break
 		}
 	}
 	if err != nil {
 		f.Close()
+		if nonBlocking && (errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)) {
+			return nil, errLockBusy
+		}
 		return nil, err
 	}
 	gen, err := readLockFileGen(f)
@@ -76,6 +91,14 @@ func lockFileExclusive(lockPath string) (*catalogLock, error) {
 // so readers wait for any in-progress writer to finish. When lockPath does not
 // exist yet, it returns ok=false.
 func lockFileShared(lockPath string) (func(), uint64, bool, error) {
+	return lockFileSharedMode(lockPath, false)
+}
+
+func tryLockFileShared(lockPath string) (func(), uint64, bool, error) {
+	return lockFileSharedMode(lockPath, true)
+}
+
+func lockFileSharedMode(lockPath string, nonBlocking bool) (func(), uint64, bool, error) {
 	f, err := os.Open(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return func() {}, 0, false, nil
@@ -83,14 +106,21 @@ func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 	if err != nil {
 		return nil, 0, false, err
 	}
+	how := syscall.LOCK_SH
+	if nonBlocking {
+		how |= syscall.LOCK_NB
+	}
 	for {
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH)
+		err = syscall.Flock(int(f.Fd()), how)
 		if !errors.Is(err, syscall.EINTR) {
 			break
 		}
 	}
 	if err != nil {
 		f.Close()
+		if nonBlocking && (errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)) {
+			return nil, 0, false, errLockBusy
+		}
 		return nil, 0, false, err
 	}
 	gen, err := readLockFileGen(f)

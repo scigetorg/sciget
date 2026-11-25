@@ -31,6 +31,14 @@ func pathFileID(path string, _ bool) (dev, ino, nlink uint64, ok bool) {
 // write lock on lockPath for Unix platforms without BSD flock (such as
 // Solaris/illumos).
 func lockFileExclusive(lockPath string) (*catalogLock, error) {
+	return lockFileExclusiveMode(lockPath, false)
+}
+
+func tryLockFileExclusive(lockPath string) (*catalogLock, error) {
+	return lockFileExclusiveMode(lockPath, true)
+}
+
+func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -38,7 +46,7 @@ func lockFileExclusive(lockPath string) (*catalogLock, error) {
 	if err != nil {
 		return nil, err
 	}
-	closeAndUnlock, err := lockOpenFileExclusive(f)
+	closeAndUnlock, err := lockOpenFileExclusiveMode(f, nonBlocking)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +79,14 @@ func lockFileExclusive(lockPath string) (*catalogLock, error) {
 // fcntl read lock when lockPath exists. When it does not exist yet, returns
 // ok=false.
 func lockFileShared(lockPath string) (func(), uint64, bool, error) {
+	return lockFileSharedMode(lockPath, false)
+}
+
+func tryLockFileShared(lockPath string) (func(), uint64, bool, error) {
+	return lockFileSharedMode(lockPath, true)
+}
+
+func lockFileSharedMode(lockPath string, nonBlocking bool) (func(), uint64, bool, error) {
 	f, err := os.Open(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return func() {}, 0, false, nil
@@ -78,7 +94,7 @@ func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 	if err != nil {
 		return nil, 0, false, err
 	}
-	closeAndUnlock, err := lockOpenFileShared(f)
+	closeAndUnlock, err := lockOpenFileSharedMode(f, nonBlocking)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -105,6 +121,10 @@ func openFileInodeKey(f *os.File) (string, error) {
 // closes f BEFORE releasing the in-process mutex (on both success and error)
 // so close(2) cannot drop another goroutine's process-owned fcntl lock.
 func lockOpenFileExclusive(f *os.File) (func() error, error) {
+	return lockOpenFileExclusiveMode(f, false)
+}
+
+func lockOpenFileExclusiveMode(f *os.File, nonBlocking bool) (func() error, error) {
 	key, err := openFileInodeKey(f)
 	if err != nil {
 		_ = f.Close()
@@ -112,10 +132,21 @@ func lockOpenFileExclusive(f *os.File) (func() error, error) {
 	}
 	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
-	mu.Lock()
+	if nonBlocking {
+		if !mu.TryLock() {
+			_ = f.Close()
+			return nil, errLockBusy
+		}
+	} else {
+		mu.Lock()
+	}
 	lk := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0, Len: 0}
+	cmd := unix.F_SETLKW
+	if nonBlocking {
+		cmd = unix.F_SETLK
+	}
 	for {
-		err = unix.FcntlFlock(f.Fd(), unix.F_SETLKW, &lk)
+		err = unix.FcntlFlock(f.Fd(), cmd, &lk)
 		if !errors.Is(err, syscall.EINTR) {
 			break
 		}
@@ -123,6 +154,9 @@ func lockOpenFileExclusive(f *os.File) (func() error, error) {
 	if err != nil {
 		_ = f.Close()
 		mu.Unlock()
+		if nonBlocking && (errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EAGAIN)) {
+			return nil, errLockBusy
+		}
 		return nil, err
 	}
 	return func() error {
@@ -138,6 +172,10 @@ func lockOpenFileExclusive(f *os.File) (func() error, error) {
 // lock directly on open file f. It takes ownership of f and always closes f
 // BEFORE releasing the in-process mutex (on both success and error).
 func lockOpenFileShared(f *os.File) (func() error, error) {
+	return lockOpenFileSharedMode(f, false)
+}
+
+func lockOpenFileSharedMode(f *os.File, nonBlocking bool) (func() error, error) {
 	key, err := openFileInodeKey(f)
 	if err != nil {
 		_ = f.Close()
@@ -145,10 +183,21 @@ func lockOpenFileShared(f *os.File) (func() error, error) {
 	}
 	v, _ := catalogDirLocks.LoadOrStore(key, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
-	mu.Lock()
+	if nonBlocking {
+		if !mu.TryLock() {
+			_ = f.Close()
+			return nil, errLockBusy
+		}
+	} else {
+		mu.Lock()
+	}
 	lk := unix.Flock_t{Type: unix.F_RDLCK, Whence: 0, Start: 0, Len: 0}
+	cmd := unix.F_SETLKW
+	if nonBlocking {
+		cmd = unix.F_SETLK
+	}
 	for {
-		err = unix.FcntlFlock(f.Fd(), unix.F_SETLKW, &lk)
+		err = unix.FcntlFlock(f.Fd(), cmd, &lk)
 		if !errors.Is(err, syscall.EINTR) {
 			break
 		}
@@ -156,6 +205,9 @@ func lockOpenFileShared(f *os.File) (func() error, error) {
 	if err != nil {
 		_ = f.Close()
 		mu.Unlock()
+		if nonBlocking && (errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EAGAIN)) {
+			return nil, errLockBusy
+		}
 		return nil, err
 	}
 	return func() error {
