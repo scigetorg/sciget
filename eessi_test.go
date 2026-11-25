@@ -286,15 +286,25 @@ func TestRefreshAndEESSICommands(t *testing.T) {
         return 0
     fi
     export LOADEDMODULES="${LOADEDMODULES:+${LOADEDMODULES}:}$2"
+    if [ "$2" = "ParaView/6.0.1-foss-2025b" ] && [ -n "${MOCK_EESSI_BIN:-}" ]; then
+        export PATH="${MOCK_EESSI_BIN}:${PATH}"
+    fi
     return 0
 }
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}\"\n"), 0o755); err != nil {
+	staleBinDir := filepath.Join(tmp, "stale-bin")
+	if err := os.MkdirAll(staleBinDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(binDir, "gmx"), []byte("#!/bin/sh\necho \"GMX:$*\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(staleBinDir, "paraview"), []byte("#!/bin/sh\necho STALE_SITE_BINARY\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleBinDir, "gmx"), []byte("#!/bin/sh\necho STALE_SITE_GMX\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "paraview"), []byte("#!/bin/sh\necho \"PARAVIEW:$*|LD:${LD_LIBRARY_PATH:-}\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MODULEPATH", "/site/other/modules")
@@ -302,11 +312,12 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	t.Setenv("EESSI_MODULE_ROOT", modRoot)
 	t.Setenv("EESSI_LMOD_INIT", mockLmod)
 	t.Setenv("MOCK_LMOD_LOG", lmodLog)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MOCK_EESSI_BIN", binDir)
+	t.Setenv("PATH", staleBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Tool flags (--version, --gpu) after <tool> pass through to the binary without `--`,
-	// inherited MODULEPATH is replaced by modroot, stale LD_LIBRARY_PATH left by
-	// an incomplete purge is scrubbed, and LMOD_EXACT_MATCH=yes is enforced.
+	// inherited MODULEPATH is replaced by modroot, stale LD_LIBRARY_PATH and stale
+	// PATH entries left by an incomplete purge are scrubbed, and LMOD_EXACT_MATCH=yes is enforced.
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version", "--gpu"}, &stdout, &stderr); code != 0 {
@@ -322,6 +333,14 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	wantLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:ParaView/6.0.1-foss-2025b|MP:" + modRoot + "|EXACT:yes\n"
 	if string(logBytes) != wantLog {
 		t.Fatalf("lmod log = %q, want %q", string(logBytes), wantLog)
+	}
+
+	// If the EESSI module does not provide the binary on PATH, stale PATH entries
+	// must NOT satisfy the exec (launch must fail instead of running STALE_SITE_GMX).
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "gromacs", "--version"}, &stdout, &stderr); code == 0 || strings.Contains(stdout.String(), "STALE_SITE_GMX") {
+		t.Fatalf("stale site PATH must not satisfy missing EESSI binary: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
 	}
 
 	// If Lmod still resolves a prefix-matched module despite LMOD_EXACT_MATCH,

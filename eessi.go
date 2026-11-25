@@ -54,9 +54,11 @@ fi
 export FPATH="${FPATH:-}"
 source "${lmod_init}"
 module --force purge >/dev/null
-# Clear loader/runtime search paths that a broken or deleted site modulefile
-# may have left behind after purge, before loading the EESSI stack and tool.
+# Clear loader/runtime search paths and reset PATH to a minimal system path
+# so a broken or deleted site modulefile cannot leak stale binaries or
+# libraries into EESSI launches before EESSI/${stack} and ${mod} load.
 unset LD_LIBRARY_PATH LD_PRELOAD LIBRARY_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH PKG_CONFIG_PATH CMAKE_PREFIX_PATH PYTHONPATH
+export PATH="/usr/bin:/bin"
 export MODULEPATH="${modroot}"
 export LMOD_EXACT_MATCH=yes
 export EESSI_MODULE_QUIET_LOAD=1
