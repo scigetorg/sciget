@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -18,6 +19,28 @@ func lockCatalogDir(dir string) (func(), error) {
 	}
 	var ol windows.Overlapped
 	if err := windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ol); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() {
+		var uol windows.Overlapped
+		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
+		_ = f.Close()
+	}, nil
+}
+
+// lockCatalogDirShared acquires a shared Windows file lock when a refresh lock
+// file exists, so readers wait for any in-progress commit or rollback.
+func lockCatalogDirShared(dir string) (func(), error) {
+	f, err := os.Open(filepath.Join(dir, ".refresh.lock"))
+	if errors.Is(err, os.ErrNotExist) {
+		return func() {}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var ol windows.Overlapped
+	if err := windows.LockFileEx(windows.Handle(f.Fd()), 0, 0, 1, 0, &ol); err != nil {
 		f.Close()
 		return nil, err
 	}

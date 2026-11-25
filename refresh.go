@@ -162,8 +162,13 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 		if err != nil {
 			return false, false, fmt.Errorf("downloaded catalog is invalid: %w", err)
 		}
-		if len(containers) == 0 && eessiLink == "" {
-			needsEmptyAppsCheck = true
+		if len(containers) == 0 {
+			if !isJSONObject(apps) {
+				return false, false, errors.New("downloaded catalog is invalid: expected a JSON object")
+			}
+			if eessiLink == "" {
+				needsEmptyAppsCheck = true
+			}
 		}
 	}
 	var eessiData []byte
@@ -348,11 +353,16 @@ func downloadCatalog(client *http.Client, catalogURL string, maxSize int64) ([]b
 	return data, resp.Request.URL.String(), nil
 }
 
+func isJSONObject(data []byte) bool {
+	trimmed := bytes.TrimSpace(data)
+	return len(trimmed) > 0 && trimmed[0] == '{'
+}
+
 // cachedAppsIsEmpty reports whether dir already caches a valid empty apps.json
 // (zero containers). Must be called while holding lockCatalogDir(dir).
 func cachedAppsIsEmpty(dir string) bool {
 	appsData, err := os.ReadFile(filepath.Join(dir, "apps.json"))
-	if err != nil {
+	if err != nil || !isJSONObject(appsData) {
 		return false
 	}
 	containers, err := parseCatalog(appsData)

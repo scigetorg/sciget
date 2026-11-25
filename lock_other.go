@@ -18,3 +18,7 @@ func lockCatalogDir(dir string) (func(), error) {
 	mu.Lock()
 	return mu.Unlock, nil
 }
+
+func lockCatalogDirShared(dir string) (func(), error) {
+	return lockCatalogDir(dir)
+}

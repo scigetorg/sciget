@@ -427,6 +427,15 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	if !strings.Contains(stdout.String(), "is up to date.") {
 		t.Fatalf("expected second refresh to report up to date: %s", stdout.String())
 	}
+	// JSON null in apps.json must be rejected even on a retired EESSI-only domain.
+	if err := os.WriteFile(emptyAppsFile, []byte(`null`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("expected refresh to reject JSON null in apps.json")
+	}
 	stdout.Reset()
 	stderr.Reset()
 	if code := run([]string{"eessi", "find", "paraview"}, &stdout, &stderr); code != 0 || stdout.Len() != 0 {
