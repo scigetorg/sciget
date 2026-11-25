@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -177,10 +178,19 @@ func readCatalogLockGen(dir string) (uint64, error) {
 func catalogLockPath(dir string) string {
 	clean := filepath.Clean(dir)
 	parent := filepath.Dir(clean)
-	if filepath.Base(parent) == "catalogs" {
+	base := filepath.Base(parent)
+	if base == "catalogs" || (runtime.GOOS == "windows" && strings.EqualFold(base, "catalogs")) {
 		return filepath.Join(filepath.Dir(parent), "locks", filepath.Base(clean)+".lock")
 	}
 	return clean + ".lock"
+}
+
+func lockCatalogDir(dir string) (*catalogLock, error) {
+	return lockFileExclusive(catalogLockPath(dir))
+}
+
+func lockCatalogDirShared(dir string) (func(), uint64, bool, error) {
+	return lockFileShared(catalogLockPath(dir))
 }
 
 // beforeCatalogSharedLock runs immediately before readCatalogSnapshot acquires

@@ -14,10 +14,9 @@ import (
 
 var catalogDirLocks sync.Map
 
-// lockCatalogDir acquires both an in-process mutex and a POSIX fcntl write
-// lock for dir on Unix platforms without BSD flock (such as Solaris/illumos).
-func lockCatalogDir(dir string) (*catalogLock, error) {
-	lockPath := catalogLockPath(dir)
+// lockFileExclusive acquires both an in-process mutex and a POSIX fcntl write
+// lock on lockPath for Unix platforms without BSD flock (such as Solaris/illumos).
+func lockFileExclusive(lockPath string) (*catalogLock, error) {
 	v, _ := catalogDirLocks.LoadOrStore(lockPath, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
 	mu.Lock()
@@ -72,11 +71,9 @@ func lockCatalogDir(dir string) (*catalogLock, error) {
 	return res, nil
 }
 
-// lockCatalogDirShared acquires both an in-process mutex and a shared POSIX
-// fcntl read lock when a lock file exists. When the lock file does not exist
-// yet, it returns ok=false.
-func lockCatalogDirShared(dir string) (func(), uint64, bool, error) {
-	lockPath := catalogLockPath(dir)
+// lockFileShared acquires both an in-process mutex and a shared POSIX fcntl
+// read lock when lockPath exists. When it does not exist yet, returns ok=false.
+func lockFileShared(lockPath string) (func(), uint64, bool, error) {
 	v, _ := catalogDirLocks.LoadOrStore(lockPath, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
 	mu.Lock()

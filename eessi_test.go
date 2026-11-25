@@ -466,11 +466,23 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		if strings.Contains(gotLaunch, siteAliasBin) || strings.Contains(gotLaunch, siteHookBinDir) || strings.Contains(gotLaunch, siteModAlias) || strings.Contains(gotLaunch, siteModDir) {
 			t.Fatalf("final PATH/MODULEPATH must not retain site dirs or aliases: %q", gotLaunch)
 		}
+		realModRoot, err := filepath.EvalSymlinks(modRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		realCPUModDir, err := filepath.EvalSymlinks(cpuModDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		realAccelModDir, err := filepath.EvalSymlinks(accelModDir)
+		if err != nil {
+			t.Fatal(err)
+		}
 		logBytes, err := os.ReadFile(lmodLog)
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:ParaView/6.0.1-foss-2025b|MP:" + cpuModDir + ":" + modRoot + "|EXACT:yes\n"
+		wantLog := "LOAD:EESSI/2025.06|MP:" + realModRoot + "|EXACT:yes\nLOAD:ParaView/6.0.1-foss-2025b|MP:" + realCPUModDir + ":" + realModRoot + "|EXACT:yes\n"
 		if string(logBytes) != wantLog {
 			t.Fatalf("lmod log = %q, want %q", string(logBytes), wantLog)
 		}
@@ -622,7 +634,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantFailLog := "LOAD:EESSI/2025.06|MP:" + modRoot + "|EXACT:yes\nLOAD:GROMACS/2026.2-foss-2025b-CUDA-12.9.1|MP:" + accelModDir + ":" + cpuModDir + ":" + modRoot + "|EXACT:yes\n"
+		wantFailLog := "LOAD:EESSI/2025.06|MP:" + realModRoot + "|EXACT:yes\nLOAD:GROMACS/2026.2-foss-2025b-CUDA-12.9.1|MP:" + realAccelModDir + ":" + realCPUModDir + ":" + realModRoot + "|EXACT:yes\n"
 		if string(logBytes) != wantFailLog {
 			t.Fatalf("failed launch must not attempt fallback load; log=%q want=%q", string(logBytes), wantFailLog)
 		}
@@ -1625,6 +1637,17 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		gotNested := catalogListLockTarget(nestedDangling)
 		if gotNested != wantNested {
 			t.Fatalf("nested dangling symlink lock target = %q, want %q", gotNested, wantNested)
+		}
+		// catalogs.json placed inside a folder named "catalogs" must keep its
+		// lock directly beside catalogs.json rather than redirecting to locks/.
+		catNamedDir := filepath.Join(tmp, "cfg", "catalogs")
+		if err := os.MkdirAll(catNamedDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		catNamedFile := filepath.Join(catNamedDir, "catalogs.json")
+		wantCatLock := catalogListLockTarget(catNamedFile) + ".lock"
+		if got := catalogListLockPath(catNamedFile); got != wantCatLock {
+			t.Fatalf("catalogListLockPath inside catalogs/ = %q, want %q", got, wantCatLock)
 		}
 	}
 }

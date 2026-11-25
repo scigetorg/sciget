@@ -10,10 +10,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// lockCatalogDir acquires an exclusive Windows file lock for dir so concurrent
-// refreshes and cache removals cannot interleave commits, rollbacks, or deletes.
-func lockCatalogDir(dir string) (*catalogLock, error) {
-	lockPath := catalogLockPath(dir)
+// lockFileExclusive acquires an exclusive Windows file lock on lockPath so
+// concurrent writers cannot interleave updates, commits, rollbacks, or deletes.
+func lockFileExclusive(lockPath string) (*catalogLock, error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -48,11 +47,11 @@ func lockCatalogDir(dir string) (*catalogLock, error) {
 	return lk, nil
 }
 
-// lockCatalogDirShared acquires a shared Windows file lock when a lock file
-// exists, so readers wait for any in-progress commit, rollback, or removal.
-// When the lock file does not exist yet, it returns ok=false.
-func lockCatalogDirShared(dir string) (func(), uint64, bool, error) {
-	f, err := os.Open(catalogLockPath(dir))
+// lockFileShared acquires a shared Windows file lock when lockPath exists, so
+// readers wait for any in-progress writer to finish. When lockPath does not
+// exist yet, it returns ok=false.
+func lockFileShared(lockPath string) (func(), uint64, bool, error) {
+	f, err := os.Open(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return func() {}, 0, false, nil
 	}

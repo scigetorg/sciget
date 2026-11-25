@@ -235,15 +235,22 @@ func catalogListLockTarget(path string) string {
 	return resolved
 }
 
+// catalogListLockPath returns the sibling lock file path for catalogs.json at
+// path after resolving symlinks, always placed directly beside the resolved
+// file (never redirected by directory-name heuristics).
+func catalogListLockPath(path string) string {
+	return catalogListLockTarget(path) + ".lock"
+}
+
 // loadCatalogList reads catalogs.json at path. A missing file lists no
 // catalogs. Anything but a JSON array of entries with a valid name, URL
 // and use is an error, as is a name listed twice. When a sibling lock file
 // exists for the resolved target of path, it holds a shared lock across the
 // read so concurrent in-place updates cannot expose a truncated file.
 func loadCatalogList(path string) ([]catalog, error) {
-	lockTarget := catalogListLockTarget(path)
+	lockPath := catalogListLockPath(path)
 	readLocked := func() ([]catalog, error) {
-		unlock, _, locked, err := lockCatalogDirShared(lockTarget)
+		unlock, _, locked, err := lockFileShared(lockPath)
 		if err != nil {
 			return nil, fmt.Errorf("reading catalogs: %w", err)
 		}
@@ -263,7 +270,7 @@ func loadCatalogList(path string) ([]catalog, error) {
 		}
 		return catalogs, nil
 	}
-	unlock, _, locked, err := lockCatalogDirShared(lockTarget)
+	unlock, _, locked, err := lockFileShared(lockPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogs: %w", err)
 	}
@@ -280,7 +287,7 @@ func loadCatalogList(path string) ([]catalog, error) {
 	catalogs, err := parseCatalogList(data)
 	if err != nil {
 		if !locked {
-			if _, statErr := os.Stat(catalogLockPath(lockTarget)); statErr == nil {
+			if _, statErr := os.Stat(lockPath); statErr == nil {
 				return readLocked()
 			}
 		}
@@ -374,7 +381,7 @@ func writeCatalogList(path string, catalogs []catalog, system bool) error {
 		}
 		return nil
 	}
-	lk, err := lockCatalogDir(catalogListLockTarget(path))
+	lk, err := lockFileExclusive(catalogListLockPath(path))
 	if err != nil {
 		return fmt.Errorf("writing catalogs: %w", err)
 	}

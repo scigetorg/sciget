@@ -13,11 +13,10 @@ type memCatalogLock struct {
 
 var catalogDirLocks sync.Map
 
-// lockCatalogDir serializes in-process refreshes and cache removals on
-// platforms without Unix or Windows file locking APIs.
-func lockCatalogDir(dir string) (*catalogLock, error) {
-	key := catalogLockPath(dir)
-	v, _ := catalogDirLocks.LoadOrStore(key, &memCatalogLock{})
+// lockFileExclusive serializes in-process writers on platforms without Unix or
+// Windows file locking APIs.
+func lockFileExclusive(lockPath string) (*catalogLock, error) {
+	v, _ := catalogDirLocks.LoadOrStore(lockPath, &memCatalogLock{})
 	st := v.(*memCatalogLock)
 	st.mu.Lock()
 	lk := &catalogLock{
@@ -32,8 +31,8 @@ func lockCatalogDir(dir string) (*catalogLock, error) {
 	return lk, nil
 }
 
-func lockCatalogDirShared(dir string) (func(), uint64, bool, error) {
-	lk, err := lockCatalogDir(dir)
+func lockFileShared(lockPath string) (func(), uint64, bool, error) {
+	lk, err := lockFileExclusive(lockPath)
 	if err != nil {
 		return nil, 0, false, err
 	}
