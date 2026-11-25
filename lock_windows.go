@@ -65,6 +65,13 @@ func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, err
 		}
 		return nil, err
 	}
+	fileInfo, err := f.Stat()
+	if err != nil {
+		var uol windows.Overlapped
+		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
+		_ = f.Close()
+		return nil, err
+	}
 	gen, err := readLockFileGen(f)
 	if err != nil {
 		var uol windows.Overlapped
@@ -73,7 +80,8 @@ func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, err
 		return nil, err
 	}
 	lk := &catalogLock{
-		gen: gen,
+		gen:      gen,
+		fileInfo: fileInfo,
 		unlock: func() {
 			var uol windows.Overlapped
 			_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
@@ -97,21 +105,21 @@ func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, err
 // lockFileShared acquires a shared Windows file lock when lockPath exists, so
 // readers wait for any in-progress writer to finish. When lockPath does not
 // exist yet, it returns ok=false.
-func lockFileShared(lockPath string) (func(), uint64, bool, error) {
+func lockFileShared(lockPath string) (func(), uint64, os.FileInfo, bool, error) {
 	return lockFileSharedMode(lockPath, false)
 }
 
-func tryLockFileShared(lockPath string) (func(), uint64, bool, error) {
+func tryLockFileShared(lockPath string) (func(), uint64, os.FileInfo, bool, error) {
 	return lockFileSharedMode(lockPath, true)
 }
 
-func lockFileSharedMode(lockPath string, nonBlocking bool) (func(), uint64, bool, error) {
+func lockFileSharedMode(lockPath string, nonBlocking bool) (func(), uint64, os.FileInfo, bool, error) {
 	f, err := os.Open(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return func() {}, 0, false, nil
+		return func() {}, 0, nil, false, nil
 	}
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, nil, false, err
 	}
 	var flags uint32
 	if nonBlocking {
@@ -121,22 +129,29 @@ func lockFileSharedMode(lockPath string, nonBlocking bool) (func(), uint64, bool
 	if err := windows.LockFileEx(windows.Handle(f.Fd()), flags, 0, 1, 0, &ol); err != nil {
 		f.Close()
 		if nonBlocking && errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			return nil, 0, false, errLockBusy
+			return nil, 0, nil, false, errLockBusy
 		}
-		return nil, 0, false, err
+		return nil, 0, nil, false, err
+	}
+	fileInfo, err := f.Stat()
+	if err != nil {
+		var uol windows.Overlapped
+		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
+		_ = f.Close()
+		return nil, 0, nil, false, err
 	}
 	gen, err := readLockFileGen(f)
 	if err != nil {
 		var uol windows.Overlapped
 		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
 		_ = f.Close()
-		return nil, 0, false, err
+		return nil, 0, nil, false, err
 	}
 	return func() {
 		var uol windows.Overlapped
 		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &uol)
 		_ = f.Close()
-	}, gen, true, nil
+	}, gen, fileInfo, true, nil
 }
 
 // lockOpenFileExclusive acquires an exclusive Windows file lock directly on

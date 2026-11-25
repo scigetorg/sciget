@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -577,57 +576,58 @@ func sortEESSIBuilds(builds []eessiBuild) {
 
 func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, ok bool, err error) {
 	for range 4 {
-		unlock, _, locked, missing, lockedDir, lockErr := lockCatalogDirSharedWithMissing(dir)
+		slk, lockErr := lockCatalogDirSharedWithMissing(dir)
 		if lockErr != nil {
 			return nil, nil, false, lockErr
 		}
-		if !locked || lockedDir == "" {
-			if locked {
-				unlock()
-			}
+		if !slk.locked || !slk.resolved {
+			slk.unlock()
 			return nil, nil, false, nil
 		}
 		beforeCatalogSnapshotRead(dir)
-		if isLinkLeaf(lockedDir) {
-			unlock()
-			continue
-		}
 		retryIfMissingAppeared := func() (bool, error) {
-			if len(missing) == 0 {
+			if len(slk.missing) == 0 {
 				return false, nil
 			}
-			return anyPathExists(missing)
+			return anyPathExists(slk.missing)
 		}
-		if cleanErr := checkCatalogClean(lockedDir); errors.Is(cleanErr, os.ErrNotExist) {
-			unlock()
+		if slk.root == nil {
+			slk.unlock()
+			if appeared, _ := retryIfMissingAppeared(); appeared {
+				continue
+			}
+			return nil, nil, false, nil
+		}
+		if cleanErr := checkCatalogCleanRoot(slk.root); errors.Is(cleanErr, os.ErrNotExist) {
+			slk.unlock()
 			if appeared, _ := retryIfMissingAppeared(); appeared {
 				continue
 			}
 			return nil, nil, false, nil
 		} else if cleanErr != nil {
-			unlock()
+			slk.unlock()
 			if appeared, _ := retryIfMissingAppeared(); appeared {
 				continue
 			}
 			return nil, nil, false, cleanErr
 		}
-		catData, readErr := os.ReadFile(filepath.Join(lockedDir, "catalog.json"))
+		catData, readErr := slk.root.ReadFile("catalog.json")
 		if errors.Is(readErr, os.ErrNotExist) {
-			unlock()
+			slk.unlock()
 			if appeared, _ := retryIfMissingAppeared(); appeared {
 				continue
 			}
 			return nil, nil, false, nil
 		}
 		if readErr != nil {
-			unlock()
+			slk.unlock()
 			if appeared, _ := retryIfMissingAppeared(); appeared {
 				continue
 			}
 			return nil, nil, false, readErr
 		}
 		if _, parseErr := parseCatalogJSON(catData); parseErr != nil {
-			unlock()
+			slk.unlock()
 			if appeared, _ := retryIfMissingAppeared(); appeared {
 				continue
 			}
@@ -635,14 +635,14 @@ func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, 
 		}
 		meta, metaErr := parseCatalogEESSI(catData)
 		if metaErr != nil {
-			unlock()
+			slk.unlock()
 			if appeared, _ := retryIfMissingAppeared(); appeared {
 				continue
 			}
 			return nil, nil, false, metaErr
 		}
 		if meta.EESSICatalogURL == "" {
-			unlock()
+			slk.unlock()
 			if appeared, statErr := retryIfMissingAppeared(); statErr != nil {
 				return nil, nil, false, statErr
 			} else if appeared {
@@ -650,8 +650,8 @@ func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, 
 			}
 			return nil, nil, false, nil
 		}
-		raw, eessiErr := os.ReadFile(filepath.Join(lockedDir, "eessi.json"))
-		unlock()
+		raw, eessiErr := slk.root.ReadFile("eessi.json")
+		slk.unlock()
 		if errors.Is(eessiErr, os.ErrNotExist) {
 			if appeared, statErr := retryIfMissingAppeared(); statErr != nil {
 				return nil, nil, false, statErr

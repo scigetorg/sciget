@@ -1155,8 +1155,8 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	appsPath := filepath.Join(cacheDir, "apps.json")
 	eessiPath := filepath.Join(cacheDir, "eessi.json")
 
-	oldRename := renameCatalogFile
-	t.Cleanup(func() { renameCatalogFile = oldRename })
+	oldRename := renameCatalogFileRoot
+	t.Cleanup(func() { renameCatalogFileRoot = oldRename })
 	appsRenamed := false
 	eessiInjected := false
 	appsRenamedCh := make(chan struct{})
@@ -1190,9 +1190,10 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		cs, err := readContainers()
 		readerDone <- readResult{containers: cs, err: err}
 	}()
-	renameCatalogFile = func(oldpath, newpath string) error {
+	renameCatalogFileRoot = func(root *os.Root, dir, oldName, newName string) error {
+		newpath := filepath.Join(dir, newName)
 		if newpath == appsPath {
-			err := os.Rename(oldpath, newpath)
+			err := root.Rename(oldName, newName)
 			if err == nil {
 				appsRenamed = true
 				closeAppsRenamed()
@@ -1212,7 +1213,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			eessiInjected = true
 			return os.ErrPermission
 		}
-		return os.Rename(oldpath, newpath)
+		return root.Rename(oldName, newName)
 	}
 
 	stdout.Reset()
@@ -1223,7 +1224,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	if !appsRenamed || !eessiInjected {
 		t.Fatalf("test did not exercise post-rename rollback: appsRenamed=%v eessiInjected=%v", appsRenamed, eessiInjected)
 	}
-	renameCatalogFile = oldRename
+	renameCatalogFileRoot = oldRename
 
 	// Concurrent container reader must wait for the rollback and never observe v2 (fsl/6.0.8).
 	res := <-readerDone
@@ -1272,9 +1273,10 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	}
 	t.Cleanup(closeInRefresh)
 	t.Cleanup(closeReleaseRefresh)
-	renameCatalogFile = func(oldpath, newpath string) error {
+	renameCatalogFileRoot = func(root *os.Root, dir, oldName, newName string) error {
+		newpath := filepath.Join(dir, newName)
 		if newpath == appsPath {
-			err := os.Rename(oldpath, newpath)
+			err := root.Rename(oldName, newName)
 			if err == nil {
 				closeInRefresh()
 				<-releaseRefresh
@@ -1284,7 +1286,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if newpath == eessiPath {
 			return os.ErrPermission
 		}
-		return os.Rename(oldpath, newpath)
+		return root.Rename(oldName, newName)
 	}
 	refreshDone := make(chan int, 1)
 	go func() {
@@ -1310,7 +1312,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	if code := <-removeDone; code != 0 {
 		t.Fatalf("catalog remove failed after refresh released lock: exit %d", code)
 	}
-	renameCatalogFile = oldRename
+	renameCatalogFileRoot = oldRename
 	if _, err := os.Stat(cacheDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("catalog cache should be removed after remove completes, stat err=%v", err)
 	}
@@ -1550,9 +1552,9 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(cacheDir, 0o755) })
-		renameCatalogFile = func(oldpath, newpath string) error {
-			err := os.Rename(oldpath, newpath)
-			if err == nil && newpath == eessiPath {
+		renameCatalogFileRoot = func(root *os.Root, dir, oldName, newName string) error {
+			err := root.Rename(oldName, newName)
+			if err == nil && filepath.Join(dir, newName) == eessiPath {
 				_ = os.Chmod(cacheDir, 0o555)
 			}
 			return err
@@ -1562,7 +1564,7 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
 			t.Fatalf("expected refresh to fail when cache dir turns read-only before catalog.json rename")
 		}
-		renameCatalogFile = oldRename
+		renameCatalogFileRoot = oldRename
 		if !strings.Contains(stderr.String(), "rollback incomplete") {
 			t.Fatalf("expected rollback failure report in stderr: %s", stderr.String())
 		}
@@ -2643,18 +2645,18 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(directDir, "apps.json"), []byte(`{"old":{"apps":{"old 1":{"version":"1"}}}}`), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			prevRename := renameCatalogFile
+			prevRename := renameCatalogFileRoot
 			failedFirst := false
-			renameCatalogFile = func(oldpath, newpath string) error {
-				if !failedFirst && filepath.Base(newpath) == "apps.json" {
+			renameCatalogFileRoot = func(root *os.Root, dir, oldName, newName string) error {
+				if !failedFirst && newName == "apps.json" {
 					failedFirst = true
 					return errors.New("injected first-catalog commit failure")
 				}
-				return prevRename(oldpath, newpath)
+				return prevRename(root, dir, oldName, newName)
 			}
-			t.Cleanup(func() { renameCatalogFile = prevRename })
+			t.Cleanup(func() { renameCatalogFileRoot = prevRename })
 			results, err := refreshCatalogs()
-			renameCatalogFile = prevRename
+			renameCatalogFileRoot = prevRename
 			if err != nil {
 				t.Fatalf("refreshCatalogs returned top-level err=%v", err)
 			}
@@ -3164,14 +3166,14 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		}
 		prevMaxShared := maxSharedLockAttempts
 		maxSharedLockAttempts = 1
-		exhaustUnlock, _, exhaustLocked, _, _, exhaustErr := lockCatalogDirSharedWithMissing(danglingAlias)
+		exhaustSlk, exhaustErr := lockCatalogDirSharedWithMissing(danglingAlias)
 		maxSharedLockAttempts = prevMaxShared
 		secondExclLk.unlock()
-		if exhaustUnlock != nil {
-			exhaustUnlock()
+		if exhaustSlk.unlock != nil {
+			exhaustSlk.unlock()
 		}
-		if exhaustErr == nil || !strings.Contains(exhaustErr.Error(), "catalog locks busy during read") || exhaustLocked {
-			t.Fatalf("exhausting shared lock retries must fail without bypassing second lock: locked=%v err=%v", exhaustLocked, exhaustErr)
+		if exhaustErr == nil || !strings.Contains(exhaustErr.Error(), "catalog locks busy during read") || exhaustSlk.locked {
+			t.Fatalf("exhausting shared lock retries must fail without bypassing second lock: locked=%v err=%v", exhaustSlk.locked, exhaustErr)
 		}
 		// Distinct directories whose lock filenames fold to the same hash
 		// (e.g. "strasse" vs "straße", or "alpha-<h>" vs "ALPHA-<h>" on a
@@ -3374,11 +3376,11 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			readerDirCh := make(chan string, 1)
 			readerErrCh := make(chan error, 1)
 			go func() {
-				u, _, locked, _, lockedDir, err := lockCatalogDirSharedWithMissing(alias)
-				if err == nil && locked {
-					u()
+				slk, err := lockCatalogDirSharedWithMissing(alias)
+				if err == nil {
+					slk.unlock()
 				}
-				readerDirCh <- lockedDir
+				readerDirCh <- slk.dir
 				readerErrCh <- err
 			}()
 			<-readerHitHook
@@ -3530,6 +3532,137 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(rmDir2, "apps.json")); err != nil {
 				t.Fatalf("locked rmDir2 was removed after post-lock parent retarget: %v", err)
+			}
+
+			// 7. Replacing a canonical parent directory itself (renaming
+			// parentA aside and symlinking parentA -> parentB) AFTER lock
+			// acquisition must never redirect reads, refreshes, or removals
+			// into separately locked parentB.
+			swapRoot := filepath.Join(subTmp, "parent-swap")
+			parentB := filepath.Join(swapRoot, "parentB")
+			targetB := filepath.Join(parentB, "cache")
+			if err := os.MkdirAll(targetB, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFixture(targetB, "victimtool", "victimpkg")
+			if err := os.WriteFile(catalogTargetLockPath(targetB), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			bLk, err := lockFileExclusive(catalogTargetLockPath(targetB))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer bLk.unlock()
+
+			setupParentA := func(name string) (parentA, movedA, targetA string) {
+				parentA = filepath.Join(swapRoot, name)
+				movedA = filepath.Join(swapRoot, name+"-moved")
+				targetA = filepath.Join(parentA, "cache")
+				if err := os.MkdirAll(targetA, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFixture(targetA, "origtool", "origpkg")
+				if err := os.WriteFile(catalogTargetLockPath(targetA), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return parentA, movedA, targetA
+			}
+			swapParentToB := func(parentA, movedA string) {
+				if err := os.Rename(parentA, movedA); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(parentB, parentA); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// 7a. Container snapshot reader stays pinned to original parentA.
+			pA1, mA1, tA1 := setupParentA("read-snap")
+			beforeCatalogSnapshotRead = func(dir string) {
+				if dir == tA1 {
+					swapParentToB(pA1, mA1)
+				}
+			}
+			csA, _, err := readCatalogSnapshot(tA1)
+			beforeCatalogSnapshotRead = prevSnapHook
+			if err != nil || len(csA) != 1 || csA[0].tool != "origtool" {
+				t.Fatalf("readCatalogSnapshot followed swapped canonical parent: err=%v cs=%+v", err, csA)
+			}
+
+			// 7b. EESSI snapshot reader stays pinned to original parentA.
+			pA2, mA2, tA2 := setupParentA("read-eessi")
+			beforeCatalogSnapshotRead = func(dir string) {
+				if dir == tA2 {
+					swapParentToB(pA2, mA2)
+				}
+			}
+			eessiA, _, okA, err := readCatalogEESSISnapshot(tA2)
+			beforeCatalogSnapshotRead = prevSnapHook
+			if err != nil || !okA || !strings.Contains(string(eessiA), `"origpkg"`) {
+				t.Fatalf("readCatalogEESSISnapshot followed swapped canonical parent: ok=%v err=%v data=%q", okA, err, string(eessiA))
+			}
+
+			// 7c. Refresh stays pinned to original parentA and never touches locked parentB.
+			pA3, mA3, tA3 := setupParentA("refresh-swap")
+			genA3, err := readCatalogLockGen(tA3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changedA3, _, err := refreshCatalogAt(refreshRead, catalog{Name: "orig", URL: "https://example.invalid/cat.json"}, tA3, genA3, func() (bool, error) {
+				swapParentToB(pA3, mA3)
+				return true, nil
+			})
+			if err != nil || !changedA3 {
+				t.Fatalf("refreshCatalogAt failed after canonical parent swap: changed=%v err=%v", changedA3, err)
+			}
+			if data, err := os.ReadFile(filepath.Join(mA3, "cache", "apps.json")); err != nil || !strings.Contains(string(data), "updatedtool") {
+				t.Fatalf("expected moved original target to receive refresh write: err=%v data=%q", err, string(data))
+			}
+			if data, err := os.ReadFile(filepath.Join(targetB, "apps.json")); err != nil || !strings.Contains(string(data), "victimtool") {
+				t.Fatalf("locked parentB/cache was overwritten after canonical parent swap: err=%v data=%q", err, string(data))
+			}
+
+			// 7d. Removal stays pinned to original parentA and never deletes locked parentB.
+			pA4, mA4, tA4 := setupParentA("remove-swap")
+			afterRemoveCatalogLock = func(dir string) {
+				if dir == tA4 {
+					swapParentToB(pA4, mA4)
+				}
+			}
+			rmSwapErr := removeCatalogCache(tA4)
+			afterRemoveCatalogLock = prevAfterRemove
+			if rmSwapErr != nil {
+				t.Fatalf("removeCatalogCache failed after canonical parent swap: %v", rmSwapErr)
+			}
+			if _, err := os.Lstat(filepath.Join(mA4, "cache")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected moved original cache to be deleted, lstat err=%v", err)
+			}
+			if _, err := os.Stat(filepath.Join(targetB, "apps.json")); err != nil {
+				t.Fatalf("locked parentB/cache was deleted after canonical parent swap: %v", err)
+			}
+
+			// 8. A refresh that starts with an unresolvable target must reject
+			// committing if the link becomes resolvable during download.
+			lateMid := filepath.Join(subTmp, "late-mid")
+			lateTarget := filepath.Join(subTmp, "late-target")
+			if err := os.MkdirAll(lateTarget, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFixture(lateTarget, "latetool", "latepkg")
+			lateAlias := filepath.Join(slotDir, "late-1234567890ab")
+			if err := os.Symlink(subTmp+string(filepath.Separator)+"late-mid"+string(filepath.Separator)+".."+string(filepath.Separator)+"late-target", lateAlias); err != nil {
+				t.Fatal(err)
+			}
+			lateRead := func(link string) ([]byte, string, error) {
+				// Make lateAlias resolvable mid-download.
+				_ = os.MkdirAll(lateMid, 0o755)
+				return refreshRead(link)
+			}
+			if _, _, err := refreshCatalog(lateRead, catalog{Name: "late", URL: "https://example.invalid/cat.json"}, lateAlias); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
+				t.Fatalf("refresh starting with unresolvable target must fail when target becomes resolvable mid-download, got err=%v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(lateTarget, "apps.json")); err != nil || !strings.Contains(string(data), "latetool") {
+				t.Fatalf("lateTarget must remain untouched after rejected refresh: err=%v data=%q", err, string(data))
 			}
 		})
 		hlDir := filepath.Join(tmp, "lock-identity")

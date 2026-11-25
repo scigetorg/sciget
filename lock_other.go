@@ -65,20 +65,20 @@ func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, err
 	return lk, nil
 }
 
-func lockFileShared(lockPath string) (func(), uint64, bool, error) {
+func lockFileShared(lockPath string) (func(), uint64, os.FileInfo, bool, error) {
 	lk, err := lockFileExclusive(lockPath)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, nil, false, err
 	}
-	return lk.unlock, lk.gen, true, nil
+	return lk.unlock, lk.gen, nil, true, nil
 }
 
-func tryLockFileShared(lockPath string) (func(), uint64, bool, error) {
+func tryLockFileShared(lockPath string) (func(), uint64, os.FileInfo, bool, error) {
 	lk, err := tryLockFileExclusive(lockPath)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, nil, false, err
 	}
-	return lk.unlock, lk.gen, true, nil
+	return lk.unlock, lk.gen, nil, true, nil
 }
 
 func lockOpenFileExclusive(f *os.File) (func() error, error) {

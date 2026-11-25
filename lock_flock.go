@@ -60,6 +60,12 @@ func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, err
 		}
 		return nil, err
 	}
+	fileInfo, err := f.Stat()
+	if err != nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		return nil, err
+	}
 	gen, err := readLockFileGen(f)
 	if err != nil {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
@@ -67,7 +73,8 @@ func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, err
 		return nil, err
 	}
 	lk := &catalogLock{
-		gen: gen,
+		gen:      gen,
+		fileInfo: fileInfo,
 		unlock: func() {
 			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 			_ = f.Close()
@@ -90,21 +97,21 @@ func lockFileExclusiveMode(lockPath string, nonBlocking bool) (*catalogLock, err
 // lockFileShared acquires a shared advisory flock on lockPath when it exists,
 // so readers wait for any in-progress writer to finish. When lockPath does not
 // exist yet, it returns ok=false.
-func lockFileShared(lockPath string) (func(), uint64, bool, error) {
+func lockFileShared(lockPath string) (func(), uint64, os.FileInfo, bool, error) {
 	return lockFileSharedMode(lockPath, false)
 }
 
-func tryLockFileShared(lockPath string) (func(), uint64, bool, error) {
+func tryLockFileShared(lockPath string) (func(), uint64, os.FileInfo, bool, error) {
 	return lockFileSharedMode(lockPath, true)
 }
 
-func lockFileSharedMode(lockPath string, nonBlocking bool) (func(), uint64, bool, error) {
+func lockFileSharedMode(lockPath string, nonBlocking bool) (func(), uint64, os.FileInfo, bool, error) {
 	f, err := os.Open(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return func() {}, 0, false, nil
+		return func() {}, 0, nil, false, nil
 	}
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, nil, false, err
 	}
 	how := syscall.LOCK_SH
 	if nonBlocking {
@@ -119,20 +126,26 @@ func lockFileSharedMode(lockPath string, nonBlocking bool) (func(), uint64, bool
 	if err != nil {
 		f.Close()
 		if nonBlocking && (errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)) {
-			return nil, 0, false, errLockBusy
+			return nil, 0, nil, false, errLockBusy
 		}
-		return nil, 0, false, err
+		return nil, 0, nil, false, err
+	}
+	fileInfo, err := f.Stat()
+	if err != nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		return nil, 0, nil, false, err
 	}
 	gen, err := readLockFileGen(f)
 	if err != nil {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
-		return nil, 0, false, err
+		return nil, 0, nil, false, err
 	}
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
-	}, gen, true, nil
+	}, gen, fileInfo, true, nil
 }
 
 // lockOpenFileExclusive acquires an exclusive advisory flock directly on the
