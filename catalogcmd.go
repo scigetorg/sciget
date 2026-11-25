@@ -376,6 +376,16 @@ func removeCatalogCache(dir string) error {
 			if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
 				return nil
 			}
+			var registered bool
+			var regErr error
+			if isLinkLeaf(dir) {
+				registered, regErr = catalogSlotReferenced(dir)
+			} else {
+				registered, regErr = catalogTargetRegistered(dir)
+			}
+			if regErr == nil && registered {
+				return nil
+			}
 		}
 		return err
 	}

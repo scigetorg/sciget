@@ -2508,6 +2508,47 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if gen, err := readCatalogLockGen(roSlotToROTarget); err != nil || gen != (catalogGen{slot: 1, target: 4}) {
 				t.Fatalf("expected gen {1 4} after restoring alias parent to 0755, got %+v err=%v", gen, err)
 			}
+
+			// Multi-stage permission transition (alias parent flips first, then
+			// target parent flips during retry) must NEVER return holding
+			// target/.lock once target's external lock has appeared — even on
+			// the final retry attempt.
+			twoStageSlotParent := filepath.Join(tmp, "twostage-slots", "catalogs")
+			twoStageTargetParent := filepath.Join(tmp, "twostage-target-parent")
+			twoStageTargetDir := filepath.Join(twoStageTargetParent, "shared-neuro")
+			for _, d := range []string{twoStageSlotParent, twoStageTargetDir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			twoStageAlias := filepath.Join(twoStageSlotParent, "alias-1234567890ab")
+			if err := os.Symlink(twoStageTargetDir, twoStageAlias); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(twoStageSlotParent, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(twoStageSlotParent, 0o755) })
+			if err := os.Chmod(twoStageTargetParent, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(twoStageTargetParent, 0o755) })
+
+			prevAfterFallback := afterInDirFallbackLock
+			t.Cleanup(func() { afterInDirFallbackLock = prevAfterFallback })
+			// On final attempt (retriesLeft == 0), target external lock appears
+			// right after in-dir lock acquisition -> must release and return error.
+			afterInDirFallbackLock = func(dir string) {
+				if dir == twoStageAlias {
+					_ = os.Chmod(twoStageTargetParent, 0o755)
+					_ = os.WriteFile(catalogTargetLockPath(twoStageAlias), nil, 0o600)
+				}
+			}
+			if lk, err := lockCatalogDirWithRetry(twoStageAlias, true, 0); err == nil {
+				lk.unlock()
+				t.Fatalf("final fallback attempt must fail instead of returning split target/.lock when external lock appeared")
+			}
+			afterInDirFallbackLock = prevAfterFallback
 		}
 
 		// Two enabled catalogs sharing a cache directory via symlink must both
@@ -2613,6 +2654,81 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 				t.Fatalf("removing outer must unlink its symlink, lstat err=%v", err)
 			}
 		})
+
+		// Removing a direct catalog whose subdirectory is targeted by a
+		// registered alias (alias -> direct/subdir) must preserve direct so
+		// alias does not become dangling.
+		t.Run("remove direct with alias targeting subdirectory", func(t *testing.T) {
+			subTmp := t.TempDir()
+			isolateTestEnv(t, subTmp)
+			layers, err := readCatalogLayers()
+			if err != nil {
+				t.Fatal(err)
+			}
+			directCat := catalog{Name: "direct", URL: catFile, Use: true}
+			aliasCat := catalog{Name: "alias", URL: catFile, Use: true}
+			if err := writeCatalogList(layers.userPath, []catalog{directCat, aliasCat}, false); err != nil {
+				t.Fatal(err)
+			}
+			directDir := directCat.dir(layers.cacheDir)
+			subTarget := filepath.Join(directDir, "subdir")
+			aliasDir := aliasCat.dir(layers.cacheDir)
+			if err := os.MkdirAll(subTarget, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(subTarget, "apps.json"), []byte(`{"fsl":{"apps":{"fsl 6.0.7":{"version":"20240101","image":"fsl_6.0.7"}}}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(subTarget, aliasDir); err != nil {
+				t.Fatal(err)
+			}
+			var out, errBuf bytes.Buffer
+			if code := run([]string{"catalog", "remove", "direct"}, &out, &errBuf); code != 0 {
+				t.Fatalf("catalog remove direct failed: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+			}
+			if _, err := os.Stat(filepath.Join(aliasDir, "apps.json")); err != nil {
+				t.Fatalf("removing direct must preserve direct/subdir for registered alias: %v", err)
+			}
+		})
+
+		// Removing a shared direct catalog when cache/catalogs is read-only
+		// (0555) must succeed when a remaining alias still needs the cache
+		// directory, rather than failing on lock creation after unregistering.
+		if os.Geteuid() != 0 {
+			t.Run("remove shared direct catalog under read-only catalogs dir", func(t *testing.T) {
+				subTmp := t.TempDir()
+				isolateTestEnv(t, subTmp)
+				layers, err := readCatalogLayers()
+				if err != nil {
+					t.Fatal(err)
+				}
+				directCat := catalog{Name: "direct", URL: catFile, Use: true}
+				aliasCat := catalog{Name: "alias", URL: catFile, Use: true}
+				if err := writeCatalogList(layers.userPath, []catalog{directCat, aliasCat}, false); err != nil {
+					t.Fatal(err)
+				}
+				directDir := directCat.dir(layers.cacheDir)
+				aliasDir := aliasCat.dir(layers.cacheDir)
+				if err := os.MkdirAll(directDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(directDir, aliasDir); err != nil {
+					t.Fatal(err)
+				}
+				roCatalogsDir := filepath.Join(layers.cacheDir, "catalogs")
+				if err := os.Chmod(roCatalogsDir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(roCatalogsDir, 0o755) })
+				var out, errBuf bytes.Buffer
+				if code := run([]string{"catalog", "remove", "direct"}, &out, &errBuf); code != 0 {
+					t.Fatalf("catalog remove direct under 0555 catalogs/ failed despite remaining alias: code=%d stdout=%q stderr=%q", code, out.String(), errBuf.String())
+				}
+				if _, err := os.Stat(directDir); err != nil {
+					t.Fatalf("shared direct cache dir must remain intact: %v", err)
+				}
+			})
+		}
 	}
 
 	// First creation of catalogs.json on filesystems without hard links must

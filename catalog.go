@@ -201,11 +201,54 @@ func sameCatalogTarget(a, b string) bool {
 	return false
 }
 
+func isSameOrUnderDir(candidate, dir string) bool {
+	if sameCatalogTarget(candidate, dir) {
+		return true
+	}
+	canonCand := canonicalCatalogDir(candidate)
+	canonDir := canonicalCatalogDir(dir)
+	if rel, err := filepath.Rel(canonDir, canonCand); err == nil && (rel == "." || filepath.IsLocal(rel)) {
+		return true
+	}
+	// Also walk ancestors of canonCand with os.SameFile in case case-insensitive
+	// or aliased mount spellings differ from filepath.Rel's lexical check.
+	if dirInfo, err := os.Stat(canonDir); err == nil {
+		cur := canonCand
+		for {
+			if curInfo, err := os.Stat(cur); err == nil && os.SameFile(curInfo, dirInfo) {
+				return true
+			}
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				break
+			}
+			cur = parent
+		}
+	}
+	return false
+}
+
 // pathTraversesSlot reports whether path equals slot or traverses slot while
 // following symlinks or Windows NTFS junctions (e.g. outer -> middle -> direct
-// traverses middle).
+// traverses middle). When includeSubdirs is true, any path at or beneath slot
+// (such as alias -> direct/subdir) also matches so recursive deletion of slot
+// cannot destroy a registered target beneath it.
 func pathTraversesSlot(path, slot string) bool {
-	if sameCatalogSlot(path, slot) {
+	return pathTraverses(path, slot, false)
+}
+
+func pathTraversesDir(path, dir string) bool {
+	return pathTraverses(path, dir, true)
+}
+
+func pathTraverses(path, slot string, includeSubdirs bool) bool {
+	match := func(p string) bool {
+		if includeSubdirs {
+			return isSameOrUnderDir(p, slot)
+		}
+		return sameCatalogSlot(p, slot)
+	}
+	if match(path) {
 		return true
 	}
 	cur := path
@@ -239,7 +282,7 @@ func pathTraversesSlot(path, slot string) bool {
 			continue
 		}
 		next := filepath.Join(resolved, comp)
-		if sameCatalogSlot(next, slot) {
+		if match(next) {
 			return true
 		}
 		if target, err := os.Readlink(next); err == nil {
@@ -269,7 +312,7 @@ func pathTraversesSlot(path, slot string) bool {
 		}
 		resolved = next
 	}
-	return sameCatalogSlot(resolved, slot)
+	return match(resolved)
 }
 
 // catalogDirRegistered reports whether any catalog currently registered in the
@@ -303,17 +346,17 @@ func catalogSlotReferenced(dir string) (bool, error) {
 	return false, nil
 }
 
-// catalogTargetRegistered reports whether any registered catalog maps to dir
-// or resolves through a symlink/junction to dir's canonical target directory,
-// so removing a direct catalog registration never deletes a cache directory
-// still referenced by another registered alias.
+// catalogTargetRegistered reports whether any registered catalog maps to dir,
+// resolves to dir or a subdirectory beneath dir (e.g. alias -> direct/subdir),
+// or traverses dir through a symlink/junction chain, so recursively deleting
+// dir never destroys or breaks another registered catalog's cache.
 func catalogTargetRegistered(dir string) (bool, error) {
 	layers, err := readCatalogLayers()
 	if err != nil {
 		return false, err
 	}
 	for _, c := range layers.combined() {
-		if sameCatalogTarget(c.dir(layers.cacheDir), dir) {
+		if pathTraversesDir(c.dir(layers.cacheDir), dir) {
 			return true, nil
 		}
 	}
@@ -554,10 +597,15 @@ func anyPathExists(paths []string) (bool, error) {
 }
 
 func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogDirLock, error) {
-	return lockCatalogDirWithRetry(dir, allowInDirFallback, true)
+	return lockCatalogDirWithRetry(dir, allowInDirFallback, 4)
 }
 
-func lockCatalogDirWithRetry(dir string, allowInDirFallback, allowRetry bool) (*catalogDirLock, error) {
+// afterInDirFallbackLock runs immediately after the fallback in-dir lock is
+// acquired and before checking whether a skipped external lock appeared; tests
+// may set it to reproduce multi-step permission transitions.
+var afterInDirFallbackLock = func(dir string) {}
+
+func lockCatalogDirWithRetry(dir string, allowInDirFallback bool, retriesLeft int) (*catalogDirLock, error) {
 	clean := canonicalCatalogDir(dir)
 	slotPath := catalogLockPath(dir)
 	targetPath := catalogTargetLockPath(dir)
@@ -615,20 +663,21 @@ func lockCatalogDirWithRetry(dir string, allowInDirFallback, allowRetry bool) (*
 			unlockAll()
 			return nil, inErr
 		}
-		// If any skipped external lock path appeared concurrently, release
-		// inLk and retry once so we acquire the newly visible external lock(s)
-		// in strict ext -> inDir order while still permitting fallback for any
-		// other lock whose parent remains read-only.
-		if allowRetry {
-			if exists, statErr := anyPathExists(skippedExt); statErr != nil {
-				inLk.unlock()
-				unlockAll()
-				return nil, statErr
-			} else if exists {
-				inLk.unlock()
-				unlockAll()
-				return lockCatalogDirWithRetry(dir, allowInDirFallback, false)
+		// Always check whether any skipped external lock path appeared
+		// concurrently (even on the final attempt) so we never return holding
+		// target/.lock while a direct writer holds the external lock.
+		afterInDirFallbackLock(dir)
+		if exists, statErr := anyPathExists(skippedExt); statErr != nil {
+			inLk.unlock()
+			unlockAll()
+			return nil, statErr
+		} else if exists {
+			inLk.unlock()
+			unlockAll()
+			if retriesLeft > 0 {
+				return lockCatalogDirWithRetry(dir, allowInDirFallback, retriesLeft-1)
 			}
+			return nil, errors.New("catalog locks changed during refresh; run 'sciget refresh' again")
 		}
 		computeGen := func() catalogGen {
 			if slotPath == targetPath {

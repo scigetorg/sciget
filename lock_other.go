@@ -3,9 +3,14 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"sync"
 )
+
+func isReadOnlyOrPermError(err error) bool {
+	return errors.Is(err, os.ErrPermission)
+}
 
 type memCatalogLock struct {
 	mu  sync.Mutex
@@ -30,6 +35,13 @@ func lockFileExclusive(lockPath string) (*catalogLock, error) {
 	lk.bump = func() error {
 		st.gen++
 		lk.gen = st.gen
+		return nil
+	}
+	lk.syncGen = func(minGen uint64) error {
+		if minGen > st.gen {
+			st.gen = minGen
+			lk.gen = minGen
+		}
 		return nil
 	}
 	return lk, nil
