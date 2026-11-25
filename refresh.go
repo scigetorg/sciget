@@ -13,6 +13,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// renameCatalogFile commits a staged catalog file and can be replaced in tests
+// to simulate mid-commit rename failures.
+var renameCatalogFile = os.Rename
+
 func newRefreshCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "refresh",
@@ -256,7 +260,7 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	}
 
 	for i, s := range staged {
-		if err := os.Rename(s.tmp, s.dest); err != nil {
+		if err := renameCatalogFile(s.tmp, s.dest); err != nil {
 			// Roll back every file already renamed in this refresh.
 			for j := i - 1; j >= 0; j-- {
 				if staged[j].bak != "" {

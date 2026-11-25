@@ -119,7 +119,7 @@ func (b eessiBuild) loadCommand() string {
 	return fmt.Sprintf("%smodule load EESSI/%s && module load %s", prefix, b.stack, b.module)
 }
 
-func (b eessiBuild) launchCommand(includeLauncher bool) string {
+func (b eessiBuild) launchCommand(launcherFlag string) string {
 	if len(b.exec) == 0 {
 		return ""
 	}
@@ -127,8 +127,8 @@ func (b eessiBuild) launchCommand(includeLauncher bool) string {
 	if b.gpu {
 		parts = append(parts, "--gpu")
 	}
-	if includeLauncher {
-		parts = append(parts, "--launcher", b.label)
+	if launcherFlag != "" {
+		parts = append(parts, "--launcher", launcherFlag)
 	}
 	parts = append(parts, b.module)
 	return shellJoin(parts)
@@ -509,6 +509,27 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, launch
 		return eessiBuild{}, fmt.Errorf("no EESSI module %q found in catalogs in use (run 'sciget eessi find' or 'sciget refresh')", query)
 	}
 
+	// When --launcher is given, prefer exact case-sensitive label matches first,
+	// then exact command matches, before applying catalog precedence so a
+	// lower-priority catalog with a distinct exact label or command stays reachable.
+	if launcher != "" {
+		var exactLabel, exactCmd []eessiBuild
+		for _, b := range matched {
+			if b.label == launcher {
+				exactLabel = append(exactLabel, b)
+			}
+			if len(b.exec) > 0 && b.exec[0] == launcher {
+				exactCmd = append(exactCmd, b)
+			}
+		}
+		switch {
+		case len(exactLabel) > 0:
+			matched = exactLabel
+		case len(exactCmd) > 0:
+			matched = exactCmd
+		}
+	}
+
 	// Honor catalog precedence: keep entries from the earliest catalog that matched,
 	// then pick its top-ranked (stack, gpu, module) build.
 	winCat := matched[0].catalogOrder
@@ -530,19 +551,6 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, launch
 			sameBuild = append(sameBuild, b)
 		}
 	}
-	if len(sameBuild) > 1 && launcher != "" {
-		// Prefer an exact case-sensitive label match so labels differing only by
-		// case with a shared executable remain uniquely addressable.
-		var exact []eessiBuild
-		for _, b := range sameBuild {
-			if b.label == launcher {
-				exact = append(exact, b)
-			}
-		}
-		if len(exact) == 1 {
-			return exact[0], nil
-		}
-	}
 	if len(sameBuild) > 1 {
 		var choices []string
 		for _, b := range sameBuild {
@@ -558,22 +566,31 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, launch
 	return best, nil
 }
 
-func hasSiblingLaunchers(builds []eessiBuild, target eessiBuild) bool {
-	count := 0
-	for _, b := range builds {
-		if b.shadowed {
-			continue
-		}
-		if b.stack == target.stack &&
-			b.gpu == target.gpu &&
-			b.module == target.module {
-			count++
-			if count > 1 {
-				return true
-			}
+func sameEESSIBuild(a, b eessiBuild) bool {
+	return a.catalogOrder == b.catalogOrder &&
+		a.id == b.id &&
+		a.stack == b.stack &&
+		a.gpu == b.gpu &&
+		a.module == b.module &&
+		a.label == b.label &&
+		slices.Equal(a.exec, b.exec)
+}
+
+// launchSelector returns the --launcher flag value (or "" when none is needed)
+// so that `sciget eessi launch` resolves back to target.
+func launchSelector(builds []eessiBuild, target eessiBuild) string {
+	if resolved, err := lookupEESSIBuild(builds, target.module, target.stack, target.gpu, ""); err == nil && sameEESSIBuild(resolved, target) {
+		return ""
+	}
+	if resolved, err := lookupEESSIBuild(builds, target.module, target.stack, target.gpu, target.label); err == nil && sameEESSIBuild(resolved, target) {
+		return target.label
+	}
+	if len(target.exec) > 0 {
+		if resolved, err := lookupEESSIBuild(builds, target.module, target.stack, target.gpu, target.exec[0]); err == nil && sameEESSIBuild(resolved, target) {
+			return target.exec[0]
 		}
 	}
-	return false
+	return target.label
 }
 
 func newEESSIInfoCommand() *cobra.Command {
@@ -629,7 +646,7 @@ func newEESSIInfoCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if lc := b.launchCommand(hasSiblingLaunchers(builds, b)); lc != "" {
+			if lc := b.launchCommand(launchSelector(builds, b)); lc != "" {
 				_, err = fmt.Fprintf(out, "%-13s%s\n", "Launch:", lc)
 			}
 			return err

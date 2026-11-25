@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -626,9 +627,10 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 		t.Fatalf("exact-case --launcher cased failed: err=%v exec=%v", err, lower.exec)
 	}
 
-	// Cross-catalog sibling launcher: if two catalogs expose the same module
-	// with different launchers, info --launcher on the lower-priority catalog
-	// must include --launcher in its printed Launch command.
+	// Cross-catalog sibling launchers, including labels differing only by case
+	// ("Open GUI" in higher-priority catalog vs "open gui" in lower-priority catalog)
+	// and identical labels with different executables: the printed Launch command
+	// must resolve back to the exact entry shown by info.
 	cross1 := `{
 	  "schemaVersion": 1,
 	  "backend": "eessi",
@@ -640,20 +642,20 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	      "package": "Shared",
 	      "categories": ["analysis"],
 	      "apps": {
-	        "First": {
+	        "Open GUI": {
 	          "backend": "eessi",
 	          "stack": "2025.06",
 	          "module": "Shared/1.0-foss-2025b",
 	          "software_version": "1.0",
 	          "arch": ["x86_64"],
 	          "gpu": false,
-	          "exec": ["shared-first"]
+	          "exec": ["high"]
 	        }
 	      }
 	    }
 	  }
 	}`
-	cross2 := strings.ReplaceAll(strings.ReplaceAll(cross1, `"First"`, `"Second"`), `"shared-first"`, `"shared-second"`)
+	cross2 := strings.ReplaceAll(strings.ReplaceAll(cross1, `"Open GUI"`, `"open gui"`), `"high"`, `"low"`)
 	b1, err := parseEESSICatalog([]byte(cross1), []string{"2025.06"})
 	if err != nil {
 		t.Fatal(err)
@@ -665,11 +667,33 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	b1[0].catalogOrder = 0
 	b2[0].catalogOrder = 1
 	combined := append(b1, b2...)
-	if !hasSiblingLaunchers(combined, b2[0]) {
-		t.Fatalf("expected hasSiblingLaunchers to detect cross-catalog sibling on same module")
+	sel := launchSelector(combined, b2[0])
+	if sel != "open gui" {
+		t.Fatalf("expected launchSelector to choose exact label 'open gui', got %q", sel)
 	}
-	if got := b2[0].launchCommand(hasSiblingLaunchers(combined, b2[0])); !strings.Contains(got, "--launcher Second") {
-		t.Fatalf("cross-catalog Launch command missing --launcher Second: %s", got)
+	resolved, err := lookupEESSIBuild(combined, b2[0].module, b2[0].stack, b2[0].gpu, sel)
+	if err != nil || !sameEESSIBuild(resolved, b2[0]) {
+		t.Fatalf("launchSelector %q resolved to %+v (err=%v), want %+v", sel, resolved, err, b2[0])
+	}
+	if got := b2[0].launchCommand(sel); !strings.Contains(got, "--launcher 'open gui'") {
+		t.Fatalf("cross-catalog Launch command missing --launcher 'open gui': %s", got)
+	}
+
+	// Identical label across two catalogs with distinct executables falls back to exec[0].
+	crossSameLabel := strings.ReplaceAll(cross1, `"high"`, `"low"`)
+	b3, err := parseEESSICatalog([]byte(crossSameLabel), []string{"2025.06"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b3[0].catalogOrder = 1
+	combinedSame := append(slices.Clone(b1), b3...)
+	selSame := launchSelector(combinedSame, b3[0])
+	if selSame != "low" {
+		t.Fatalf("expected launchSelector to fall back to exec[0] 'low', got %q", selSame)
+	}
+	resolvedSame, err := lookupEESSIBuild(combinedSame, b3[0].module, b3[0].stack, b3[0].gpu, selSame)
+	if err != nil || !sameEESSIBuild(resolvedSame, b3[0]) {
+		t.Fatalf("launchSelector %q resolved to %+v (err=%v), want %+v", selSame, resolvedSame, err, b3[0])
 	}
 }
 
@@ -765,9 +789,13 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		t.Fatalf("initial refresh failed: %s", stderr.String())
 	}
 
-	// Update apps.json to v2 and force eessi.json rename to fail by replacing
-	// the cached eessi.json with a non-empty directory.
+	// Update both apps.json and eessi.json, let apps.json rename succeed, and
+	// inject a rename error on eessi.json so the rollback path actually runs.
 	if err := os.WriteFile(filepath.Join(srcDir, "apps.json"), []byte(appsV2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eessiV2 := strings.Replace(testEESSIJSON, `"3D visualization"`, `"3D visualization v2"`, 1)
+	if err := os.WriteFile(filepath.Join(srcDir, "eessi.json"), []byte(eessiV2), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cacheRoot, used, err := usedCatalogs()
@@ -775,12 +803,21 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 		t.Fatalf("usedCatalogs failed: %v", err)
 	}
 	cacheDir := used[0].dir(cacheRoot)
+	appsPath := filepath.Join(cacheDir, "apps.json")
 	eessiPath := filepath.Join(cacheDir, "eessi.json")
-	if err := os.Remove(eessiPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(eessiPath, "blocker"), 0o755); err != nil {
-		t.Fatal(err)
+
+	oldRename := renameCatalogFile
+	t.Cleanup(func() { renameCatalogFile = oldRename })
+	appsRenamed := false
+	renameCatalogFile = func(oldpath, newpath string) error {
+		if newpath == appsPath {
+			appsRenamed = true
+			return os.Rename(oldpath, newpath)
+		}
+		if newpath == eessiPath {
+			return os.ErrPermission
+		}
+		return os.Rename(oldpath, newpath)
 	}
 
 	stdout.Reset()
@@ -788,17 +825,28 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
 		t.Fatalf("expected refresh to fail when eessi.json rename fails")
 	}
+	if !appsRenamed {
+		t.Fatalf("test did not exercise post-rename rollback: apps.json was never renamed")
+	}
+	renameCatalogFile = oldRename
 
-	// apps.json must have been rolled back to v1 (never mixed v2 apps + v1 catalog).
-	gotApps, err := os.ReadFile(filepath.Join(cacheDir, "apps.json"))
+	// apps.json must have been rolled back to v1 (never mixed v2 apps + v1 eessi).
+	gotApps, err := os.ReadFile(appsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Preserve unreadable existing apps.json when staging/backup cannot read it.
-	if err := os.RemoveAll(eessiPath); err != nil {
+	if string(gotApps) != appsV1 {
+		t.Fatalf("apps.json was not rolled back on eessi.json rename failure: got %s, want %s", string(gotApps), appsV1)
+	}
+	gotEESSI, err := os.ReadFile(eessiPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	appsPath := filepath.Join(cacheDir, "apps.json")
+	if string(gotEESSI) != testEESSIJSON {
+		t.Fatalf("eessi.json should remain at v1 after failed rename")
+	}
+
+	// Preserve unreadable existing apps.json when staging/backup cannot read it.
 	if err := os.Chmod(appsPath, 0o000); err != nil {
 		t.Fatal(err)
 	}
