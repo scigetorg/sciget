@@ -554,6 +554,10 @@ func anyPathExists(paths []string) (bool, error) {
 }
 
 func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogDirLock, error) {
+	return lockCatalogDirWithRetry(dir, allowInDirFallback, true)
+}
+
+func lockCatalogDirWithRetry(dir string, allowInDirFallback, allowRetry bool) (*catalogDirLock, error) {
 	clean := canonicalCatalogDir(dir)
 	slotPath := catalogLockPath(dir)
 	targetPath := catalogTargetLockPath(dir)
@@ -584,7 +588,14 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogDirLoc
 				if allowInDirFallback {
 					if _, extStatErr := os.Stat(p); errors.Is(extStatErr, os.ErrNotExist) {
 						if info, dirStatErr := os.Stat(clean); dirStatErr == nil && info.IsDir() {
-							needInDirFallback = true
+							// Only fall back to target/.lock when targetPath
+							// itself cannot be created. When an alias's own
+							// slot parent is read-only but targetPath is
+							// writable, targetPath alone serializes every
+							// reader and writer on the target directory.
+							if p == targetPath {
+								needInDirFallback = true
+							}
 							skippedExt = append(skippedExt, p)
 							continue
 						}
@@ -605,31 +616,29 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogDirLoc
 			return nil, inErr
 		}
 		// If any skipped external lock path appeared concurrently, release
-		// inLk and re-acquire cleanly under the external locks.
-		if exists, statErr := anyPathExists(skippedExt); statErr != nil {
-			inLk.unlock()
-			unlockAll()
-			return nil, statErr
-		} else if exists {
-			inLk.unlock()
-			unlockAll()
-			return lockCatalogDirWithMode(dir, false)
+		// inLk and retry once so we acquire the newly visible external lock(s)
+		// in strict ext -> inDir order while still permitting fallback for any
+		// other lock whose parent remains read-only.
+		if allowRetry {
+			if exists, statErr := anyPathExists(skippedExt); statErr != nil {
+				inLk.unlock()
+				unlockAll()
+				return nil, statErr
+			} else if exists {
+				inLk.unlock()
+				unlockAll()
+				return lockCatalogDirWithRetry(dir, allowInDirFallback, false)
+			}
 		}
 		computeGen := func() catalogGen {
 			if slotPath == targetPath {
 				return catalogGen{slot: inLk.gen, target: inLk.gen}
 			}
-			var slotG, targetG uint64
+			var slotG uint64
 			if slk := extByPath[slotPath]; slk != nil {
 				slotG = slk.gen
-			} else {
-				slotG = inLk.gen
 			}
-			targetG = inLk.gen
-			if tlk := extByPath[targetPath]; tlk != nil && tlk.gen > targetG {
-				targetG = tlk.gen
-			}
-			return catalogGen{slot: slotG, target: targetG}
+			return catalogGen{slot: slotG, target: inLk.gen}
 		}
 		combined := &catalogDirLock{
 			gen: computeGen(),
@@ -655,12 +664,11 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogDirLoc
 
 	var retiredInLk *catalogLock
 	// If an earlier refresh fell back to the in-dir lock while the target's
-	// parent directory was read-only, drain and retire it under the external
-	// locks so concurrent holders finish and target's monotonic generation is
+	// parent directory was read-only, drain and retire it once targetPath is
+	// held so concurrent holders finish and target's monotonic generation is
 	// preserved. Never retire the target's in-dir lock when removing a leaf
-	// link (which leaves the target intact) or when any external lock was
-	// skipped due to a read-only parent.
-	if len(skippedExt) == 0 && !(linkLeaf && !allowInDirFallback) {
+	// link (which leaves the target intact) or when targetPath was skipped.
+	if extByPath[targetPath] != nil && !(linkLeaf && !allowInDirFallback) {
 		if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
 			if _, inStatErr := os.Stat(inDirPath); inStatErr == nil {
 				inLk, inErr := lockFileExclusive(inDirPath)
@@ -668,12 +676,10 @@ func lockCatalogDirWithMode(dir string, allowInDirFallback bool) (*catalogDirLoc
 					unlockAll()
 					return nil, inErr
 				}
-				if tlk := extByPath[targetPath]; tlk != nil {
-					if syncErr := tlk.syncGen(inLk.gen); syncErr != nil {
-						inLk.unlock()
-						unlockAll()
-						return nil, syncErr
-					}
+				if syncErr := extByPath[targetPath].syncGen(inLk.gen); syncErr != nil {
+					inLk.unlock()
+					unlockAll()
+					return nil, syncErr
 				}
 				if runtime.GOOS != "windows" {
 					if rmErr := os.Remove(inDirPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
@@ -766,6 +772,7 @@ func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []st
 		var unlocks []func()
 		var missing []string
 		var slotGen, targetGen uint64
+		targetLocked := false
 		release := func() {
 			for i := len(unlocks) - 1; i >= 0; i-- {
 				unlocks[i]()
@@ -784,6 +791,7 @@ func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []st
 				}
 				if p == targetPath {
 					targetGen = g
+					targetLocked = true
 				}
 			} else {
 				missing = append(missing, p)
@@ -815,7 +823,7 @@ func lockCatalogDirSharedWithMissing(dir string) (func(), catalogGen, bool, []st
 				}
 			}
 			if len(missing) > 0 {
-				if !inDirLocked {
+				if !targetLocked && !inDirLocked {
 					missing = append(missing, inDirPath)
 				}
 				if appeared, statErr := anyPathExists(missing); statErr != nil {

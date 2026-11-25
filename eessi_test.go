@@ -2428,6 +2428,86 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			if _, _, err := refreshCatalogAt(fileRead, catalog{Name: "alias", URL: catFile}, roAliasLink, aliasBeforeDirect, nil); err == nil || !strings.Contains(err.Error(), "changed during refresh") {
 				t.Fatalf("delayed alias refresh {3 2} must fail after direct refresh bumped target 2 -> 3, got err=%v", err)
 			}
+
+			// Alias whose own slot parent is read-only (0555) pointing to a
+			// writable target (both under a writable target parent and under a
+			// read-only target parent) must keep shared and exclusive lock
+			// generations consistent across repeated refreshes and transitions.
+			roSlotParent := filepath.Join(tmp, "ro-slot-parent", "catalogs")
+			rwTargetDir := filepath.Join(tmp, "rw-target-parent", "shared-neuro")
+			roBothTargetParent := filepath.Join(tmp, "ro-both-target-parent")
+			roBothTargetDir := filepath.Join(roBothTargetParent, "shared-neuro")
+			for _, d := range []string{roSlotParent, rwTargetDir, roBothTargetDir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			roSlotToRWTarget := filepath.Join(roSlotParent, "alias-rw-1234567890ab")
+			roSlotToROTarget := filepath.Join(roSlotParent, "alias-ro-1234567890ab")
+			if err := os.Symlink(rwTargetDir, roSlotToRWTarget); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(roBothTargetDir, roSlotToROTarget); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(roSlotParent, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(roSlotParent, 0o755) })
+			if err := os.Chmod(roBothTargetParent, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(roBothTargetParent, 0o755) })
+
+			// Case 3: read-only alias parent -> writable target parent.
+			for pass := 1; pass <= 2; pass++ {
+				if _, _, err := refreshCatalog(fileRead, catalog{Name: "alias-rw", URL: catFile}, roSlotToRWTarget); err != nil {
+					t.Fatalf("refresh pass %d on alias under 0555 parent -> writable target failed: %v", pass, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(rwTargetDir, ".lock")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("alias with writable target parent should lock target external lock without creating target/.lock, stat err=%v", err)
+			}
+			if gen, err := readCatalogLockGen(roSlotToRWTarget); err != nil || gen != (catalogGen{slot: 0, target: 2}) {
+				t.Fatalf("expected gen {0 2} for alias under 0555 parent -> writable target, got %+v err=%v", gen, err)
+			}
+			if containers, _, err := readCatalogSnapshot(roSlotToRWTarget); err != nil || len(containers) != 1 {
+				t.Fatalf("readCatalogSnapshot on alias under 0555 parent failed: len=%d err=%v", len(containers), err)
+			}
+
+			// Case 4: read-only alias parent -> read-only target parent (writable target dir).
+			for pass := 1; pass <= 2; pass++ {
+				if _, _, err := refreshCatalog(fileRead, catalog{Name: "alias-ro", URL: catFile}, roSlotToROTarget); err != nil {
+					t.Fatalf("refresh pass %d on alias with both parents 0555 failed: %v", pass, err)
+				}
+			}
+			if gen, err := readCatalogLockGen(roSlotToROTarget); err != nil || gen != (catalogGen{slot: 0, target: 2}) {
+				t.Fatalf("expected gen {0 2} for alias with both parents 0555, got %+v err=%v", gen, err)
+			}
+			// Restoring target parent to 0755 while alias parent stays 0555
+			// must cleanly migrate target/.lock to target's external lock.
+			if err := os.Chmod(roBothTargetParent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := refreshCatalog(fileRead, catalog{Name: "alias-ro", URL: catFile}, roSlotToROTarget); err != nil {
+				t.Fatalf("migration refresh on alias with 0555 slot parent failed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(roBothTargetDir, ".lock")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected target/.lock to be retired once target parent is 0755, stat err=%v", err)
+			}
+			if gen, err := readCatalogLockGen(roSlotToROTarget); err != nil || gen != (catalogGen{slot: 0, target: 3}) {
+				t.Fatalf("expected gen {0 3} after target lock migration, got %+v err=%v", gen, err)
+			}
+			// Restoring alias parent to 0755 must seamlessly create slot lock.
+			if err := os.Chmod(roSlotParent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := refreshCatalog(fileRead, catalog{Name: "alias-ro", URL: catFile}, roSlotToROTarget); err != nil {
+				t.Fatalf("refresh after restoring alias parent to 0755 failed: %v", err)
+			}
+			if gen, err := readCatalogLockGen(roSlotToROTarget); err != nil || gen != (catalogGen{slot: 1, target: 4}) {
+				t.Fatalf("expected gen {1 4} after restoring alias parent to 0755, got %+v err=%v", gen, err)
+			}
 		}
 
 		// Two enabled catalogs sharing a cache directory via symlink must both
