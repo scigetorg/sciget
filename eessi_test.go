@@ -272,6 +272,14 @@ func TestRefreshAndEESSICommands(t *testing.T) {
         echo "Lmod error: module not found: $2" >&2
         return 1
     fi
+    if [ "$2" = "${MOCK_LMOD_ALIAS_STACK:-}" ]; then
+        export LOADEDMODULES="${LOADEDMODULES:+${LOADEDMODULES}:}EESSI/2023.06"
+        return 0
+    fi
+    if [ "${MOCK_LMOD_EMPTY_LOADED:-}" = "1" ]; then
+        export LOADEDMODULES=""
+        return 0
+    fi
     if [ "$2" = "${MOCK_LMOD_PREFIX_TARGET:-}" ]; then
         export LOADEDMODULES="${LOADEDMODULES:+${LOADEDMODULES}:}${2}-extra"
         return 0
@@ -328,6 +336,24 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 		t.Fatalf("prefix-matched module must not execute binary: stdout=%q", stdout.String())
 	}
 	t.Setenv("MOCK_LMOD_PREFIX_TARGET", "")
+
+	// If EESSI/2025.06 resolves via an alias to EESSI/2023.06, or LOADEDMODULES
+	// is left empty, launch must abort instead of running under the wrong stack.
+	t.Setenv("MOCK_LMOD_ALIAS_STACK", "EESSI/2025.06")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 {
+		t.Fatalf("aliased EESSI stack must be rejected: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+	t.Setenv("MOCK_LMOD_ALIAS_STACK", "")
+
+	t.Setenv("MOCK_LMOD_EMPTY_LOADED", "1")
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"eessi", "launch", "--stack", "2025.06", "paraview", "--version"}, &stdout, &stderr); code == 0 || stdout.Len() != 0 {
+		t.Fatalf("empty LOADEDMODULES must be rejected: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+	t.Setenv("MOCK_LMOD_EMPTY_LOADED", "")
 
 	// Missing exact GPU module MUST fail and NEVER fall back to unversioned GROMACS.
 	if err := os.WriteFile(lmodLog, nil, 0o644); err != nil {
@@ -599,6 +625,52 @@ func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
 	if err != nil || strings.Join(lower.exec, " ") != "cased --lower" {
 		t.Fatalf("exact-case --launcher cased failed: err=%v exec=%v", err, lower.exec)
 	}
+
+	// Cross-catalog sibling launcher: if two catalogs expose the same module
+	// with different launchers, info --launcher on the lower-priority catalog
+	// must include --launcher in its printed Launch command.
+	cross1 := `{
+	  "schemaVersion": 1,
+	  "backend": "eessi",
+	  "explicitSelectionRequired": true,
+	  "cvmfsRepo": "software.eessi.io",
+	  "stacks": ["2025.06"],
+	  "tools": {
+	    "shared": {
+	      "package": "Shared",
+	      "categories": ["analysis"],
+	      "apps": {
+	        "First": {
+	          "backend": "eessi",
+	          "stack": "2025.06",
+	          "module": "Shared/1.0-foss-2025b",
+	          "software_version": "1.0",
+	          "arch": ["x86_64"],
+	          "gpu": false,
+	          "exec": ["shared-first"]
+	        }
+	      }
+	    }
+	  }
+	}`
+	cross2 := strings.ReplaceAll(strings.ReplaceAll(cross1, `"First"`, `"Second"`), `"shared-first"`, `"shared-second"`)
+	b1, err := parseEESSICatalog([]byte(cross1), []string{"2025.06"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := parseEESSICatalog([]byte(cross2), []string{"2025.06"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b1[0].catalogOrder = 0
+	b2[0].catalogOrder = 1
+	combined := append(b1, b2...)
+	if !hasSiblingLaunchers(combined, b2[0]) {
+		t.Fatalf("expected hasSiblingLaunchers to detect cross-catalog sibling on same module")
+	}
+	if got := b2[0].launchCommand(hasSiblingLaunchers(combined, b2[0])); !strings.Contains(got, "--launcher Second") {
+		t.Fatalf("cross-catalog Launch command missing --launcher Second: %s", got)
+	}
 }
 
 func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
@@ -722,7 +794,28 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Preserve unreadable existing apps.json when staging/backup cannot read it.
+	if err := os.RemoveAll(eessiPath); err != nil {
+		t.Fatal(err)
+	}
+	appsPath := filepath.Join(cacheDir, "apps.json")
+	if err := os.Chmod(appsPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(appsPath, 0o644) })
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"refresh"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("expected refresh to fail when existing apps.json is unreadable")
+	}
+	if err := os.Chmod(appsPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gotApps, err = os.ReadFile(appsPath)
+	if err != nil {
+		t.Fatalf("unreadable apps.json must not be deleted on failed refresh: %v", err)
+	}
 	if string(gotApps) != appsV1 {
-		t.Fatalf("apps.json was not rolled back on eessi.json rename failure: got %s, want %s", string(gotApps), appsV1)
+		t.Fatalf("apps.json modified on failed unreadable refresh: got %s, want %s", string(gotApps), appsV1)
 	}
 }

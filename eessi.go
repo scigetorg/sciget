@@ -59,15 +59,20 @@ export LMOD_EXACT_MATCH=yes
 export EESSI_MODULE_QUIET_LOAD=1
 module load "EESSI/${stack}" >/dev/null
 module load "${mod}" >/dev/null
-if [ -n "${LOADEDMODULES:-}" ]; then
-    case ":${LOADEDMODULES}:" in
-    *":${mod}:"*) ;;
-    *)
-        echo "sciget eessi: Lmod loaded ${LOADEDMODULES} instead of exact module ${mod}" >&2
-        exit 1
-        ;;
-    esac
-fi
+case ":${LOADEDMODULES:-}:" in
+*":EESSI/${stack}:"*) ;;
+*)
+    echo "sciget eessi: Lmod loaded ${LOADEDMODULES:-<none>} instead of exact stack EESSI/${stack}" >&2
+    exit 1
+    ;;
+esac
+case ":${LOADEDMODULES:-}:" in
+*":${mod}:"*) ;;
+*)
+    echo "sciget eessi: Lmod loaded ${LOADEDMODULES:-<none>} instead of exact module ${mod}" >&2
+    exit 1
+    ;;
+esac
 exec -- "$@"
 `
 
@@ -559,8 +564,7 @@ func hasSiblingLaunchers(builds []eessiBuild, target eessiBuild) bool {
 		if b.shadowed {
 			continue
 		}
-		if b.catalogOrder == target.catalogOrder &&
-			b.stack == target.stack &&
+		if b.stack == target.stack &&
 			b.gpu == target.gpu &&
 			b.module == target.module {
 			count++

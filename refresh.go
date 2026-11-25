@@ -208,11 +208,13 @@ func refreshCatalog(read func(link string) ([]byte, string, error), cat catalog,
 	}
 	for _, file := range files {
 		path := filepath.Join(dir, file.name)
-		var old []byte
-		var oldErr error
-		old, oldErr = os.ReadFile(path)
+		old, oldErr := os.ReadFile(path)
 		if oldErr == nil && bytes.Equal(old, file.data) {
 			continue
+		}
+		if oldErr != nil && !errors.Is(oldErr, os.ErrNotExist) {
+			cleanupStaged()
+			return false, empty, fmt.Errorf("reading existing catalog %s: %w", file.name, oldErr)
 		}
 		tmpPath, err := stageCatalog(path, file.data, file.mode)
 		if err != nil {
