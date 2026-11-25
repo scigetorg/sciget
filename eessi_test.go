@@ -264,7 +264,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 	mockLmod := filepath.Join(tmp, "mock-lmod.sh")
 	lmodLog := filepath.Join(tmp, "lmod.log")
 	if err := os.WriteFile(mockLmod, []byte(`module() {
-    if [ "$1" = "purge" ]; then
+    if [ "$1" = "--force" ] && [ "$2" = "purge" ]; then
         LOADEDMODULES=""
         return 0
     fi

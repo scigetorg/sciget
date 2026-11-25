@@ -53,7 +53,7 @@ if [ -z "${lmod_init}" ] || [ ! -r "${lmod_init}" ]; then
 fi
 export FPATH="${FPATH:-}"
 source "${lmod_init}"
-module purge >/dev/null 2>&1 || true
+module --force purge >/dev/null
 export MODULEPATH="${modroot}"
 export LMOD_EXACT_MATCH=yes
 export EESSI_MODULE_QUIET_LOAD=1
