@@ -46,7 +46,6 @@ type container struct {
 	mirrors        []string // the catalog's download URLs, with {file}
 	shadowed       bool     // an earlier catalog in use has the same name
 	ambiguousStore bool     // another catalog lists an incompatible entry with the same name and build date
-	foreignDates   []string // build dates of incompatible entries with the same name in other catalogs
 	entries        []entry  // visible entries with a command, in key order
 	published      download // the image's size and SHA-256, if the catalog gives them
 }
@@ -86,19 +85,17 @@ func normalizeArch(s string) string {
 		return ""
 	}
 	a := raw
-	first, rest, hasSlash := strings.Cut(a, "/")
+	hasSlash := strings.Contains(a, "/")
 	if hasSlash {
-		if first == "" || rest == "" {
+		parts := strings.Split(a, "/")
+		if slices.Contains(parts, "") {
 			return raw
 		}
-		switch first {
+		switch parts[0] {
 		case "linux", "darwin", "windows", "freebsd", "openbsd", "netbsd":
-			a, _, _ = strings.Cut(rest, "/")
+			a = parts[1]
 		default:
-			a = first
-		}
-		if a == "" {
-			return raw
+			a = parts[0]
 		}
 	}
 	switch a {
@@ -189,7 +186,6 @@ func readContainers() ([]container, error) {
 	hasCompatible := map[string]bool{}
 	compatSameDate := map[[2]string]bool{}
 	incompatSameDate := map[[2]string]bool{}
-	incompatDates := map[string][]string{}
 	for _, cat := range used {
 		containers, mirrors, err := readCatalogSnapshot(cat.dir(cacheDir))
 		if err != nil {
@@ -204,13 +200,9 @@ func readContainers() ([]container, error) {
 				compatSameDate[[2]string{name, c.buildDate}] = true
 			} else {
 				incompatSameDate[[2]string{name, c.buildDate}] = true
-				incompatDates[name] = append(incompatDates[name], c.buildDate)
 			}
 			all = append(all, c)
 		}
-	}
-	for name, dates := range incompatDates {
-		incompatDates[name] = slices.Compact(slices.Sorted(slices.Values(dates)))
 	}
 	seenCompatible := map[string]bool{}
 	seenIncompatible := map[string]bool{}
@@ -220,9 +212,6 @@ func readContainers() ([]container, error) {
 			all[i].shadowed = seenCompatible[name]
 			seenCompatible[name] = true
 			all[i].ambiguousStore = incompatSameDate[[2]string{name, all[i].buildDate}]
-			if dates := incompatDates[name]; len(dates) > 0 {
-				all[i].foreignDates = dates
-			}
 		} else {
 			all[i].ambiguousStore = compatSameDate[[2]string{name, all[i].buildDate}]
 			if hasCompatible[name] {

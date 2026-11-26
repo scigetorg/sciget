@@ -1292,11 +1292,16 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 
 	firstApps := fmt.Sprintf(`{
 		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "aarch64", "sha256": %q}}},
-		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "aarch64"}}}
+		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"omitted": {"apps": {"omitted 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"oldshare": {"apps": {"oldshare 1.0": {"version": "20250101", "architecture": "aarch64"}}}
 	}`, armHex)
 	secondApps := fmt.Sprintf(`{
 		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "x86_64", "sha256": %q}}},
-		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "x86_64"}}}
+		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "x86_64"}}},
+		"omitted": {"apps": {"omitted 1.0": {"version": "20260101"}}},
+		"oldshare": {"apps": {"oldshare 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"oldlocal": {"apps": {"oldlocal 1.0": {"version": "20260202", "architecture": "x86_64"}}}
 	}`, x86Hex)
 
 	base := t.TempDir()
@@ -1305,10 +1310,11 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
 	t.Setenv("SCIGET_CONFIG", "")
 	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(base, "system"))
+	shareDir := filepath.Join(base, "share")
 
 	cats := []catalog{
 		{Name: "first", URL: exampleURL("first"), Use: true},
-		{Name: "second", URL: exampleURL("second"), Use: true},
+		{Name: "second", URL: exampleURL("second"), Dir: shareDir, Use: true},
 	}
 	listPath, err := catalogListPath()
 	if err != nil {
@@ -1344,16 +1350,31 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pre-populate container_dir with an ARM64 SIF header for sifonly/1.0 (no published checksum).
+	// Pre-populate container_dir with ARM64 SIF headers for sifonly/1.0, omitted/1.0, and oldlocal/1.0 (unlisted date).
 	armSIF := make([]byte, 64)
 	copy(armSIF[32:], "SIF_MAGIC\x00")
 	copy(armSIF[42:], "01\x00")
 	copy(armSIF[45:], "04") // aarch64
-	sifPath := filepath.Join(storeDir, "sifonly_1.0_20260101", "sifonly_1.0_20260101.simg")
-	if err := os.MkdirAll(filepath.Dir(sifPath), 0o755); err != nil {
+	for _, rel := range []string{
+		"sifonly_1.0_20260101/sifonly_1.0_20260101.simg",
+		"omitted_1.0_20260101/omitted_1.0_20260101.simg",
+		"oldlocal_1.0_20240101/oldlocal_1.0_20240101.simg",
+	} {
+		p := filepath.Join(storeDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, armSIF, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Put a valid older x86_64 image on second's share on 20250101 (same date first lists ARM64).
+	oldSharePath := filepath.Join(shareDir, "oldshare_1.0_20250101", "oldshare_1.0_20250101.simg")
+	if err := os.MkdirAll(filepath.Dir(oldSharePath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(sifPath, armSIF, 0o644); err != nil {
+	if err := os.WriteFile(oldSharePath, x86Body, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1368,17 +1389,47 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 		t.Errorf("info same/1.0 should reject foreign-checksum cached image:\n%s", out.String())
 	}
 
-	// SIF header arch mismatch also rejects foreign cached image without published checksum.
-	out.Reset()
-	errBuf.Reset()
-	if code := run([]string{"info", "sifonly/1.0"}, &out, &errBuf); code != 0 {
-		t.Fatalf("info sifonly/1.0 failed: %s", errBuf.String())
+	// storePath (used by install) must also reject the foreign-checksum cached image.
+	cfg, err := readConfig()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "Location:    not on this machine") {
-		t.Errorf("info sifonly/1.0 should reject foreign-arch SIF header:\n%s", out.String())
+	cs, err := readContainers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameC, err := lookupContainer(cs, "same/1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp, err := storePath(cfg, sameC); err != nil || sp != "" {
+		t.Errorf("storePath(same/1.0) = %q, %v; want empty for foreign cached image", sp, err)
 	}
 
-	// Replacing same/1.0 with the matching x86_64 bytes makes info report the local path.
+	// SIF header arch mismatch rejects foreign cached images both with explicit and omitted architecture,
+	// and rejects older local ARM64 SIFs on unlisted dates.
+	for _, name := range []string{"sifonly/1.0", "omitted/1.0", "oldlocal/1.0"} {
+		out.Reset()
+		errBuf.Reset()
+		if code := run([]string{"info", name}, &out, &errBuf); code != 0 {
+			t.Fatalf("info %s failed: %s", name, errBuf.String())
+		}
+		if !strings.Contains(out.String(), "Location:    not on this machine") {
+			t.Errorf("info %s should reject foreign-arch SIF header:\n%s", name, out.String())
+		}
+	}
+
+	// Older build on the selected catalog's share must NOT be skipped just because another catalog listed ARM64 on that date.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "oldshare/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info oldshare/1.0 failed: %s", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Location:    "+oldSharePath+" (an older build)") {
+		t.Errorf("info oldshare/1.0 should find older share build:\n%s", out.String())
+	}
+
+	// Replacing same/1.0 with the matching x86_64 bytes makes info and storePath accept it.
 	if err := os.WriteFile(samePath, x86Body, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1389,5 +1440,8 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Location:    "+samePath) {
 		t.Errorf("info same/1.0 should accept matching native image:\n%s", out.String())
+	}
+	if sp, err := storePath(cfg, sameC); err != nil || sp != samePath {
+		t.Errorf("storePath(same/1.0) after native write = %q, %v; want %q", sp, err, samePath)
 	}
 }

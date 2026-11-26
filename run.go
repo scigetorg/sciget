@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 
@@ -102,18 +101,9 @@ func locate(cfg config, c container) (location, error) {
 	if err != nil {
 		return location{}, err
 	}
-	path, err := findContainer(dir, layout, c)
+	path, err := findStoreContainer(dir, layout, c)
 	if err != nil {
 		return location{}, err
-	}
-	if path != "" && c.ambiguousStore {
-		ok, err := matchesLocalStore(path, c)
-		if err != nil {
-			return location{}, err
-		}
-		if !ok {
-			path = ""
-		}
 	}
 	if path != "" {
 		return location{path: path}, nil
@@ -137,11 +127,42 @@ func locate(cfg config, c container) (location, error) {
 	return location{}, notOnMachineError{name: c.name()}
 }
 
-// matchesLocalStore checks whether a file in container_dir matches c when
-// another catalog lists an incompatible architecture with the same name and
-// build date. It checks published size, SIF header architecture, and published
-// SHA-256 (only on these ambiguous paths, so normal lookups do no hashing).
-func matchesLocalStore(path string, c container) (bool, error) {
+// findStoreContainer returns c's path in container_dir if a matching image
+// is present, rejecting files whose SIF header indicates another architecture
+// and (for ambiguous store paths shared across architectures) verifying
+// published size and SHA-256.
+func findStoreContainer(dir, layout string, c container) (string, error) {
+	path, err := findContainer(dir, layout, c)
+	if err != nil || path == "" {
+		return path, err
+	}
+	ok, err := matchesLocalStore(path, c, c.ambiguousStore)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", nil
+	}
+	return path, nil
+}
+
+// expectedStoreArch returns the CPU architecture expected for a local SIF
+// image backing c, or "" when architecture-independent.
+func expectedStoreArch(c container) string {
+	switch arch := c.effectiveArch(); arch {
+	case "any":
+		return ""
+	case "":
+		return hostArch()
+	default:
+		return arch
+	}
+}
+
+// matchesLocalStore checks whether a file in container_dir matches c:
+// it always checks a SIF header's architecture (64-byte read) and, when
+// checkPublished is true, also checks published size and SHA-256.
+func matchesLocalStore(path string, c container, checkPublished bool) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, fmt.Errorf("locating %s: %w", c.name(), err)
@@ -149,7 +170,7 @@ func matchesLocalStore(path string, c container) (bool, error) {
 	if !info.Mode().IsRegular() {
 		return true, nil
 	}
-	if c.published.size > 0 && info.Size() != c.published.size {
+	if checkPublished && c.published.size > 0 && info.Size() != c.published.size {
 		return false, nil
 	}
 	f, err := os.Open(path)
@@ -157,18 +178,20 @@ func matchesLocalStore(path string, c container) (bool, error) {
 		return false, fmt.Errorf("locating %s: %w", c.name(), err)
 	}
 	defer f.Close()
-	if wantArch := c.effectiveArch(); wantArch != "" && wantArch != "any" {
+	if wantArch := expectedStoreArch(c); wantArch != "" {
 		var hdr [64]byte
 		if n, _ := io.ReadFull(f, hdr[:]); n >= 47 {
 			if gotArch := sifArch(hdr[:n]); gotArch != "" && gotArch != wantArch {
 				return false, nil
 			}
 		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return false, fmt.Errorf("locating %s: %w", c.name(), err)
+		if checkPublished && c.published.sha256 != "" {
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return false, fmt.Errorf("locating %s: %w", c.name(), err)
+			}
 		}
 	}
-	if c.published.sha256 != "" {
+	if checkPublished && c.published.sha256 != "" {
 		h := sha256.New()
 		if _, err := io.Copy(h, f); err != nil {
 			return false, fmt.Errorf("locating %s: %w", c.name(), err)
@@ -217,8 +240,8 @@ func sifArch(hdr []byte) string {
 }
 
 // otherBuild returns the path of the newest build of c's tool and version in
-// dir other than c's own, or "" if there is none. A build date is eight
-// digits.
+// dir other than c's own, or "" if there is none. Candidates whose SIF header
+// indicates a mismatched architecture are skipped. A build date is eight digits.
 func otherBuild(dir, layout string, c container) (string, error) {
 	if _, err := layoutPath(layout, c); err != nil {
 		return "", err
@@ -238,7 +261,7 @@ func otherBuild(dir, layout string, c container) (string, error) {
 		for i := 0; i+8 <= len(match); i++ {
 			other := c
 			other.buildDate = match[i : i+8]
-			if other.buildDate == c.buildDate || slices.Contains(c.foreignDates, other.buildDate) {
+			if other.buildDate == c.buildDate {
 				continue
 			}
 			relative, err := layoutPath(layout, other)
@@ -248,6 +271,15 @@ func otherBuild(dir, layout string, c container) (string, error) {
 			path, err := findContainer(dir, layout, other)
 			if err != nil {
 				return "", err
+			}
+			if path != "" {
+				ok, err := matchesLocalStore(path, other, false)
+				if err != nil {
+					return "", err
+				}
+				if !ok {
+					path = ""
+				}
 			}
 			if path != "" {
 				best, bestDate = path, other.buildDate

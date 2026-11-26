@@ -391,7 +391,9 @@ func TestContainerArch(t *testing.T) {
 			"fsl 6.0.13": {"version": "20260101", "architecture": "x86_64/amd/zen3"},
 			"fsl 6.0.14": {"version": "20260101", "architecture": "/arm64"},
 			"fsl 6.0.15": {"version": "20260101", "architecture": "linux/"},
-			"fsl 6.0.16": {"version": "20260101", "architecture": "noarch/"}
+			"fsl 6.0.16": {"version": "20260101", "architecture": "noarch/"},
+			"fsl 6.0.17": {"version": "20260101", "architecture": "linux/amd64/"},
+			"fsl 6.0.18": {"version": "20260101", "architecture": "amd64//zen3"}
 		}},
 		"demo_x64": {"apps": {"demo_x64 1.0": {"version": "20260101"}}},
 		"plus": {"apps": {"plus 1.0+arm64": {"version": "20260101"}}},
@@ -425,6 +427,8 @@ func TestContainerArch(t *testing.T) {
 		"fsl/6.0.14":          "/arm64",
 		"fsl/6.0.15":          "linux/",
 		"fsl/6.0.16":          "noarch/",
+		"fsl/6.0.17":          "linux/amd64/",
+		"fsl/6.0.18":          "amd64//zen3",
 		"plus/1.0+arm64":      "aarch64",
 		"script_arm64/1.0":    "any",
 		"tool-aarch64/1.0":    "aarch64",
