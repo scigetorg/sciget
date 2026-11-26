@@ -1112,6 +1112,7 @@ func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
 }
 
 func TestRefreshRollbackOnRenameFailure(t *testing.T) {
+	withHostArch(t, "x86_64")
 	tmp := t.TempDir()
 	isolateTestEnv(t, tmp)
 
@@ -4068,6 +4069,18 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 					}
 				}
 			},
+			"armblank": {
+				"package": "ArmBlank",
+				"apps": {
+					"ArmBlank 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "ArmBlank/1.0",
+						"software_version": "1.0",
+						"arch": ["aarch64", ""]
+					}
+				}
+			},
 			"x86only": {
 				"package": "X86Only",
 				"apps": {
@@ -4117,7 +4130,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 			t.Fatalf("eessi find failed (%d): %s", code, stderr.String())
 		}
 		got := stdout.String()
-		if strings.Contains(got, "armonly/1.0") || !strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
+		if strings.Contains(got, "armonly/1.0") || strings.Contains(got, "armblank/1.0") || !strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
 			t.Errorf("unexpected eessi find output on x86_64:\n%s", got)
 		}
 
@@ -4127,7 +4140,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 			t.Fatalf("eessi find --all failed (%d): %s", code, stderr.String())
 		}
 		gotAll := stdout.String()
-		if !strings.Contains(gotAll, "armonly/1.0") || !strings.Contains(gotAll, "x86only/1.0") || !strings.Contains(gotAll, "both/1.0") {
+		if !strings.Contains(gotAll, "armonly/1.0") || !strings.Contains(gotAll, "armblank/1.0") || !strings.Contains(gotAll, "x86only/1.0") || !strings.Contains(gotAll, "both/1.0") {
 			t.Errorf("unexpected eessi find --all output:\n%s", gotAll)
 		}
 	})
@@ -4140,8 +4153,83 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 			t.Fatalf("eessi find failed (%d): %s", code, stderr.String())
 		}
 		got := stdout.String()
-		if !strings.Contains(got, "armonly/1.0") || strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
+		if !strings.Contains(got, "armonly/1.0") || !strings.Contains(got, "armblank/1.0") || strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
 			t.Errorf("unexpected eessi find output on aarch64:\n%s", got)
+		}
+	})
+
+	t.Run("incompatible earlier EESSI catalog does not shadow compatible later catalog", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		subTmp := t.TempDir()
+		isolateTestEnv(t, subTmp)
+		subSrc := filepath.Join(subTmp, "src")
+		if err := os.MkdirAll(subSrc, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		armCat := `{
+			"schemaVersion": 1,
+			"backend": "eessi",
+			"explicitSelectionRequired": true,
+			"cvmfsRepo": "software.eessi.io",
+			"stacks": ["2025.06"],
+			"tools": {
+				"shared": {
+					"package": "Shared",
+					"apps": {
+						"Shared 1.0": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Shared/1.0",
+							"software_version": "1.0",
+							"arch": ["aarch64"],
+							"exec": ["shared-bin"]
+						}
+					}
+				}
+			}
+		}`
+		x86Cat := strings.Replace(armCat, `"aarch64"`, `"x86_64"`, 1)
+		if err := os.WriteFile(filepath.Join(subSrc, "arm.json"), []byte(armCat), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(subSrc, "x86.json"), []byte(x86Cat), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cat1 := filepath.Join(subSrc, "cat1.json")
+		cat2 := filepath.Join(subSrc, "cat2.json")
+		if err := os.WriteFile(cat1, []byte(`{"schemaVersion": 1, "eessiCatalogUrl": "arm.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cat2, []byte(`{"schemaVersion": 1, "eessiCatalogUrl": "x86.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// catalog add prepends, so add second (x86) first, then first (arm).
+		if code := run([]string{"catalog", "add", "second", cat2}, &stdout, &stderr); code != 0 {
+			t.Fatalf("add second failed: %s", stderr.String())
+		}
+		if code := run([]string{"catalog", "add", "first", cat1}, &stdout, &stderr); code != 0 {
+			t.Fatalf("add first failed: %s", stderr.String())
+		}
+		if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("refresh failed: %s", stderr.String())
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find", "shared"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi find shared failed: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "\tsecond\t") || strings.Contains(stdout.String(), "(shadowed)") {
+			t.Errorf("eessi find shared should list unshadowed second:\n%s", stdout.String())
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "info", "shared"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi info shared failed: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Catalog:     second") || !strings.Contains(stdout.String(), "Arch:        x86_64") {
+			t.Errorf("eessi info shared should resolve compatible second:\n%s", stdout.String())
 		}
 	})
 }

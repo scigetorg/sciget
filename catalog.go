@@ -69,15 +69,29 @@ func (c container) fileName() string { return c.image + "_" + c.buildDate }
 var hostArch = func() string { return normalizeArch(runtime.GOARCH) }
 
 var (
-	arm64Token = regexp.MustCompile(`(?i)(?:^|[._-])(arm64|aarch64)(?:$|[._-])`)
-	x86Token   = regexp.MustCompile(`(?i)(?:^|[._-])(x86[_-]64|amd64)(?:$|[._-])`)
+	arm64Token = regexp.MustCompile(`(?i)(?:^|[._+-])(arm64|aarch64)(?:$|[._+-])`)
+	x86Token   = regexp.MustCompile(`(?i)(?:^|[._+-])(x86[_-]64|amd64|x64)(?:$|[._+-])`)
 )
 
 // normalizeArch maps common CPU architecture names to canonical Linux names
 // ("x86_64", "aarch64", etc.) so catalog entries and runtime.GOARCH match.
 // Architecture-independent values ("all", "any", "noarch") normalize to "any".
+// Slash-separated platform or microarchitecture strings (such as "linux/amd64"
+// or "x86_64/amd/zen3") are reduced to their CPU architecture segment.
 func normalizeArch(s string) string {
-	switch a := strings.ToLower(strings.TrimSpace(s)); a {
+	a := strings.ToLower(strings.TrimSpace(s))
+	if a == "" {
+		return ""
+	}
+	if first, rest, ok := strings.Cut(a, "/"); ok {
+		switch first {
+		case "linux", "darwin", "windows", "freebsd", "openbsd", "netbsd":
+			a, _, _ = strings.Cut(rest, "/")
+		default:
+			a = first
+		}
+	}
+	switch a {
 	case "":
 		return ""
 	case "all", "any", "noarch":
@@ -86,14 +100,19 @@ func normalizeArch(s string) string {
 		return "x86_64"
 	case "arm64", "aarch64":
 		return "aarch64"
+	case "386", "i386", "i686":
+		return "386"
+	case "arm", "armv7", "armv7l", "armhf":
+		return "arm"
 	default:
 		return a
 	}
 }
 
 // inferArch extracts a normalized architecture from a tool or version name
-// when it carries a delimited architecture token (such as "fsl_arm64" or
-// "2.1.0_arm64"). Ambiguous or untagged names return "".
+// when it carries a delimited architecture token (such as "fsl_arm64",
+// "2.1.0_arm64", "1.0+arm64", or "demo_x64"). Ambiguous or untagged names
+// return "".
 func inferArch(tool, version string) string {
 	hasArm := arm64Token.MatchString(tool) || arm64Token.MatchString(version)
 	hasX86 := x86Token.MatchString(tool) || x86Token.MatchString(version)
@@ -105,15 +124,6 @@ func inferArch(tool, version string) string {
 	default:
 		return ""
 	}
-}
-
-// containerArch returns a container's normalized architecture, preferring an
-// explicit catalog field and falling back to tool/version naming conventions.
-func containerArch(declared, tool, version string) string {
-	if strings.TrimSpace(declared) != "" {
-		return normalizeArch(declared)
-	}
-	return inferArch(tool, version)
 }
 
 // effectiveArch returns c's normalized architecture, inferring it from tool
@@ -154,15 +164,18 @@ type catalogApp struct {
 }
 
 // readContainers returns the containers of every catalog in use, sorted by
-// tool, then version, then catalog order. A container whose name an
-// earlier catalog also has is marked shadowed.
+// tool, then version, then catalog order. Among containers with the same
+// name, the first catalog offering one compatible with this host wins and
+// shadows all others (including incompatible entries from earlier catalogs).
+// When no catalog offers a compatible container for a name, the first
+// catalog listing it wins.
 func readContainers() ([]container, error) {
 	cacheDir, used, err := usedCatalogs()
 	if err != nil {
 		return nil, err
 	}
 	var all []container
-	seen := map[string]bool{}
+	hasCompatible := map[string]bool{}
 	for _, cat := range used {
 		containers, mirrors, err := readCatalogSnapshot(cat.dir(cacheDir))
 		if err != nil {
@@ -171,9 +184,24 @@ func readContainers() ([]container, error) {
 		for _, c := range containers {
 			c.catalog = cat.Name
 			c.mirrors = mirrors
-			c.shadowed = seen[c.name()]
-			seen[c.name()] = true
+			if c.compatibleWithHost() {
+				hasCompatible[c.name()] = true
+			}
 			all = append(all, c)
+		}
+	}
+	seenCompatible := map[string]bool{}
+	seenIncompatible := map[string]bool{}
+	for i := range all {
+		name := all[i].name()
+		if all[i].compatibleWithHost() {
+			all[i].shadowed = seenCompatible[name]
+			seenCompatible[name] = true
+		} else if hasCompatible[name] {
+			all[i].shadowed = true
+		} else {
+			all[i].shadowed = seenIncompatible[name]
+			seenIncompatible[name] = true
 		}
 	}
 	// A stable sort keeps copies of a name in catalog order.
@@ -2351,6 +2379,7 @@ func parseCatalog(data []byte) ([]container, error) {
 	}
 
 	byName := map[string]*container{}
+	explicitArchs := map[string][]string{}
 	for tool, t := range tools {
 		for key, app := range t.Apps {
 			// Every string kept is checked here, once, so no output path
@@ -2407,25 +2436,15 @@ func parseCatalog(data []byte) ([]container, error) {
 				}
 			}
 
-			arch := containerArch(app.Architecture, tool, toolVersion)
 			c := byName[tool+"/"+toolVersion]
 			if c == nil {
 				c = &container{tool: tool, version: toolVersion, image: image,
-					buildDate: app.BuildDate, arch: arch, categories: t.Categories, hidden: true,
+					buildDate: app.BuildDate, categories: t.Categories, hidden: true,
 					apptainerArgs: app.ApptainerArgs, published: published}
 				byName[c.name()] = c
 			}
-			if arch != "" {
-				if c.arch == "" {
-					c.arch = arch
-				} else if arch != c.arch {
-					a, b := c.arch, arch
-					if a > b {
-						a, b = b, a
-					}
-					return nil, fmt.Errorf("catalog lists %s with architectures %q and %q",
-						c.name(), a, b)
-				}
+			if norm := normalizeArch(app.Architecture); norm != "" {
+				explicitArchs[c.name()] = append(explicitArchs[c.name()], norm)
 			}
 			if app.BuildDate != c.buildDate {
 				return nil, fmt.Errorf("catalog lists %s with build dates %s and %s",
@@ -2462,6 +2481,23 @@ func parseCatalog(data []byte) ([]container, error) {
 		containers = append(containers, *c)
 	}
 	slices.SortFunc(containers, compareContainers)
+	for i := range containers {
+		c := &containers[i]
+		distinct := slices.Compact(slices.Sorted(slices.Values(explicitArchs[c.name()])))
+		switch len(distinct) {
+		case 0:
+			c.arch = inferArch(c.tool, c.version)
+		case 1:
+			c.arch = distinct[0]
+		default:
+			quoted := make([]string, len(distinct))
+			for j, a := range distinct {
+				quoted[j] = strconv.Quote(a)
+			}
+			return nil, fmt.Errorf("catalog lists %s with conflicting architectures: %s",
+				c.name(), strings.Join(quoted, ", "))
+		}
+	}
 	return containers, nil
 }
 

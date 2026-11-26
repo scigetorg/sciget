@@ -354,19 +354,22 @@ type eessiBuild struct {
 func (b eessiBuild) name() string { return b.id + "/" + b.version }
 
 // compatibleWithHost reports whether b supports this machine's CPU
-// architecture. Builds that do not declare any architectures match every host.
+// architecture. Blank elements are ignored; builds with no non-blank
+// architecture values match every host.
 func (b eessiBuild) compatibleWithHost() bool {
-	if len(b.arch) == 0 {
-		return true
-	}
 	host := hostArch()
+	hasExplicit := false
 	for _, a := range b.arch {
 		norm := normalizeArch(a)
-		if norm == "" || norm == "any" || norm == host {
+		if norm == "" {
+			continue
+		}
+		hasExplicit = true
+		if norm == "any" || norm == host {
 			return true
 		}
 	}
-	return false
+	return !hasExplicit
 }
 
 func (b eessiBuild) moduleRoot() string {
@@ -694,14 +697,19 @@ func readCatalogEESSISnapshot(dir string) (data []byte, allowedStacks []string, 
 
 // readEESSIBuilds reads cached eessi.json files from every catalog in use.
 // Catalogs without an eessi.json (or whose catalog.json declares no
-// eessiCatalogUrl) are skipped cleanly. Earlier catalogs in use take precedence.
+// eessiCatalogUrl) are skipped cleanly. Earlier catalogs in use take precedence,
+// with host-compatible builds taking precedence over incompatible ones.
 func readEESSIBuilds() ([]eessiBuild, error) {
 	cacheDir, used, err := usedCatalogs()
 	if err != nil {
 		return nil, err
 	}
-	var all []eessiBuild
-	seen := map[string]bool{}
+	type catBuilds struct {
+		builds []eessiBuild
+		keys   []string
+	}
+	var perCat []catBuilds
+	hasCompatible := map[string]bool{}
 	for catIdx, cat := range used {
 		dir := cat.dir(cacheDir)
 		data, allowedStacks, ok, err := readCatalogEESSISnapshot(dir)
@@ -715,7 +723,7 @@ func readEESSIBuilds() ([]eessiBuild, error) {
 		if err != nil {
 			return nil, &catalogError{name: cat.Name, err: err}
 		}
-		catSeen := map[string]bool{}
+		keys := make([]string, len(builds))
 		for i := range builds {
 			builds[i].catalog = cat.Name
 			builds[i].catalogOrder = catIdx
@@ -724,14 +732,41 @@ func readEESSIBuilds() ([]eessiBuild, error) {
 				gpuKey = "1"
 			}
 			key := builds[i].id + "\x00" + builds[i].cvmfsRepo + "\x00" + builds[i].stack + "\x00" + gpuKey + "\x00" + builds[i].module + "\x00" + strings.Join(builds[i].exec, "\x00")
-			if seen[key] {
-				builds[i].shadowed = true
+			keys[i] = key
+			if builds[i].compatibleWithHost() {
+				hasCompatible[key] = true
 			}
-			catSeen[key] = true
-			all = append(all, builds[i])
 		}
-		for k := range catSeen {
-			seen[k] = true
+		perCat = append(perCat, catBuilds{builds: builds, keys: keys})
+	}
+	var all []eessiBuild
+	seenCompatible := map[string]bool{}
+	seenIncompatible := map[string]bool{}
+	for _, cb := range perCat {
+		catSeenCompatible := map[string]bool{}
+		catSeenIncompatible := map[string]bool{}
+		for i := range cb.builds {
+			key := cb.keys[i]
+			if cb.builds[i].compatibleWithHost() {
+				if seenCompatible[key] {
+					cb.builds[i].shadowed = true
+				}
+				catSeenCompatible[key] = true
+			} else if hasCompatible[key] {
+				cb.builds[i].shadowed = true
+			} else {
+				if seenIncompatible[key] {
+					cb.builds[i].shadowed = true
+				}
+				catSeenIncompatible[key] = true
+			}
+			all = append(all, cb.builds[i])
+		}
+		for k := range catSeenCompatible {
+			seenCompatible[k] = true
+		}
+		for k := range catSeenIncompatible {
+			seenIncompatible[k] = true
 		}
 	}
 	sortEESSIBuilds(all)
@@ -868,6 +903,19 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, catalo
 	}
 	if len(matched) == 0 {
 		return eessiBuild{}, fmt.Errorf("no EESSI module %q found in catalogs in use (run 'sciget eessi find' or 'sciget refresh')", query)
+	}
+
+	// Prefer builds compatible with this host's CPU architecture when any
+	// matched; fall back to incompatible matches only when explicitly queried
+	// and no compatible build exists.
+	var compatible []eessiBuild
+	for _, b := range matched {
+		if b.compatibleWithHost() {
+			compatible = append(compatible, b)
+		}
+	}
+	if len(compatible) > 0 {
+		matched = compatible
 	}
 
 	// When --launcher is given, prefer exact case-sensitive label matches first,

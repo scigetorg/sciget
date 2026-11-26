@@ -1162,3 +1162,120 @@ func TestFindArchFiltering(t *testing.T) {
 		}
 	})
 }
+
+func TestArchCatalogPrecedence(t *testing.T) {
+	const firstApps = `{
+		"shared": {"apps": {"shared 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"hid": {"apps": {"hid 1.0": {"version": "20260101", "architecture": "x86_64", "show_in_applist": false}}},
+		"armonly": {"apps": {"armonly 1.0": {"version": "20260101", "architecture": "aarch64"}}}
+	}`
+	const secondApps = `{
+		"shared": {"apps": {"shared 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"hid": {"apps": {"hid 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"armonly": {"apps": {"armonly 1.0": {"version": "20260202", "architecture": "aarch64"}}}
+	}`
+
+	base := t.TempDir()
+	setConfigHome(t, filepath.Join(base, "config"))
+	setCacheHome(t, filepath.Join(base, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("SCIGET_CONFIG", "")
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(base, "system"))
+
+	cats := []catalog{
+		{Name: "first", URL: exampleURL("first"), Use: true},
+		{Name: "second", URL: exampleURL("second"), Use: true},
+	}
+	listPath, err := catalogListPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCatalogList(listPath, cats, false); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir, err := defaultValue("cache_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, apps := range []string{firstApps, secondApps} {
+		dir := cats[i].dir(cacheDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(apps), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	withHostArch(t, "x86_64")
+
+	// Incompatible earlier entry must not shadow a compatible later entry.
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"find", "shared"}, &out, &errBuf); code != 0 {
+		t.Fatalf("find shared failed (%d): %s", code, errBuf.String())
+	}
+	if want := "shared/1.0\tsecond\t\t\t\n"; out.String() != want {
+		t.Errorf("find shared =\n%q\nwant\n%q", out.String(), want)
+	}
+
+	// find --all marks the incompatible first copy shadowed and the compatible second unshadowed.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"find", "--all", "shared"}, &out, &errBuf); code != 0 {
+		t.Fatalf("find --all shared failed (%d): %s", code, errBuf.String())
+	}
+	wantAll := "shared/1.0\tfirst\t\t\t(shadowed)\nshared/1.0\tsecond\t\t\t\n"
+	if out.String() != wantAll {
+		t.Errorf("find --all shared =\n%q\nwant\n%q", out.String(), wantAll)
+	}
+
+	// Exact lookup (info) and completion resolve to the compatible second catalog.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "shared/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info shared/1.0 failed (%d): %s", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Catalog:     second (also in: first, shadowed)") ||
+		!strings.Contains(out.String(), "20260202") {
+		t.Errorf("info shared/1.0 should resolve compatible second catalog:\n%s", out.String())
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"__complete", "info", "shared/"}, &out, &errBuf); code != 0 {
+		t.Fatalf("__complete shared/ failed (%d): %s", code, errBuf.String())
+	}
+	if want := "shared/1.0\tbuilt 20260202\n:4\n"; out.String() != want {
+		t.Errorf("__complete shared/ = %q, want %q", out.String(), want)
+	}
+
+	// TUI sees shared/1.0 from second, not hidden by first's incompatible copy.
+	cs, err := readContainers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(tuiSettings{cacheDir: t.TempDir()}, cs, nil, tuiState{})
+	if !slices.Equal(m.apps, []string{"shared"}) || m.byTool["shared"][0].catalog != "second" {
+		t.Errorf("TUI apps = %v, shared = %+v", m.apps, m.byTool["shared"])
+	}
+
+	// A hidden compatible entry in first still shadows a visible compatible entry in second.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"find", "hid"}, &out, &errBuf); code != 0 {
+		t.Fatalf("find hid failed (%d): %s", code, errBuf.String())
+	}
+	if want := "hid/1.0\tsecond\t\t\t(shadowed)\n"; out.String() != want {
+		t.Errorf("find hid = %q, want %q", out.String(), want)
+	}
+
+	// When no catalog has a compatible copy, explicit lookup falls back to the first catalog.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "armonly/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info armonly/1.0 failed (%d): %s", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Catalog:     first (also in: second, shadowed)") {
+		t.Errorf("info armonly/1.0 should fall back to first catalog:\n%s", out.String())
+	}
+}

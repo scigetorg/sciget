@@ -82,7 +82,16 @@ func TestLoadCatalog(t *testing.T) {
 		{name: "conflicting architectures", json: `{"fsl": {"apps": {
 				"fsl 1": {"version": "1", "architecture": "x86_64"},
 				"GUI-fsl 1": {"version": "1", "architecture": "aarch64"}}}}`,
-			wantErr: `catalog lists fsl/1 with architectures "aarch64" and "x86_64"`},
+			wantErr: `catalog lists fsl/1 with conflicting architectures: "aarch64", "x86_64"`},
+		{name: "three conflicting architectures sorted deterministically", json: `{"fsl": {"apps": {
+				"a-fsl 1": {"version": "1", "architecture": "x86_64"},
+				"b-fsl 1": {"version": "1", "architecture": "aarch64"},
+				"c-fsl 1": {"version": "1", "architecture": "riscv64"}}}}`,
+			wantErr: `catalog lists fsl/1 with conflicting architectures: "aarch64", "riscv64", "x86_64"`},
+		{name: "explicit architecture wins over omitted sibling on arm64-named tool", json: `{"demo_arm64": {"apps": {
+				"demo_arm64 1.0": {"version": "1", "architecture": "any"},
+				"GUI-demo_arm64 1.0": {"version": "1", "exec": "demo"}}}}`,
+			want: []string{"demo_arm64/1.0 demo_arm64_1.0_1 [] graphical"}},
 		{name: "slash in a tool", json: `{"a/b": {"apps": {"a/b 1": {"version": "1"}}}}`,
 			wantErr: `with "/" or ".."`},
 		{name: "dots in a version", json: `{"fsl": {"apps": {"fsl ..": {"version": "1"}}}}`,
@@ -376,9 +385,17 @@ func TestContainerArch(t *testing.T) {
 			"fsl 6.0.7": {"version": "20260101", "architecture": "x86_64"},
 			"fsl 6.0.8": {"version": "20260101", "architecture": "amd64"},
 			"fsl 6.0.9": {"version": "20260101", "architecture": "arm64"},
-			"fsl 6.0.10": {"version": "20260101", "architecture": "noarch"}
+			"fsl 6.0.10": {"version": "20260101", "architecture": "noarch"},
+			"fsl 6.0.11": {"version": "20260101", "architecture": "linux/amd64"},
+			"fsl 6.0.12": {"version": "20260101", "architecture": "linux/arm64/v8"},
+			"fsl 6.0.13": {"version": "20260101", "architecture": "x86_64/amd/zen3"}
 		}},
-		"script_arm64": {"apps": {"script_arm64 1.0": {"version": "20260101", "architecture": "noarch"}}},
+		"demo_x64": {"apps": {"demo_x64 1.0": {"version": "20260101"}}},
+		"plus": {"apps": {"plus 1.0+arm64": {"version": "20260101"}}},
+		"script_arm64": {"apps": {
+			"script_arm64 1.0": {"version": "20260101", "architecture": "noarch"},
+			"GUI-script_arm64 1.0": {"version": "20260101", "exec": "run"}
+		}},
 		"tool-aarch64": {"apps": {"tool-aarch64 1.0": {"version": "20260101"}}},
 		"tool_x86_64": {"apps": {"tool_x86_64 1.0": {"version": "20260101"}}},
 		"tool_amd64": {"apps": {"tool_amd64 1.0": {"version": "20260101"}}}
@@ -392,12 +409,17 @@ func TestContainerArch(t *testing.T) {
 		"aidamri_arm64/3.0.0": "aarch64",
 		"amico/2.1.0":         "",
 		"amico/2.1.0_arm64":   "aarch64",
+		"demo_x64/1.0":        "x86_64",
 		"eharmonize/1.0.0":    "",
 		"farm64/1.0":          "",
 		"fsl/6.0.7":           "x86_64",
 		"fsl/6.0.8":           "x86_64",
 		"fsl/6.0.9":           "aarch64",
 		"fsl/6.0.10":          "any",
+		"fsl/6.0.11":          "x86_64",
+		"fsl/6.0.12":          "aarch64",
+		"fsl/6.0.13":          "x86_64",
+		"plus/1.0+arm64":      "aarch64",
 		"script_arm64/1.0":    "any",
 		"tool-aarch64/1.0":    "aarch64",
 		"tool_x86_64/1.0":     "x86_64",
