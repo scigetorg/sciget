@@ -388,7 +388,9 @@ func TestContainerArch(t *testing.T) {
 			"fsl 6.0.10": {"version": "20260101", "architecture": "noarch"},
 			"fsl 6.0.11": {"version": "20260101", "architecture": "linux/amd64"},
 			"fsl 6.0.12": {"version": "20260101", "architecture": "linux/arm64/v8"},
-			"fsl 6.0.13": {"version": "20260101", "architecture": "x86_64/amd/zen3"}
+			"fsl 6.0.13": {"version": "20260101", "architecture": "x86_64/amd/zen3"},
+			"fsl 6.0.14": {"version": "20260101", "architecture": "/arm64"},
+			"fsl 6.0.15": {"version": "20260101", "architecture": "linux/"}
 		}},
 		"demo_x64": {"apps": {"demo_x64 1.0": {"version": "20260101"}}},
 		"plus": {"apps": {"plus 1.0+arm64": {"version": "20260101"}}},
@@ -419,6 +421,8 @@ func TestContainerArch(t *testing.T) {
 		"fsl/6.0.11":          "x86_64",
 		"fsl/6.0.12":          "aarch64",
 		"fsl/6.0.13":          "x86_64",
+		"fsl/6.0.14":          "/arm64",
+		"fsl/6.0.15":          "linux/",
 		"plus/1.0+arm64":      "aarch64",
 		"script_arm64/1.0":    "any",
 		"tool-aarch64/1.0":    "aarch64",
@@ -437,7 +441,7 @@ func TestContainerArch(t *testing.T) {
 	t.Run("x86_64 host", func(t *testing.T) {
 		withHostArch(t, "amd64")
 		for _, c := range cs {
-			want := c.arch != "aarch64"
+			want := c.arch == "" || c.arch == "any" || c.arch == "x86_64"
 			if got := c.compatibleWithHost(); got != want {
 				t.Errorf("%s (arch=%q): compatibleWithHost = %v, want %v", c.name(), c.arch, got, want)
 			}
@@ -446,9 +450,24 @@ func TestContainerArch(t *testing.T) {
 	t.Run("arm64 host", func(t *testing.T) {
 		withHostArch(t, "arm64")
 		for _, c := range cs {
-			want := c.arch != "x86_64"
+			want := c.arch == "" || c.arch == "any" || c.arch == "aarch64"
 			if got := c.compatibleWithHost(); got != want {
 				t.Errorf("%s (arch=%q): compatibleWithHost = %v, want %v", c.name(), c.arch, got, want)
+			}
+		}
+	})
+	t.Run("numerically equal versions break conflict ties deterministically", func(t *testing.T) {
+		const conflict = `{"demo": {"apps": {
+			"a-demo 1": {"version": "1", "architecture": "x86_64"},
+			"b-demo 1": {"version": "1", "architecture": "aarch64"},
+			"a-demo 01": {"version": "1", "architecture": "x86_64"},
+			"b-demo 01": {"version": "1", "architecture": "aarch64"}
+		}}}`
+		const want = `catalog lists demo/01 with conflicting architectures: "aarch64", "x86_64"`
+		for range 30 {
+			_, err := parseCatalog([]byte(conflict))
+			if err == nil || err.Error() != want {
+				t.Fatalf("parseCatalog error = %v, want %q", err, want)
 			}
 		}
 	})

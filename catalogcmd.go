@@ -76,8 +76,8 @@ func newCatalogCommand() *cobra.Command {
 		Use:   "use <name>",
 		Short: "Use a catalog first",
 		Long: "Use a catalog first, or last with --append. Of the catalogs in use, the first\n" +
-			"listing a name wins. Unlike module use, the change is saved until changed again.\n" +
-			"A system catalog keeps its place, after your own.",
+			"listing a name for this architecture wins. Unlike module use, the change is saved\n" +
+			"until changed again. A system catalog keeps its place, after your own.",
 		Args:              exactArgs(1),
 		ValidArgsFunction: completeCatalogNames,
 		RunE: func(cmd *cobra.Command, args []string) error {

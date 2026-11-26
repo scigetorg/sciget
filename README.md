@@ -77,7 +77,7 @@ keys, `{"schemaVersion": 1, "domains": {"neuroimaging": {...}, ...}}`;
 | Command | What it does |
 |---|---|
 | `sciget` or `sciget ui` | Browse and launch containers in a full-screen interface |
-| `sciget catalog [add\|remove\|use\|unuse\|list]` | Manage catalogs; of those in use, the first listing a name wins |
+| `sciget catalog [add\|remove\|use\|unuse\|list]` | Manage catalogs; of those in use, the first listing a name for this architecture wins |
 | `sciget refresh` | Download the latest catalogs in use |
 | `sciget find [words...]` | List the containers in the catalogs in use (`--all` includes hidden and other-architecture ones) |
 | `sciget info <tool/version>` | Show a container's details and where it is |

@@ -4081,6 +4081,18 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 					}
 				}
 			},
+			"malformed": {
+				"package": "Malformed",
+				"apps": {
+					"Malformed 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "Malformed/1.0",
+						"software_version": "1.0",
+						"arch": ["linux/"]
+					}
+				}
+			},
 			"x86only": {
 				"package": "X86Only",
 				"apps": {
@@ -4130,7 +4142,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 			t.Fatalf("eessi find failed (%d): %s", code, stderr.String())
 		}
 		got := stdout.String()
-		if strings.Contains(got, "armonly/1.0") || strings.Contains(got, "armblank/1.0") || !strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
+		if strings.Contains(got, "armonly/1.0") || strings.Contains(got, "armblank/1.0") || strings.Contains(got, "malformed/1.0") || !strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
 			t.Errorf("unexpected eessi find output on x86_64:\n%s", got)
 		}
 
@@ -4140,7 +4152,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 			t.Fatalf("eessi find --all failed (%d): %s", code, stderr.String())
 		}
 		gotAll := stdout.String()
-		if !strings.Contains(gotAll, "armonly/1.0") || !strings.Contains(gotAll, "armblank/1.0") || !strings.Contains(gotAll, "x86only/1.0") || !strings.Contains(gotAll, "both/1.0") {
+		if !strings.Contains(gotAll, "armonly/1.0") || !strings.Contains(gotAll, "armblank/1.0") || !strings.Contains(gotAll, "malformed/1.0") || !strings.Contains(gotAll, "x86only/1.0") || !strings.Contains(gotAll, "both/1.0") {
 			t.Errorf("unexpected eessi find --all output:\n%s", gotAll)
 		}
 	})
@@ -4153,7 +4165,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 			t.Fatalf("eessi find failed (%d): %s", code, stderr.String())
 		}
 		got := stdout.String()
-		if !strings.Contains(got, "armonly/1.0") || !strings.Contains(got, "armblank/1.0") || strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
+		if !strings.Contains(got, "armonly/1.0") || !strings.Contains(got, "armblank/1.0") || strings.Contains(got, "malformed/1.0") || strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
 			t.Errorf("unexpected eessi find output on aarch64:\n%s", got)
 		}
 	})
@@ -4176,7 +4188,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 				"shared": {
 					"package": "Shared",
 					"apps": {
-						"Shared 1.0": {
+						"Foreign UI": {
 							"backend": "eessi",
 							"stack": "2025.06",
 							"module": "Shared/1.0",
@@ -4185,10 +4197,52 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 							"exec": ["shared-bin"]
 						}
 					}
+				},
+				"viewer": {
+					"package": "Viewer",
+					"apps": {
+						"Viewer": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Viewer/1.0",
+							"software_version": "1.0",
+							"arch": ["aarch64"],
+							"exec": ["viewer", "--arm"]
+						},
+						"viewer": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Viewer/1.0",
+							"software_version": "1.0",
+							"arch": ["x86_64"],
+							"exec": ["viewer", "--x86"]
+						}
+					}
 				}
 			}
 		}`
-		x86Cat := strings.Replace(armCat, `"aarch64"`, `"x86_64"`, 1)
+		x86Cat := `{
+			"schemaVersion": 1,
+			"backend": "eessi",
+			"explicitSelectionRequired": true,
+			"cvmfsRepo": "software.eessi.io",
+			"stacks": ["2025.06"],
+			"tools": {
+				"shared": {
+					"package": "Shared",
+					"apps": {
+						"Native UI": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Shared/1.0",
+							"software_version": "1.0",
+							"arch": ["x86_64"],
+							"exec": ["shared-bin"]
+						}
+					}
+				}
+			}
+		}`
 		if err := os.WriteFile(filepath.Join(subSrc, "arm.json"), []byte(armCat), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -4230,6 +4284,26 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "Catalog:     second") || !strings.Contains(stdout.String(), "Arch:        x86_64") {
 			t.Errorf("eessi info shared should resolve compatible second:\n%s", stdout.String())
+		}
+
+		// Explicit --launcher still reaches a shadowed foreign-arch launcher label.
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "info", "--launcher", "Foreign UI", "shared"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi info --launcher 'Foreign UI' shared failed: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Catalog:     first") || !strings.Contains(stdout.String(), "Arch:        aarch64") {
+			t.Errorf("eessi info --launcher 'Foreign UI' should resolve first:\n%s", stdout.String())
+		}
+
+		// Exact-case --launcher Viewer beats case-insensitive native "viewer".
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "info", "--launcher", "Viewer", "viewer"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi info --launcher Viewer viewer failed: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Arch:        aarch64") {
+			t.Errorf("eessi info --launcher Viewer should resolve exact label Viewer:\n%s", stdout.String())
 		}
 	})
 }

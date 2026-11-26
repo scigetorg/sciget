@@ -79,10 +79,11 @@ var (
 // Slash-separated platform or microarchitecture strings (such as "linux/amd64"
 // or "x86_64/amd/zen3") are reduced to their CPU architecture segment.
 func normalizeArch(s string) string {
-	a := strings.ToLower(strings.TrimSpace(s))
-	if a == "" {
+	raw := strings.ToLower(strings.TrimSpace(s))
+	if raw == "" {
 		return ""
 	}
+	a := raw
 	if first, rest, ok := strings.Cut(a, "/"); ok {
 		switch first {
 		case "linux", "darwin", "windows", "freebsd", "openbsd", "netbsd":
@@ -90,10 +91,11 @@ func normalizeArch(s string) string {
 		default:
 			a = first
 		}
+		if a == "" {
+			return raw
+		}
 	}
 	switch a {
-	case "":
-		return ""
 	case "all", "any", "noarch":
 		return "any"
 	case "amd64", "x86_64", "x86-64", "x64":
@@ -2504,12 +2506,16 @@ func parseCatalog(data []byte) ([]container, error) {
 // sha256Hex matches a SHA-256 written as lowercase hex.
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// compareContainers orders containers by tool, then by version.
+// compareContainers orders containers by tool, then by version (tie-breaking
+// numerically equal versions such as "01" and "1" by raw text for determinism).
 func compareContainers(a, b container) int {
 	if n := strings.Compare(a.tool, b.tool); n != 0 {
 		return n
 	}
-	return compareVersions(a.version, b.version)
+	if n := compareVersions(a.version, b.version); n != 0 {
+		return n
+	}
+	return strings.Compare(a.version, b.version)
 }
 
 // compareVersions compares two versions, treating runs of digits as numbers so
