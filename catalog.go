@@ -31,22 +31,24 @@ var (
 // back several catalog entries (a command-line entry and its graphical
 // ones).
 type container struct {
-	tool          string // "fsl"
-	version       string // "6.0.3", the software's own version
-	image         string // "fsl_6.0.3"
-	buildDate     string // "20200905"
-	arch          string // normalized CPU architecture (e.g. "x86_64", "aarch64"), or "" if unspecified
-	licences      []string
-	dois          []string
-	apptainerArgs []string // added to every run; all entries agree
-	categories    []string
-	graphical     bool     // some entry has a graphical command
-	hidden        bool     // every entry is hidden
-	catalog       string   // the name of the catalog it comes from
-	mirrors       []string // the catalog's download URLs, with {file}
-	shadowed      bool     // an earlier catalog in use has the same name
-	entries       []entry  // visible entries with a command, in key order
-	published     download // the image's size and SHA-256, if the catalog gives them
+	tool           string // "fsl"
+	version        string // "6.0.3", the software's own version
+	image          string // "fsl_6.0.3"
+	buildDate      string // "20200905"
+	arch           string // normalized CPU architecture (e.g. "x86_64", "aarch64"), or "" if unspecified
+	licences       []string
+	dois           []string
+	apptainerArgs  []string // added to every run; all entries agree
+	categories     []string
+	graphical      bool     // some entry has a graphical command
+	hidden         bool     // every entry is hidden
+	catalog        string   // the name of the catalog it comes from
+	mirrors        []string // the catalog's download URLs, with {file}
+	shadowed       bool     // an earlier catalog in use has the same name
+	ambiguousStore bool     // another catalog lists an incompatible entry with the same name and build date
+	foreignDates   []string // build dates of incompatible entries with the same name in other catalogs
+	entries        []entry  // visible entries with a command, in key order
+	published      download // the image's size and SHA-256, if the catalog gives them
 }
 
 // entry is a visible catalog entry that runs a command in its container,
@@ -84,7 +86,11 @@ func normalizeArch(s string) string {
 		return ""
 	}
 	a := raw
-	if first, rest, ok := strings.Cut(a, "/"); ok {
+	first, rest, hasSlash := strings.Cut(a, "/")
+	if hasSlash {
+		if first == "" || rest == "" {
+			return raw
+		}
 		switch first {
 		case "linux", "darwin", "windows", "freebsd", "openbsd", "netbsd":
 			a, _, _ = strings.Cut(rest, "/")
@@ -97,6 +103,9 @@ func normalizeArch(s string) string {
 	}
 	switch a {
 	case "all", "any", "noarch":
+		if hasSlash {
+			return raw
+		}
 		return "any"
 	case "amd64", "x86_64", "x86-64", "x64":
 		return "x86_64"
@@ -178,6 +187,9 @@ func readContainers() ([]container, error) {
 	}
 	var all []container
 	hasCompatible := map[string]bool{}
+	compatSameDate := map[[2]string]bool{}
+	incompatSameDate := map[[2]string]bool{}
+	incompatDates := map[string][]string{}
 	for _, cat := range used {
 		containers, mirrors, err := readCatalogSnapshot(cat.dir(cacheDir))
 		if err != nil {
@@ -186,11 +198,19 @@ func readContainers() ([]container, error) {
 		for _, c := range containers {
 			c.catalog = cat.Name
 			c.mirrors = mirrors
+			name := c.name()
 			if c.compatibleWithHost() {
-				hasCompatible[c.name()] = true
+				hasCompatible[name] = true
+				compatSameDate[[2]string{name, c.buildDate}] = true
+			} else {
+				incompatSameDate[[2]string{name, c.buildDate}] = true
+				incompatDates[name] = append(incompatDates[name], c.buildDate)
 			}
 			all = append(all, c)
 		}
+	}
+	for name, dates := range incompatDates {
+		incompatDates[name] = slices.Compact(slices.Sorted(slices.Values(dates)))
 	}
 	seenCompatible := map[string]bool{}
 	seenIncompatible := map[string]bool{}
@@ -199,11 +219,18 @@ func readContainers() ([]container, error) {
 		if all[i].compatibleWithHost() {
 			all[i].shadowed = seenCompatible[name]
 			seenCompatible[name] = true
-		} else if hasCompatible[name] {
-			all[i].shadowed = true
+			all[i].ambiguousStore = incompatSameDate[[2]string{name, all[i].buildDate}]
+			if dates := incompatDates[name]; len(dates) > 0 {
+				all[i].foreignDates = dates
+			}
 		} else {
-			all[i].shadowed = seenIncompatible[name]
-			seenIncompatible[name] = true
+			all[i].ambiguousStore = compatSameDate[[2]string{name, all[i].buildDate}]
+			if hasCompatible[name] {
+				all[i].shadowed = true
+			} else {
+				all[i].shadowed = seenIncompatible[name]
+				seenIncompatible[name] = true
+			}
 		}
 	}
 	// A stable sort keeps copies of a name in catalog order.

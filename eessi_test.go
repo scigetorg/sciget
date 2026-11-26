@@ -4089,7 +4089,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 						"stack": "2025.06",
 						"module": "Malformed/1.0",
 						"software_version": "1.0",
-						"arch": ["linux/"]
+						"arch": ["linux/", "noarch/"]
 					}
 				}
 			},
@@ -4207,7 +4207,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 							"module": "Viewer/1.0",
 							"software_version": "1.0",
 							"arch": ["aarch64"],
-							"exec": ["viewer", "--arm"]
+							"exec": ["viewer"]
 						},
 						"viewer": {
 							"backend": "eessi",
@@ -4215,7 +4215,7 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 							"module": "Viewer/1.0",
 							"software_version": "1.0",
 							"arch": ["x86_64"],
-							"exec": ["viewer", "--x86"]
+							"exec": ["viewer"]
 						}
 					}
 				}
@@ -4238,6 +4238,19 @@ func TestEESSIFindFiltersByHostArch(t *testing.T) {
 							"software_version": "1.0",
 							"arch": ["x86_64"],
 							"exec": ["shared-bin"]
+						}
+					}
+				},
+				"viewer": {
+					"package": "Viewer",
+					"apps": {
+						"viewer": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Viewer/1.0",
+							"software_version": "1.0",
+							"arch": ["x86_64"],
+							"exec": ["viewer"]
 						}
 					}
 				}

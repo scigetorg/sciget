@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -101,6 +106,15 @@ func locate(cfg config, c container) (location, error) {
 	if err != nil {
 		return location{}, err
 	}
+	if path != "" && c.ambiguousStore {
+		ok, err := matchesLocalStore(path, c)
+		if err != nil {
+			return location{}, err
+		}
+		if !ok {
+			path = ""
+		}
+	}
 	if path != "" {
 		return location{path: path}, nil
 	}
@@ -121,6 +135,85 @@ func locate(cfg config, c container) (location, error) {
 		return location{path: path, older: true}, nil
 	}
 	return location{}, notOnMachineError{name: c.name()}
+}
+
+// matchesLocalStore checks whether a file in container_dir matches c when
+// another catalog lists an incompatible architecture with the same name and
+// build date. It checks published size, SIF header architecture, and published
+// SHA-256 (only on these ambiguous paths, so normal lookups do no hashing).
+func matchesLocalStore(path string, c container) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, fmt.Errorf("locating %s: %w", c.name(), err)
+	}
+	if !info.Mode().IsRegular() {
+		return true, nil
+	}
+	if c.published.size > 0 && info.Size() != c.published.size {
+		return false, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("locating %s: %w", c.name(), err)
+	}
+	defer f.Close()
+	if wantArch := c.effectiveArch(); wantArch != "" && wantArch != "any" {
+		var hdr [64]byte
+		if n, _ := io.ReadFull(f, hdr[:]); n >= 47 {
+			if gotArch := sifArch(hdr[:n]); gotArch != "" && gotArch != wantArch {
+				return false, nil
+			}
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return false, fmt.Errorf("locating %s: %w", c.name(), err)
+		}
+	}
+	if c.published.sha256 != "" {
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return false, fmt.Errorf("locating %s: %w", c.name(), err)
+		}
+		if hex.EncodeToString(h.Sum(nil)) != c.published.sha256 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// sifArch extracts the normalized CPU architecture from a Singularity Image
+// Format (SIF) header, or "" if hdr is not a SIF header with a known arch.
+func sifArch(hdr []byte) string {
+	if len(hdr) < 47 || !bytes.Equal(hdr[32:42], []byte("SIF_MAGIC\x00")) {
+		return ""
+	}
+	switch string(hdr[45:47]) {
+	case "01":
+		return "386"
+	case "02":
+		return "x86_64"
+	case "03":
+		return "arm"
+	case "04":
+		return "aarch64"
+	case "05":
+		return "ppc64"
+	case "06":
+		return "ppc64le"
+	case "07":
+		return "mips"
+	case "08":
+		return "mipsle"
+	case "09":
+		return "mips64"
+	case "10":
+		return "mips64le"
+	case "11":
+		return "s390x"
+	case "12":
+		return "riscv64"
+	default:
+		return ""
+	}
 }
 
 // otherBuild returns the path of the newest build of c's tool and version in
@@ -145,6 +238,9 @@ func otherBuild(dir, layout string, c container) (string, error) {
 		for i := 0; i+8 <= len(match); i++ {
 			other := c
 			other.buildDate = match[i : i+8]
+			if other.buildDate == c.buildDate || slices.Contains(c.foreignDates, other.buildDate) {
+				continue
+			}
 			relative, err := layoutPath(layout, other)
 			if err != nil || filepath.Join(dir, relative) != match || other.buildDate <= bestDate {
 				continue

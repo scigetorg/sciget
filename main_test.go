@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1277,5 +1279,115 @@ func TestArchCatalogPrecedence(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Catalog:     first (also in: second, shadowed)") {
 		t.Errorf("info armonly/1.0 should fall back to first catalog:\n%s", out.String())
+	}
+}
+
+func TestAmbiguousLocalStoreGuard(t *testing.T) {
+	armBody := []byte("arm64-image-bytes")
+	x86Body := []byte("x8664-image-bytes")
+	armSum := sha256.Sum256(armBody)
+	x86Sum := sha256.Sum256(x86Body)
+	armHex := hex.EncodeToString(armSum[:])
+	x86Hex := hex.EncodeToString(x86Sum[:])
+
+	firstApps := fmt.Sprintf(`{
+		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "aarch64", "sha256": %q}}},
+		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "aarch64"}}}
+	}`, armHex)
+	secondApps := fmt.Sprintf(`{
+		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "x86_64", "sha256": %q}}},
+		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "x86_64"}}}
+	}`, x86Hex)
+
+	base := t.TempDir()
+	setConfigHome(t, filepath.Join(base, "config"))
+	setCacheHome(t, filepath.Join(base, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("SCIGET_CONFIG", "")
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(base, "system"))
+
+	cats := []catalog{
+		{Name: "first", URL: exampleURL("first"), Use: true},
+		{Name: "second", URL: exampleURL("second"), Use: true},
+	}
+	listPath, err := catalogListPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCatalogList(listPath, cats, false); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir, err := defaultValue("cache_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, apps := range []string{firstApps, secondApps} {
+		dir := cats[i].dir(cacheDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(apps), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Pre-populate container_dir with the ARM image for same/1.0 on the same build date.
+	storeDir, err := defaultValue("container_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	samePath := filepath.Join(storeDir, "same_1.0_20260101", "same_1.0_20260101.simg")
+	if err := os.MkdirAll(filepath.Dir(samePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(samePath, armBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-populate container_dir with an ARM64 SIF header for sifonly/1.0 (no published checksum).
+	armSIF := make([]byte, 64)
+	copy(armSIF[32:], "SIF_MAGIC\x00")
+	copy(armSIF[42:], "01\x00")
+	copy(armSIF[45:], "04") // aarch64
+	sifPath := filepath.Join(storeDir, "sifonly_1.0_20260101", "sifonly_1.0_20260101.simg")
+	if err := os.MkdirAll(filepath.Dir(sifPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sifPath, armSIF, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withHostArch(t, "x86_64")
+
+	// info must not report the ARM cached file as the native x86_64 image.
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"info", "same/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info same/1.0 failed: %s", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Catalog:     second") || !strings.Contains(out.String(), "Location:    not on this machine") {
+		t.Errorf("info same/1.0 should reject foreign-checksum cached image:\n%s", out.String())
+	}
+
+	// SIF header arch mismatch also rejects foreign cached image without published checksum.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "sifonly/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info sifonly/1.0 failed: %s", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Location:    not on this machine") {
+		t.Errorf("info sifonly/1.0 should reject foreign-arch SIF header:\n%s", out.String())
+	}
+
+	// Replacing same/1.0 with the matching x86_64 bytes makes info report the local path.
+	if err := os.WriteFile(samePath, x86Body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "same/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info same/1.0 failed after native write: %s", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Location:    "+samePath) {
+		t.Errorf("info same/1.0 should accept matching native image:\n%s", out.String())
 	}
 }

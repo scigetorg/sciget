@@ -874,8 +874,11 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, catalo
 		return eessiBuild{}, usageError{fmt.Sprintf("invalid --stack %q (expected YYYY.MM)", stack)}
 	}
 	toolQuery, verQuery, hasSlash := strings.Cut(query, "/")
-	var matched, shadowedLauncher []eessiBuild
+	var matched []eessiBuild
 	for _, b := range builds {
+		if b.shadowed && catalogName == "" && launcher == "" {
+			continue
+		}
 		if catalogName != "" && b.catalog != catalogName {
 			continue
 		}
@@ -894,27 +897,17 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, catalo
 		} else {
 			ok = strings.EqualFold(b.id, query) || strings.EqualFold(b.pkg, query)
 		}
-		if !ok {
-			continue
+		if ok {
+			matched = append(matched, b)
 		}
-		if b.shadowed && catalogName == "" {
-			if launcher != "" {
-				shadowedLauncher = append(shadowedLauncher, b)
-			}
-			continue
-		}
-		matched = append(matched, b)
-	}
-	if len(matched) == 0 && len(shadowedLauncher) > 0 {
-		matched = shadowedLauncher
 	}
 	if len(matched) == 0 {
 		return eessiBuild{}, fmt.Errorf("no EESSI module %q found in catalogs in use (run 'sciget eessi find' or 'sciget refresh')", query)
 	}
 
 	// When --launcher is given, prefer exact case-sensitive label matches first,
-	// then exact command matches, before applying architecture and catalog
-	// precedence so a distinct exact launcher label or command stays reachable.
+	// then exact command matches, before applying shadowing, architecture, and
+	// catalog precedence so a distinct exact launcher label or command stays reachable.
 	if launcher != "" {
 		var exactLabel, exactCmd []eessiBuild
 		for _, b := range matched {
@@ -930,6 +923,17 @@ func lookupEESSIBuild(builds []eessiBuild, query, stack string, gpu bool, catalo
 			matched = exactLabel
 		case len(exactCmd) > 0:
 			matched = exactCmd
+		}
+		if catalogName == "" {
+			var unshadowed []eessiBuild
+			for _, b := range matched {
+				if !b.shadowed {
+					unshadowed = append(unshadowed, b)
+				}
+			}
+			if len(unshadowed) > 0 {
+				matched = unshadowed
+			}
 		}
 	}
 
