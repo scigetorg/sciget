@@ -20,6 +20,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Hooks replaced in tests to exercise cancellation around the publish commit point.
+var (
+	beforePullPublish = func() {}
+	renamePullFile    = os.Rename
+)
+
 // pullContainer downloads c into the store unless its build is already on
 // the machine, and returns where it is and whether it was downloaded. It tries
 // each of its catalog's download URLs in turn until one gives a file of the right size
@@ -108,19 +114,20 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 				err = os.Chmod(tmp, 0o644)
 			}
 			if err == nil {
+				beforePullPublish()
 				err = context.Cause(ctx)
 			}
 			if err == nil {
-				err = os.Rename(tmp, dest)
+				err = renamePullFile(tmp, dest)
 			}
 			if err != nil {
 				os.Remove(tmp)
 			}
 		}
-		if ctx.Err() != nil {
-			return location{}, false, fmt.Errorf("pulling %s: %w", c.name(), context.Cause(ctx))
-		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return location{}, false, fmt.Errorf("pulling %s: %w", c.name(), context.Cause(ctx))
+			}
 			failures = append(failures, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}
