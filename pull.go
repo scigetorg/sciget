@@ -47,6 +47,9 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 		return location{}, false, err
 	}
 	dest := filepath.Join(dir, relative)
+	if info, err := os.Stat(dest); err == nil && info.IsDir() {
+		return location{}, false, fmt.Errorf("cannot download %s: %s is a directory (move or remove that sandbox first)", c.name(), dest)
+	}
 	urls, err := downloadURLs(c)
 	if err != nil {
 		return location{}, false, err
@@ -89,6 +92,14 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 		tmp, err := downloadFile(ctx, client, u, dest, c.published, report)
 		if err == nil {
 			err = checkImage(ctx, apptainerPath, global, tmp)
+			if err == nil {
+				ok, verifyErr := matchesLocalStore(tmp, c, c.ambiguousStore, c.ambiguousStore)
+				if verifyErr != nil {
+					err = verifyErr
+				} else if !ok {
+					err = fmt.Errorf("downloaded image does not verify as %s for %s", c.name(), expectedStoreArch(c))
+				}
+			}
 			if err == nil {
 				err = os.Chmod(tmp, 0o644)
 			}

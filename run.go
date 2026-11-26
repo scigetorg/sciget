@@ -148,12 +148,11 @@ func findStoreContainer(dir, layout string, c container) (string, error) {
 }
 
 // expectedStoreArch returns the CPU architecture expected for a local SIF
-// image backing c, or "" when architecture-independent.
+// image backing c. Containers with unspecified or "any" architecture expect
+// the host's own architecture.
 func expectedStoreArch(c container) string {
 	switch arch := c.effectiveArch(); arch {
-	case "any":
-		return ""
-	case "":
+	case "", "any":
 		return hostArch()
 	default:
 		return arch
