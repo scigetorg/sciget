@@ -1292,20 +1292,27 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 
 	firstApps := fmt.Sprintf(`{
 		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "aarch64", "sha256": %q}}},
+		"samesandbox": {"apps": {"samesandbox 1.0": {"version": "20260101", "architecture": "aarch64", "sha256": %q}}},
 		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "aarch64"}}},
 		"omitted": {"apps": {"omitted 1.0": {"version": "20260101", "architecture": "aarch64"}}},
 		"oldshare": {"apps": {"oldshare 1.0": {"version": "20250101", "architecture": "aarch64"}}},
-		"oldsandbox": {"apps": {"oldsandbox 1.0": {"version": "20250101", "architecture": "aarch64"}}}
-	}`, armHex)
+		"oldsandbox": {"apps": {"oldsandbox 1.0": {"version": "20250101", "architecture": "aarch64"}}},
+		"oldsharedsandbox": {"apps": {"oldsharedsandbox 1.0": {"version": "20250101", "architecture": "aarch64"}}}
+	}`, armHex, armHex)
 	secondApps := fmt.Sprintf(`{
 		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "x86_64", "sha256": %q}}},
+		"samesandbox": {"apps": {"samesandbox 1.0": {"version": "20260101", "architecture": "x86_64", "sha256": %q}}},
 		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "x86_64"}}},
 		"omitted": {"apps": {"omitted 1.0": {"version": "20260101"}}},
 		"oldshare": {"apps": {"oldshare 1.0": {"version": "20260202", "architecture": "x86_64"}}},
 		"oldlocal": {"apps": {"oldlocal 1.0": {"version": "20260202", "architecture": "x86_64"}}},
 		"oldsandbox": {"apps": {"oldsandbox 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"oldsharedsandbox": {"apps": {"oldsharedsandbox 1.0": {"version": "20260202", "architecture": "x86_64"}}},
 		"loong": {"apps": {"loong 1.0": {"version": "20260101"}}}
-	}`, x86Hex)
+	}`, x86Hex, x86Hex)
+	thirdApps := `{
+		"oldsharedsandbox": {"apps": {"oldsharedsandbox 1.0": {"version": "20250101", "architecture": "x86_64"}}}
+	}`
 
 	base := t.TempDir()
 	setConfigHome(t, filepath.Join(base, "config"))
@@ -1318,6 +1325,7 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 	cats := []catalog{
 		{Name: "first", URL: exampleURL("first"), Use: true},
 		{Name: "second", URL: exampleURL("second"), Dir: shareDir, Use: true},
+		{Name: "third", URL: exampleURL("third"), Use: true},
 	}
 	listPath, err := catalogListPath()
 	if err != nil {
@@ -1330,7 +1338,7 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, apps := range []string{firstApps, secondApps} {
+	for i, apps := range []string{firstApps, secondApps, thirdApps} {
 		dir := cats[i].dir(cacheDir)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -1372,10 +1380,16 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 		}
 	}
 
-	// Create an older local sandbox directory on a date listed only by the ARM64 catalog.
-	sandboxPath := filepath.Join(storeDir, "oldsandbox_1.0_20250101", "oldsandbox_1.0_20250101.simg")
-	if err := os.MkdirAll(sandboxPath, 0o755); err != nil {
-		t.Fatal(err)
+	// Create local sandbox directories on dates listed by an incompatible catalog
+	// (current shared date, older foreign-only date, and older shared date).
+	for _, rel := range []string{
+		"samesandbox_1.0_20260101/samesandbox_1.0_20260101.simg",
+		"oldsandbox_1.0_20250101/oldsandbox_1.0_20250101.simg",
+		"oldsharedsandbox_1.0_20250101/oldsharedsandbox_1.0_20250101.simg",
+	} {
+		if err := os.MkdirAll(filepath.Join(storeDir, filepath.FromSlash(rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Create a LoongArch (code "13") SIF fixture for loong/1.0 (omitted architecture).
@@ -1430,7 +1444,7 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 
 	// SIF header arch mismatch rejects foreign cached images both with explicit and omitted architecture,
 	// and rejects older local ARM64 SIFs on unlisted dates.
-	for _, name := range []string{"sifonly/1.0", "omitted/1.0", "oldlocal/1.0", "oldsandbox/1.0", "loong/1.0"} {
+	for _, name := range []string{"sifonly/1.0", "omitted/1.0", "oldlocal/1.0", "samesandbox/1.0", "oldsandbox/1.0", "oldsharedsandbox/1.0", "loong/1.0"} {
 		out.Reset()
 		errBuf.Reset()
 		if code := run([]string{"info", name}, &out, &errBuf); code != 0 {

@@ -137,7 +137,7 @@ func findStoreContainer(dir, layout string, c container) (string, error) {
 	if err != nil || path == "" {
 		return path, err
 	}
-	ok, err := matchesLocalStore(path, c, c.ambiguousStore, false)
+	ok, err := matchesLocalStore(path, c, c.ambiguousStore, c.ambiguousStore)
 	if err != nil {
 		return "", err
 	}
@@ -162,18 +162,18 @@ func expectedStoreArch(c container) string {
 
 // matchesLocalStore checks whether a file or sandbox in container_dir matches c:
 // it always checks a SIF header's architecture (64-byte read), checks published
-// size and SHA-256 when checkPublished is true, and requires positive SIF
-// architecture verification when requireVerifiedArch is true (used for older
-// local store candidates whose build date is listed only by a foreign-arch
-// catalog, so unverifiable sandbox directories cannot leak across architectures).
-func matchesLocalStore(path string, c container, checkPublished, requireVerifiedArch bool) (bool, error) {
+// size and SHA-256 when checkPublished is true, and requires positive
+// verification (a matching published SHA-256 or a matching SIF architecture
+// header) when requireVerified is true so unverifiable sandbox directories and
+// unverified files cannot leak across incompatible architectures.
+func matchesLocalStore(path string, c container, checkPublished, requireVerified bool) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, fmt.Errorf("locating %s: %w", c.name(), err)
 	}
 	wantArch := expectedStoreArch(c)
 	if !info.Mode().IsRegular() {
-		return !(requireVerifiedArch && wantArch != ""), nil
+		return !requireVerified, nil
 	}
 	if checkPublished && c.published.size > 0 && info.Size() != c.published.size {
 		return false, nil
@@ -183,6 +183,7 @@ func matchesLocalStore(path string, c container, checkPublished, requireVerified
 		return false, fmt.Errorf("locating %s: %w", c.name(), err)
 	}
 	defer f.Close()
+	hasSHA := checkPublished && c.published.sha256 != ""
 	if wantArch != "" {
 		var hdr [64]byte
 		gotArch := ""
@@ -192,16 +193,16 @@ func matchesLocalStore(path string, c container, checkPublished, requireVerified
 		if gotArch != "" && gotArch != wantArch {
 			return false, nil
 		}
-		if requireVerifiedArch && gotArch != wantArch {
+		if requireVerified && !hasSHA && gotArch != wantArch {
 			return false, nil
 		}
-		if checkPublished && c.published.sha256 != "" {
+		if hasSHA {
 			if _, err := f.Seek(0, io.SeekStart); err != nil {
 				return false, fmt.Errorf("locating %s: %w", c.name(), err)
 			}
 		}
 	}
-	if checkPublished && c.published.sha256 != "" {
+	if hasSHA {
 		h := sha256.New()
 		if _, err := io.Copy(h, f); err != nil {
 			return false, fmt.Errorf("locating %s: %w", c.name(), err)
@@ -289,7 +290,7 @@ func otherBuildIn(dir, layout string, c container, isStore bool) (string, error)
 				return "", err
 			}
 			if path != "" {
-				requireVerified := isStore && slices.Contains(c.foreignOnlyDates, other.buildDate)
+				requireVerified := isStore && slices.Contains(c.foreignDates, other.buildDate)
 				ok, err := matchesLocalStore(path, other, false, requireVerified)
 				if err != nil {
 					return "", err
