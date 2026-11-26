@@ -20,6 +20,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Hooks replaced in tests to exercise cancellation around the publish commit point.
+var (
+	beforePullPublish = func() {}
+	renamePullFile    = os.Rename
+)
+
 // pullContainer downloads c into the store unless its build is already on
 // the machine, and returns where it is and whether it was downloaded. It tries
 // each of its catalog's download URLs in turn until one gives a file of the right size
@@ -47,6 +53,9 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 		return location{}, false, err
 	}
 	dest := filepath.Join(dir, relative)
+	if info, err := os.Stat(dest); err == nil && info.IsDir() {
+		return location{}, false, fmt.Errorf("cannot download %s: %s is a directory (move or remove that sandbox first)", c.name(), dest)
+	}
 	urls, err := downloadURLs(c)
 	if err != nil {
 		return location{}, false, err
@@ -90,19 +99,35 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 		if err == nil {
 			err = checkImage(ctx, apptainerPath, global, tmp)
 			if err == nil {
+				// downloadFile already verified published size and SHA-256;
+				// check only the 64-byte SIF header here (requiring positive
+				// arch verification on ambiguous paths without a checksum).
+				requireArch := c.ambiguousStore && c.published.sha256 == ""
+				ok, verifyErr := matchesLocalStore(tmp, c, false, requireArch)
+				if verifyErr != nil {
+					err = verifyErr
+				} else if !ok {
+					err = fmt.Errorf("downloaded image does not verify as %s for %s", c.name(), expectedStoreArch(c))
+				}
+			}
+			if err == nil {
 				err = os.Chmod(tmp, 0o644)
 			}
 			if err == nil {
-				err = os.Rename(tmp, dest)
+				beforePullPublish()
+				err = context.Cause(ctx)
+			}
+			if err == nil {
+				err = renamePullFile(tmp, dest)
 			}
 			if err != nil {
 				os.Remove(tmp)
 			}
 		}
-		if ctx.Err() != nil {
-			return location{}, false, fmt.Errorf("pulling %s: %w", c.name(), context.Cause(ctx))
-		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return location{}, false, fmt.Errorf("pulling %s: %w", c.name(), context.Cause(ctx))
+			}
 			failures = append(failures, fmt.Sprintf("%s: %v", host, err))
 			continue
 		}

@@ -62,7 +62,7 @@ func storePath(cfg config, c container) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return findContainer(dir, layout, c)
+	return findStoreContainer(dir, layout, c)
 }
 
 // moduleUseLine returns the module use command for catalog's module

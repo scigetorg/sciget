@@ -77,6 +77,21 @@ func TestLoadCatalog(t *testing.T) {
 			wantErr: "has a control character"},
 		{name: "escape in exec", json: `{"fsl": {"apps": {"GUI-fsl 1": {"version": "1", "exec": "x\u001b[2J"}}}}`,
 			wantErr: "has a control character"},
+		{name: "escape in architecture", json: `{"fsl": {"apps": {"fsl 1": {"version": "1", "architecture": "aarch64\u001b[2J"}}}}`,
+			wantErr: "has a control character"},
+		{name: "conflicting architectures", json: `{"fsl": {"apps": {
+				"fsl 1": {"version": "1", "architecture": "x86_64"},
+				"GUI-fsl 1": {"version": "1", "architecture": "aarch64"}}}}`,
+			wantErr: `catalog lists fsl/1 with conflicting architectures: "aarch64", "x86_64"`},
+		{name: "three conflicting architectures sorted deterministically", json: `{"fsl": {"apps": {
+				"a-fsl 1": {"version": "1", "architecture": "x86_64"},
+				"b-fsl 1": {"version": "1", "architecture": "aarch64"},
+				"c-fsl 1": {"version": "1", "architecture": "riscv64"}}}}`,
+			wantErr: `catalog lists fsl/1 with conflicting architectures: "aarch64", "riscv64", "x86_64"`},
+		{name: "explicit architecture wins over omitted sibling on arm64-named tool", json: `{"demo_arm64": {"apps": {
+				"demo_arm64 1.0": {"version": "1", "architecture": "any"},
+				"GUI-demo_arm64 1.0": {"version": "1", "exec": "demo"}}}}`,
+			want: []string{"demo_arm64/1.0 demo_arm64_1.0_1 [] graphical"}},
 		{name: "slash in a tool", json: `{"a/b": {"apps": {"a/b 1": {"version": "1"}}}}`,
 			wantErr: `with "/" or ".."`},
 		{name: "dots in a version", json: `{"fsl": {"apps": {"fsl ..": {"version": "1"}}}}`,
@@ -347,4 +362,121 @@ func TestPrintable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func withHostArch(t *testing.T, arch string) {
+	t.Helper()
+	prev := hostArch
+	hostArch = func() string { return normalizeArch(arch) }
+	t.Cleanup(func() { hostArch = prev })
+}
+
+func TestContainerArch(t *testing.T) {
+	const raw = `{
+		"aidamri": {"apps": {"aidamri 3.0.0": {"version": "20261014", "image": "aidamri_3.0.0"}}},
+		"aidamri_arm64": {"apps": {"aidamri_arm64 3.0.0": {"version": "20261014", "image": "aidamri_arm64_3.0.0"}}},
+		"amico": {"apps": {
+			"amico 2.1.0": {"version": "20250628", "image": "amico_2.1.0"},
+			"amico 2.1.0 arm64": {"version": "20260512", "image": "amico_2.1.0_arm64", "architecture": "aarch64"}
+		}},
+		"eharmonize": {"apps": {"eharmonize 1.0.0": {"version": "20260101", "image": "eharmonize_1.0.0"}}},
+		"farm64": {"apps": {"farm64 1.0": {"version": "20260101", "image": "farm64_1.0"}}},
+		"fsl": {"apps": {
+			"fsl 6.0.7": {"version": "20260101", "architecture": "x86_64"},
+			"fsl 6.0.8": {"version": "20260101", "architecture": "amd64"},
+			"fsl 6.0.9": {"version": "20260101", "architecture": "arm64"},
+			"fsl 6.0.10": {"version": "20260101", "architecture": "noarch"},
+			"fsl 6.0.11": {"version": "20260101", "architecture": "linux/amd64"},
+			"fsl 6.0.12": {"version": "20260101", "architecture": "linux/arm64/v8"},
+			"fsl 6.0.13": {"version": "20260101", "architecture": "x86_64/amd/zen3"},
+			"fsl 6.0.14": {"version": "20260101", "architecture": "/arm64"},
+			"fsl 6.0.15": {"version": "20260101", "architecture": "linux/"},
+			"fsl 6.0.16": {"version": "20260101", "architecture": "noarch/"},
+			"fsl 6.0.17": {"version": "20260101", "architecture": "linux/amd64/"},
+			"fsl 6.0.18": {"version": "20260101", "architecture": "amd64//zen3"},
+			"fsl 6.0.19": {"version": "20260101", "architecture": "linux/ /arm64"}
+		}},
+		"demo_x64": {"apps": {"demo_x64 1.0": {"version": "20260101"}}},
+		"plus": {"apps": {"plus 1.0+arm64": {"version": "20260101"}}},
+		"script_arm64": {"apps": {
+			"script_arm64 1.0": {"version": "20260101", "architecture": "noarch"},
+			"GUI-script_arm64 1.0": {"version": "20260101", "exec": "run"}
+		}},
+		"tool-aarch64": {"apps": {"tool-aarch64 1.0": {"version": "20260101"}}},
+		"tool_x86_64": {"apps": {"tool_x86_64 1.0": {"version": "20260101"}}},
+		"tool_amd64": {"apps": {"tool_amd64 1.0": {"version": "20260101"}}}
+	}`
+	cs, err := parseCatalog([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArch := map[string]string{
+		"aidamri/3.0.0":       "",
+		"aidamri_arm64/3.0.0": "aarch64",
+		"amico/2.1.0":         "",
+		"amico/2.1.0_arm64":   "aarch64",
+		"demo_x64/1.0":        "x86_64",
+		"eharmonize/1.0.0":    "",
+		"farm64/1.0":          "",
+		"fsl/6.0.7":           "x86_64",
+		"fsl/6.0.8":           "x86_64",
+		"fsl/6.0.9":           "aarch64",
+		"fsl/6.0.10":          "any",
+		"fsl/6.0.11":          "x86_64",
+		"fsl/6.0.12":          "aarch64",
+		"fsl/6.0.13":          "x86_64",
+		"fsl/6.0.14":          "/arm64",
+		"fsl/6.0.15":          "linux/",
+		"fsl/6.0.16":          "noarch/",
+		"fsl/6.0.17":          "linux/amd64/",
+		"fsl/6.0.18":          "amd64//zen3",
+		"fsl/6.0.19":          "linux/ /arm64",
+		"plus/1.0+arm64":      "aarch64",
+		"script_arm64/1.0":    "any",
+		"tool-aarch64/1.0":    "aarch64",
+		"tool_x86_64/1.0":     "x86_64",
+		"tool_amd64/1.0":      "x86_64",
+	}
+	if len(cs) != len(wantArch) {
+		t.Fatalf("parsed %d containers, want %d", len(cs), len(wantArch))
+	}
+	for _, c := range cs {
+		if got, ok := wantArch[c.name()]; !ok || c.arch != got {
+			t.Errorf("%s: arch = %q, want %q", c.name(), c.arch, got)
+		}
+	}
+
+	t.Run("x86_64 host", func(t *testing.T) {
+		withHostArch(t, "amd64")
+		for _, c := range cs {
+			want := c.arch == "" || c.arch == "any" || c.arch == "x86_64"
+			if got := c.compatibleWithHost(); got != want {
+				t.Errorf("%s (arch=%q): compatibleWithHost = %v, want %v", c.name(), c.arch, got, want)
+			}
+		}
+	})
+	t.Run("arm64 host", func(t *testing.T) {
+		withHostArch(t, "arm64")
+		for _, c := range cs {
+			want := c.arch == "" || c.arch == "any" || c.arch == "aarch64"
+			if got := c.compatibleWithHost(); got != want {
+				t.Errorf("%s (arch=%q): compatibleWithHost = %v, want %v", c.name(), c.arch, got, want)
+			}
+		}
+	})
+	t.Run("numerically equal versions break conflict ties deterministically", func(t *testing.T) {
+		const conflict = `{"demo": {"apps": {
+			"a-demo 1": {"version": "1", "architecture": "x86_64"},
+			"b-demo 1": {"version": "1", "architecture": "aarch64"},
+			"a-demo 01": {"version": "1", "architecture": "x86_64"},
+			"b-demo 01": {"version": "1", "architecture": "aarch64"}
+		}}}`
+		const want = `catalog lists demo/01 with conflicting architectures: "aarch64", "x86_64"`
+		for range 30 {
+			_, err := parseCatalog([]byte(conflict))
+			if err == nil || err.Error() != want {
+				t.Fatalf("parseCatalog error = %v, want %q", err, want)
+			}
+		}
+	})
 }

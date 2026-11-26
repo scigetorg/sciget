@@ -140,3 +140,64 @@ func TestCompleteNames(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchAndCompleteArch(t *testing.T) {
+	mixed := []container{
+		{tool: "aidamri", version: "3.0.0", buildDate: "20261014"},
+		{tool: "aidamri_arm64", version: "3.0.0", buildDate: "20261014"},
+		{tool: "amico", version: "2.1.0", buildDate: "20250628"},
+		{tool: "amico", version: "2.1.0_arm64", buildDate: "20260512", arch: "aarch64"},
+		{tool: "eharmonize", version: "1.0.0", buildDate: "20260101"},
+		{tool: "fsl", version: "6.0.7", buildDate: "20260101", arch: "x86_64"},
+	}
+
+	t.Run("x86_64 hides arm64 unless --all", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		var got []string
+		for _, c := range matchContainers(mixed, nil, false) {
+			got = append(got, c.name())
+		}
+		want := []string{"aidamri/3.0.0", "amico/2.1.0", "eharmonize/1.0.0", "fsl/6.0.7"}
+		if !slices.Equal(got, want) {
+			t.Errorf("matchContainers = %q, want %q", got, want)
+		}
+
+		tools, _ := completeNames(mixed, "", false)
+		wantTools := []string{"aidamri/", "amico/", "eharmonize/", "fsl/"}
+		if !slices.Equal(tools, wantTools) {
+			t.Errorf("completeNames tools = %q, want %q", tools, wantTools)
+		}
+		vers, _ := completeNames(mixed, "amico/", false)
+		wantVers := []string{"amico/2.1.0\tbuilt 20250628"}
+		if !slices.Equal(vers, wantVers) {
+			t.Errorf("completeNames versions = %q, want %q", vers, wantVers)
+		}
+
+		var gotAll []string
+		for _, c := range matchContainers(mixed, nil, true) {
+			gotAll = append(gotAll, c.name())
+		}
+		wantAll := []string{"aidamri/3.0.0", "aidamri_arm64/3.0.0", "amico/2.1.0", "amico/2.1.0_arm64", "eharmonize/1.0.0", "fsl/6.0.7"}
+		if !slices.Equal(gotAll, wantAll) {
+			t.Errorf("matchContainers --all = %q, want %q", gotAll, wantAll)
+		}
+	})
+
+	t.Run("aarch64 hides explicit x86_64 unless --all", func(t *testing.T) {
+		withHostArch(t, "aarch64")
+		var got []string
+		for _, c := range matchContainers(mixed, nil, false) {
+			got = append(got, c.name())
+		}
+		want := []string{"aidamri/3.0.0", "aidamri_arm64/3.0.0", "amico/2.1.0", "amico/2.1.0_arm64", "eharmonize/1.0.0"}
+		if !slices.Equal(got, want) {
+			t.Errorf("matchContainers = %q, want %q", got, want)
+		}
+
+		tools, _ := completeNames(mixed, "", false)
+		wantTools := []string{"aidamri/", "aidamri_arm64/", "amico/", "eharmonize/"}
+		if !slices.Equal(tools, wantTools) {
+			t.Errorf("completeNames tools = %q, want %q", tools, wantTools)
+		}
+	})
+}

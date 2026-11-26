@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1069,5 +1071,538 @@ func TestExitCode(t *testing.T) {
 				t.Errorf("stderr = %q, want %q", got, tt.wantStderr)
 			}
 		})
+	}
+}
+
+func TestFindArchFiltering(t *testing.T) {
+	const mixedCatalog = `{
+		"amico": {"categories": ["diffusion imaging"], "apps": {
+			"amico 2.1.0": {"version": "20250628", "image": "amico_2.1.0"},
+			"amico 2.1.0 arm64": {"version": "20260512", "image": "amico_2.1.0_arm64", "architecture": "aarch64"}
+		}},
+		"fsl": {"categories": ["image registration"], "apps": {
+			"fsl 6.0.7": {"version": "20260101", "architecture": "x86_64"}
+		}},
+		"fsl_arm64": {"categories": ["image registration"], "apps": {
+			"fsl_arm64 6.0.7.23": {"version": "20261013", "image": "fsl_arm64_6.0.7.23"}
+		}}
+	}`
+
+	base := t.TempDir()
+	setConfigHome(t, filepath.Join(base, "config"))
+	setCacheHome(t, filepath.Join(base, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("SCIGET_CONFIG", "")
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(base, "system"))
+
+	cat := catalog{Name: "neuroimaging", URL: exampleURL("neuroimaging"), Use: true}
+	listPath, err := catalogListPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCatalogList(listPath, []catalog{cat}, false); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir, err := defaultValue("cache_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := cat.dir(cacheDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(mixedCatalog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("x86_64 hides visible arm64 tools and versions", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		var out, errBuf bytes.Buffer
+		if code := run([]string{"find"}, &out, &errBuf); code != 0 {
+			t.Fatalf("find failed (%d): %s", code, errBuf.String())
+		}
+		want := "amico/2.1.0\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"fsl/6.0.7\tneuroimaging\timage registration\t\t\n"
+		if out.String() != want {
+			t.Errorf("find stdout =\n%s\nwant\n%s", out.String(), want)
+		}
+
+		out.Reset()
+		errBuf.Reset()
+		if code := run([]string{"find", "--all"}, &out, &errBuf); code != 0 {
+			t.Fatalf("find --all failed (%d): %s", code, errBuf.String())
+		}
+		wantAll := "amico/2.1.0\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"amico/2.1.0_arm64\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"fsl/6.0.7\tneuroimaging\timage registration\t\t\n" +
+			"fsl_arm64/6.0.7.23\tneuroimaging\timage registration\t\t\n"
+		if out.String() != wantAll {
+			t.Errorf("find --all stdout =\n%s\nwant\n%s", out.String(), wantAll)
+		}
+
+		out.Reset()
+		errBuf.Reset()
+		if code := run([]string{"__complete", "info", "fsl"}, &out, &errBuf); code != 0 {
+			t.Fatalf("__complete failed (%d): %s", code, errBuf.String())
+		}
+		if out.String() != "fsl/\n:6\n" {
+			t.Errorf("__complete info fsl =\n%s\nwant fsl/ only", out.String())
+		}
+	})
+
+	t.Run("aarch64 hides explicit x86_64 and shows arm64", func(t *testing.T) {
+		withHostArch(t, "aarch64")
+		var out, errBuf bytes.Buffer
+		if code := run([]string{"find"}, &out, &errBuf); code != 0 {
+			t.Fatalf("find failed (%d): %s", code, errBuf.String())
+		}
+		want := "amico/2.1.0\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"amico/2.1.0_arm64\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"fsl_arm64/6.0.7.23\tneuroimaging\timage registration\t\t\n"
+		if out.String() != want {
+			t.Errorf("find stdout =\n%s\nwant\n%s", out.String(), want)
+		}
+	})
+}
+
+func TestArchCatalogPrecedence(t *testing.T) {
+	const firstApps = `{
+		"shared": {"apps": {"shared 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"hid": {"apps": {"hid 1.0": {"version": "20260101", "architecture": "x86_64", "show_in_applist": false}}},
+		"armonly": {"apps": {"armonly 1.0": {"version": "20260101", "architecture": "aarch64"}}}
+	}`
+	const secondApps = `{
+		"shared": {"apps": {"shared 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"hid": {"apps": {"hid 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"armonly": {"apps": {"armonly 1.0": {"version": "20260202", "architecture": "aarch64"}}}
+	}`
+
+	base := t.TempDir()
+	setConfigHome(t, filepath.Join(base, "config"))
+	setCacheHome(t, filepath.Join(base, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("SCIGET_CONFIG", "")
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(base, "system"))
+
+	cats := []catalog{
+		{Name: "first", URL: exampleURL("first"), Use: true},
+		{Name: "second", URL: exampleURL("second"), Use: true},
+	}
+	listPath, err := catalogListPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCatalogList(listPath, cats, false); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir, err := defaultValue("cache_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, apps := range []string{firstApps, secondApps} {
+		dir := cats[i].dir(cacheDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(apps), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	withHostArch(t, "x86_64")
+
+	// Incompatible earlier entry must not shadow a compatible later entry.
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"find", "shared"}, &out, &errBuf); code != 0 {
+		t.Fatalf("find shared failed (%d): %s", code, errBuf.String())
+	}
+	if want := "shared/1.0\tsecond\t\t\t\n"; out.String() != want {
+		t.Errorf("find shared =\n%q\nwant\n%q", out.String(), want)
+	}
+
+	// find --all marks the incompatible first copy shadowed and the compatible second unshadowed.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"find", "--all", "shared"}, &out, &errBuf); code != 0 {
+		t.Fatalf("find --all shared failed (%d): %s", code, errBuf.String())
+	}
+	wantAll := "shared/1.0\tfirst\t\t\t(shadowed)\nshared/1.0\tsecond\t\t\t\n"
+	if out.String() != wantAll {
+		t.Errorf("find --all shared =\n%q\nwant\n%q", out.String(), wantAll)
+	}
+
+	// Exact lookup (info) and completion resolve to the compatible second catalog.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "shared/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info shared/1.0 failed (%d): %s", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Catalog:     second (also in: first, shadowed)") ||
+		!strings.Contains(out.String(), "20260202") {
+		t.Errorf("info shared/1.0 should resolve compatible second catalog:\n%s", out.String())
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"__complete", "info", "shared/"}, &out, &errBuf); code != 0 {
+		t.Fatalf("__complete shared/ failed (%d): %s", code, errBuf.String())
+	}
+	if want := "shared/1.0\tbuilt 20260202\n:4\n"; out.String() != want {
+		t.Errorf("__complete shared/ = %q, want %q", out.String(), want)
+	}
+
+	// TUI sees shared/1.0 from second, not hidden by first's incompatible copy.
+	cs, err := readContainers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(tuiSettings{cacheDir: t.TempDir()}, cs, nil, tuiState{})
+	if !slices.Equal(m.apps, []string{"shared"}) || m.byTool["shared"][0].catalog != "second" {
+		t.Errorf("TUI apps = %v, shared = %+v", m.apps, m.byTool["shared"])
+	}
+
+	// A hidden compatible entry in first still shadows a visible compatible entry in second.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"find", "hid"}, &out, &errBuf); code != 0 {
+		t.Fatalf("find hid failed (%d): %s", code, errBuf.String())
+	}
+	if want := "hid/1.0\tsecond\t\t\t(shadowed)\n"; out.String() != want {
+		t.Errorf("find hid = %q, want %q", out.String(), want)
+	}
+
+	// When no catalog has a compatible copy, explicit lookup falls back to the first catalog.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "armonly/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info armonly/1.0 failed (%d): %s", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Catalog:     first (also in: second, shadowed)") {
+		t.Errorf("info armonly/1.0 should fall back to first catalog:\n%s", out.String())
+	}
+}
+
+func TestAmbiguousLocalStoreGuard(t *testing.T) {
+	armBody := []byte("arm64-image-bytes")
+	x86Body := []byte("x8664-image-bytes")
+	armSum := sha256.Sum256(armBody)
+	x86Sum := sha256.Sum256(x86Body)
+	armHex := hex.EncodeToString(armSum[:])
+	x86Hex := hex.EncodeToString(x86Sum[:])
+
+	firstApps := fmt.Sprintf(`{
+		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "aarch64", "sha256": %q}}},
+		"samesandbox": {"apps": {"samesandbox 1.0": {"version": "20260101", "architecture": "aarch64", "sha256": %q}}},
+		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"omitted": {"apps": {"omitted 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"anycur": {"apps": {"anycur 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"anyold": {"apps": {"anyold 1.0": {"version": "20250101", "architecture": "aarch64"}}},
+		"oldshare": {"apps": {"oldshare 1.0": {"version": "20250101", "architecture": "aarch64"}}},
+		"oldsandbox": {"apps": {"oldsandbox 1.0": {"version": "20250101", "architecture": "aarch64"}}},
+		"oldsharedsandbox": {"apps": {"oldsharedsandbox 1.0": {"version": "20250101", "architecture": "aarch64"}}}
+	}`, armHex, armHex)
+	secondApps := fmt.Sprintf(`{
+		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "x86_64", "sha256": %q}}},
+		"samesandbox": {"apps": {"samesandbox 1.0": {"version": "20260101", "architecture": "x86_64", "sha256": %q}}},
+		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "x86_64"}}},
+		"omitted": {"apps": {"omitted 1.0": {"version": "20260101"}}},
+		"anycur": {"apps": {"anycur 1.0": {"version": "20260101", "architecture": "any"}}},
+		"anyold": {"apps": {"anyold 1.0": {"version": "20260202", "architecture": "any"}}},
+		"oldshare": {"apps": {"oldshare 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"oldlocal": {"apps": {"oldlocal 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"oldsandbox": {"apps": {"oldsandbox 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"oldsharedsandbox": {"apps": {"oldsharedsandbox 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"loong": {"apps": {"loong 1.0": {"version": "20260101"}}}
+	}`, x86Hex, x86Hex)
+	thirdApps := `{
+		"oldsharedsandbox": {"apps": {"oldsharedsandbox 1.0": {"version": "20250101", "architecture": "x86_64"}}}
+	}`
+
+	base := t.TempDir()
+	setConfigHome(t, filepath.Join(base, "config"))
+	setCacheHome(t, filepath.Join(base, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("SCIGET_CONFIG", "")
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(base, "system"))
+	shareDir := filepath.Join(base, "share")
+
+	cats := []catalog{
+		{Name: "first", URL: exampleURL("first"), Use: true},
+		{Name: "second", URL: exampleURL("second"), Dir: shareDir, Use: true},
+		{Name: "third", URL: exampleURL("third"), Use: true},
+	}
+	listPath, err := catalogListPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCatalogList(listPath, cats, false); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir, err := defaultValue("cache_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, apps := range []string{firstApps, secondApps, thirdApps} {
+		dir := cats[i].dir(cacheDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(apps), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Pre-populate container_dir with the ARM image for same/1.0 on the same build date.
+	storeDir, err := defaultValue("container_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	samePath := filepath.Join(storeDir, "same_1.0_20260101", "same_1.0_20260101.simg")
+	if err := os.MkdirAll(filepath.Dir(samePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(samePath, armBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-populate container_dir with ARM64 SIF headers for sifonly/1.0, omitted/1.0, and oldlocal/1.0 (unlisted date).
+	armSIF := make([]byte, 64)
+	copy(armSIF[32:], "SIF_MAGIC\x00")
+	copy(armSIF[42:], "01\x00")
+	copy(armSIF[45:], "04") // aarch64
+	for _, rel := range []string{
+		"sifonly_1.0_20260101/sifonly_1.0_20260101.simg",
+		"omitted_1.0_20260101/omitted_1.0_20260101.simg",
+		"anycur_1.0_20260101/anycur_1.0_20260101.simg",
+		"anyold_1.0_20250101/anyold_1.0_20250101.simg",
+		"oldlocal_1.0_20240101/oldlocal_1.0_20240101.simg",
+	} {
+		p := filepath.Join(storeDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, armSIF, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create local sandbox directories on dates listed by an incompatible catalog
+	// (current shared date, older foreign-only date, and older shared date).
+	for _, rel := range []string{
+		"samesandbox_1.0_20260101/samesandbox_1.0_20260101.simg",
+		"oldsandbox_1.0_20250101/oldsandbox_1.0_20250101.simg",
+		"oldsharedsandbox_1.0_20250101/oldsharedsandbox_1.0_20250101.simg",
+	} {
+		if err := os.MkdirAll(filepath.Join(storeDir, filepath.FromSlash(rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create a LoongArch (code "13") SIF fixture for loong/1.0 (omitted architecture).
+	loongSIF := make([]byte, 64)
+	copy(loongSIF[32:], "SIF_MAGIC\x00")
+	copy(loongSIF[42:], "01\x00")
+	copy(loongSIF[45:], "13") // loong64
+	loongPath := filepath.Join(storeDir, "loong_1.0_20260101", "loong_1.0_20260101.simg")
+	if err := os.MkdirAll(filepath.Dir(loongPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(loongPath, loongSIF, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Put a valid older x86_64 image on second's share on 20250101 (same date first lists ARM64).
+	oldSharePath := filepath.Join(shareDir, "oldshare_1.0_20250101", "oldshare_1.0_20250101.simg")
+	if err := os.MkdirAll(filepath.Dir(oldSharePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldSharePath, x86Body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	withHostArch(t, "x86_64")
+
+	// info must not report the ARM cached file as the native x86_64 image.
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"info", "same/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info same/1.0 failed: %s", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Catalog:     second") || !strings.Contains(out.String(), "Location:    not on this machine") {
+		t.Errorf("info same/1.0 should reject foreign-checksum cached image:\n%s", out.String())
+	}
+
+	// storePath (used by install) must also reject the foreign-checksum cached image.
+	cfg, err := readConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := readContainers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameC, err := lookupContainer(cs, "same/1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp, err := storePath(cfg, sameC); err != nil || sp != "" {
+		t.Errorf("storePath(same/1.0) = %q, %v; want empty for foreign cached image", sp, err)
+	}
+
+	// SIF header arch mismatch rejects foreign cached images both with explicit and omitted architecture,
+	// and rejects older local ARM64 SIFs on unlisted dates.
+	for _, name := range []string{"sifonly/1.0", "omitted/1.0", "anycur/1.0", "anyold/1.0", "oldlocal/1.0", "samesandbox/1.0", "oldsandbox/1.0", "oldsharedsandbox/1.0", "loong/1.0"} {
+		out.Reset()
+		errBuf.Reset()
+		if code := run([]string{"info", name}, &out, &errBuf); code != 0 {
+			t.Fatalf("info %s failed: %s", name, errBuf.String())
+		}
+		if !strings.Contains(out.String(), "Location:    not on this machine") {
+			t.Errorf("info %s should reject foreign-arch SIF header:\n%s", name, out.String())
+		}
+	}
+
+	// Older build on the selected catalog's share must NOT be skipped just because another catalog listed ARM64 on that date.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "oldshare/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info oldshare/1.0 failed: %s", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Location:    "+oldSharePath+" (an older build)") {
+		t.Errorf("info oldshare/1.0 should find older share build:\n%s", out.String())
+	}
+
+	// Replacing same/1.0 with the matching x86_64 bytes makes info and storePath accept it.
+	if err := os.WriteFile(samePath, x86Body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "same/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info same/1.0 failed after native write: %s", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Location:    "+samePath) {
+		t.Errorf("info same/1.0 should accept matching native image:\n%s", out.String())
+	}
+	if sp, err := storePath(cfg, sameC); err != nil || sp != samePath {
+		t.Errorf("storePath(same/1.0) after native write = %q, %v; want %q", sp, err, samePath)
+	}
+}
+
+func TestPullAmbiguousStoreGuards(t *testing.T) {
+	withHostArch(t, "x86_64")
+	var requests int
+	x86SIF := make([]byte, 64)
+	copy(x86SIF[32:], "SIF_MAGIC\x00")
+	copy(x86SIF[42:], "01\x00")
+	copy(x86SIF[45:], "02") // x86_64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if strings.HasPrefix(r.URL.Path, "/verified_") {
+			_, _ = w.Write(x86SIF)
+			return
+		}
+		_, _ = w.Write([]byte("not-a-sif-and-no-checksum"))
+	}))
+	defer srv.Close()
+
+	base := t.TempDir()
+	setConfigHome(t, filepath.Join(base, "config"))
+	setCacheHome(t, filepath.Join(base, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(base, "system"))
+	cfgPath := filepath.Join(base, "config.json")
+	t.Setenv("SCIGET_CONFIG", cfgPath)
+	storeDir := filepath.Join(base, "containers")
+	if err := writeConfig(cfgPath, map[string]string{
+		"container_dir":  storeDir,
+		"apptainer_path": "true",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstApps := `{
+		"sandbox": {"apps": {"sandbox 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"unverified": {"apps": {"unverified 1.0": {"version": "20260101", "architecture": "aarch64"}}},
+		"verified": {"apps": {"verified 1.0": {"version": "20260101", "architecture": "aarch64"}}}
+	}`
+	secondApps := `{
+		"sandbox": {"apps": {"sandbox 1.0": {"version": "20260101", "architecture": "x86_64"}}},
+		"unverified": {"apps": {"unverified 1.0": {"version": "20260101", "architecture": "x86_64"}}},
+		"verified": {"apps": {"verified 1.0": {"version": "20260101", "architecture": "x86_64"}}}
+	}`
+	catMeta := fmt.Sprintf(`{"schemaVersion": 1, "appJsonUrl": "apps.json", "downloadUrls": [%q]}`, srv.URL+"/{file}")
+	cats := []catalog{
+		{Name: "first", URL: exampleURL("first"), Use: true},
+		{Name: "second", URL: exampleURL("second"), Use: true},
+	}
+	listPath, err := catalogListPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCatalogList(listPath, cats, false); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir, err := defaultValue("cache_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, apps := range []string{firstApps, secondApps} {
+		dir := cats[i].dir(cacheDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "catalog.json"), []byte(catMeta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(apps), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Sandbox occupying dest fails before downloading and tells the user which sandbox to move.
+	sandboxDest := filepath.Join(storeDir, "sandbox_1.0_20260101", "sandbox_1.0_20260101.simg")
+	if err := os.MkdirAll(sandboxDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"pull", "sandbox/1.0"}, &out, &errBuf); code == 0 {
+		t.Fatalf("pull sandbox/1.0 unexpectedly succeeded: out=%s", out.String())
+	}
+	if requests != 0 {
+		t.Errorf("pull downloaded %d times despite sandbox directory at dest", requests)
+	}
+	if !strings.Contains(errBuf.String(), sandboxDest) || !strings.Contains(errBuf.String(), "is a directory") {
+		t.Errorf("unexpected sandbox error:\n%s", errBuf.String())
+	}
+
+	// 2. Shared-date download without checksum or valid SIF header is rejected instead of published.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"pull", "unverified/1.0"}, &out, &errBuf); code == 0 {
+		t.Fatalf("pull unverified/1.0 unexpectedly succeeded: out=%s", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "does not verify") {
+		t.Errorf("expected verification error, got:\n%s", errBuf.String())
+	}
+	unverifiedDest := filepath.Join(storeDir, "unverified_1.0_20260101", "unverified_1.0_20260101.simg")
+	if _, err := os.Stat(unverifiedDest); !os.IsNotExist(err) {
+		t.Errorf("rejected download should not be published at %s", unverifiedDest)
+	}
+
+	// 3. Shared-date download with a matching x86_64 SIF header succeeds and info reports it present.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"pull", "verified/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("pull verified/1.0 failed (%d): %s", code, errBuf.String())
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"info", "verified/1.0"}, &out, &errBuf); code != 0 {
+		t.Fatalf("info verified/1.0 failed: %s", errBuf.String())
+	}
+	verifiedDest := filepath.Join(storeDir, "verified_1.0_20260101", "verified_1.0_20260101.simg")
+	if !strings.Contains(out.String(), "Location:    "+verifiedDest) {
+		t.Errorf("info verified/1.0 should report published image:\n%s", out.String())
 	}
 }

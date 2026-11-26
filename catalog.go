@@ -31,21 +31,24 @@ var (
 // back several catalog entries (a command-line entry and its graphical
 // ones).
 type container struct {
-	tool          string // "fsl"
-	version       string // "6.0.3", the software's own version
-	image         string // "fsl_6.0.3"
-	buildDate     string // "20200905"
-	licences      []string
-	dois          []string
-	apptainerArgs []string // added to every run; all entries agree
-	categories    []string
-	graphical     bool     // some entry has a graphical command
-	hidden        bool     // every entry is hidden
-	catalog       string   // the name of the catalog it comes from
-	mirrors       []string // the catalog's download URLs, with {file}
-	shadowed      bool     // an earlier catalog in use has the same name
-	entries       []entry  // visible entries with a command, in key order
-	published     download // the image's size and SHA-256, if the catalog gives them
+	tool           string // "fsl"
+	version        string // "6.0.3", the software's own version
+	image          string // "fsl_6.0.3"
+	buildDate      string // "20200905"
+	arch           string // normalized CPU architecture (e.g. "x86_64", "aarch64"), or "" if unspecified
+	licences       []string
+	dois           []string
+	apptainerArgs  []string // added to every run; all entries agree
+	categories     []string
+	graphical      bool     // some entry has a graphical command
+	hidden         bool     // every entry is hidden
+	catalog        string   // the name of the catalog it comes from
+	mirrors        []string // the catalog's download URLs, with {file}
+	shadowed       bool     // an earlier catalog in use has the same name
+	ambiguousStore bool     // another catalog lists an incompatible entry with the same name and build date
+	foreignDates   []string // build dates listed by incompatible catalogs for this name
+	entries        []entry  // visible entries with a command, in key order
+	published      download // the image's size and SHA-256, if the catalog gives them
 }
 
 // entry is a visible catalog entry that runs a command in its container,
@@ -63,6 +66,93 @@ func (c container) name() string { return c.tool + "/" + c.version }
 // "fsl_6.0.3_20200905".
 func (c container) fileName() string { return c.image + "_" + c.buildDate }
 
+// hostArch returns the normalized CPU architecture of this machine.
+// Tests replace it to exercise filtering across architectures.
+var hostArch = func() string { return normalizeArch(runtime.GOARCH) }
+
+var (
+	arm64Token = regexp.MustCompile(`(?i)(?:^|[._+-])(arm64|aarch64)(?:$|[._+-])`)
+	x86Token   = regexp.MustCompile(`(?i)(?:^|[._+-])(x86[_-]64|amd64|x64)(?:$|[._+-])`)
+)
+
+// normalizeArch maps common CPU architecture names to canonical Linux names
+// ("x86_64", "aarch64", etc.) so catalog entries and runtime.GOARCH match.
+// Architecture-independent values ("all", "any", "noarch") normalize to "any".
+// Slash-separated platform or microarchitecture strings (such as "linux/amd64"
+// or "x86_64/amd/zen3") are reduced to their CPU architecture segment.
+func normalizeArch(s string) string {
+	raw := strings.ToLower(strings.TrimSpace(s))
+	if raw == "" {
+		return ""
+	}
+	a := raw
+	hasSlash := strings.Contains(a, "/")
+	if hasSlash {
+		parts := strings.Split(a, "/")
+		for _, p := range parts {
+			if p == "" || strings.TrimSpace(p) != p {
+				return raw
+			}
+		}
+		switch parts[0] {
+		case "linux", "darwin", "windows", "freebsd", "openbsd", "netbsd":
+			a = parts[1]
+		default:
+			a = parts[0]
+		}
+	}
+	switch a {
+	case "all", "any", "noarch":
+		if hasSlash {
+			return raw
+		}
+		return "any"
+	case "amd64", "x86_64", "x86-64", "x64":
+		return "x86_64"
+	case "arm64", "aarch64":
+		return "aarch64"
+	case "386", "i386", "i686":
+		return "386"
+	case "arm", "armv7", "armv7l", "armhf":
+		return "arm"
+	default:
+		return a
+	}
+}
+
+// inferArch extracts a normalized architecture from a tool or version name
+// when it carries a delimited architecture token (such as "fsl_arm64",
+// "2.1.0_arm64", "1.0+arm64", or "demo_x64"). Ambiguous or untagged names
+// return "".
+func inferArch(tool, version string) string {
+	hasArm := arm64Token.MatchString(tool) || arm64Token.MatchString(version)
+	hasX86 := x86Token.MatchString(tool) || x86Token.MatchString(version)
+	switch {
+	case hasArm && !hasX86:
+		return "aarch64"
+	case hasX86 && !hasArm:
+		return "x86_64"
+	default:
+		return ""
+	}
+}
+
+// effectiveArch returns c's normalized architecture, inferring it from tool
+// or version if c.arch was not set explicitly.
+func (c container) effectiveArch() string {
+	if c.arch != "" {
+		return normalizeArch(c.arch)
+	}
+	return inferArch(c.tool, c.version)
+}
+
+// compatibleWithHost reports whether c can run on this machine's CPU
+// architecture. Containers without a known architecture match every host.
+func (c container) compatibleWithHost() bool {
+	arch := c.effectiveArch()
+	return arch == "" || arch == "any" || arch == hostArch()
+}
+
 // catalogTool is one tool in apps.json, holding its entries by key.
 type catalogTool struct {
 	Categories []string              `json:"categories"`
@@ -73,6 +163,7 @@ type catalogTool struct {
 // container's build date, not the software version.
 type catalogApp struct {
 	ApptainerArgs []string `json:"apptainer_args"`
+	Architecture  string   `json:"architecture"`
 	Licences      []string `json:"license"`
 	DOI           string   `json:"doi"`
 	BuildDate     string   `json:"version"`
@@ -84,15 +175,20 @@ type catalogApp struct {
 }
 
 // readContainers returns the containers of every catalog in use, sorted by
-// tool, then version, then catalog order. A container whose name an
-// earlier catalog also has is marked shadowed.
+// tool, then version, then catalog order. Among containers with the same
+// name, the first catalog offering one compatible with this host wins and
+// shadows all others (including incompatible entries from earlier catalogs).
+// When no catalog offers a compatible container for a name, the first
+// catalog listing it wins.
 func readContainers() ([]container, error) {
 	cacheDir, used, err := usedCatalogs()
 	if err != nil {
 		return nil, err
 	}
 	var all []container
-	seen := map[string]bool{}
+	hasCompatible := map[string]bool{}
+	compatSameDate := map[[2]string]bool{}
+	incompatSameDate := map[[2]string]bool{}
 	for _, cat := range used {
 		containers, mirrors, err := readCatalogSnapshot(cat.dir(cacheDir))
 		if err != nil {
@@ -101,9 +197,43 @@ func readContainers() ([]container, error) {
 		for _, c := range containers {
 			c.catalog = cat.Name
 			c.mirrors = mirrors
-			c.shadowed = seen[c.name()]
-			seen[c.name()] = true
+			name := c.name()
+			if c.compatibleWithHost() {
+				hasCompatible[name] = true
+				compatSameDate[[2]string{name, c.buildDate}] = true
+			} else {
+				incompatSameDate[[2]string{name, c.buildDate}] = true
+			}
 			all = append(all, c)
+		}
+	}
+	foreignByName := map[string][]string{}
+	for key := range incompatSameDate {
+		foreignByName[key[0]] = append(foreignByName[key[0]], key[1])
+	}
+	for name, dates := range foreignByName {
+		slices.Sort(dates)
+		foreignByName[name] = dates
+	}
+	seenCompatible := map[string]bool{}
+	seenIncompatible := map[string]bool{}
+	for i := range all {
+		name := all[i].name()
+		if all[i].compatibleWithHost() {
+			all[i].shadowed = seenCompatible[name]
+			seenCompatible[name] = true
+			all[i].ambiguousStore = incompatSameDate[[2]string{name, all[i].buildDate}]
+			if dates := foreignByName[name]; len(dates) > 0 {
+				all[i].foreignDates = dates
+			}
+		} else {
+			all[i].ambiguousStore = compatSameDate[[2]string{name, all[i].buildDate}]
+			if hasCompatible[name] {
+				all[i].shadowed = true
+			} else {
+				all[i].shadowed = seenIncompatible[name]
+				seenIncompatible[name] = true
+			}
 		}
 	}
 	// A stable sort keeps copies of a name in catalog order.
@@ -2281,11 +2411,12 @@ func parseCatalog(data []byte) ([]container, error) {
 	}
 
 	byName := map[string]*container{}
+	explicitArchs := map[string][]string{}
 	for tool, t := range tools {
 		for key, app := range t.Apps {
 			// Every string kept is checked here, once, so no output path
 			// can print a terminal escape from a catalog.
-			texts := slices.Concat([]string{tool, key, app.Image, app.BuildDate, app.DOI, app.Exec},
+			texts := slices.Concat([]string{tool, key, app.Image, app.BuildDate, app.Architecture, app.DOI, app.Exec},
 				t.Categories, app.Licences, app.ApptainerArgs)
 			if slices.ContainsFunc(texts, func(s string) bool { return printable(s) != s }) {
 				return nil, fmt.Errorf("catalog entry %q of %q has a control character", key, tool)
@@ -2344,6 +2475,9 @@ func parseCatalog(data []byte) ([]container, error) {
 					apptainerArgs: app.ApptainerArgs, published: published}
 				byName[c.name()] = c
 			}
+			if norm := normalizeArch(app.Architecture); norm != "" {
+				explicitArchs[c.name()] = append(explicitArchs[c.name()], norm)
+			}
 			if app.BuildDate != c.buildDate {
 				return nil, fmt.Errorf("catalog lists %s with build dates %s and %s",
 					c.name(), c.buildDate, app.BuildDate)
@@ -2379,18 +2513,39 @@ func parseCatalog(data []byte) ([]container, error) {
 		containers = append(containers, *c)
 	}
 	slices.SortFunc(containers, compareContainers)
+	for i := range containers {
+		c := &containers[i]
+		distinct := slices.Compact(slices.Sorted(slices.Values(explicitArchs[c.name()])))
+		switch len(distinct) {
+		case 0:
+			c.arch = inferArch(c.tool, c.version)
+		case 1:
+			c.arch = distinct[0]
+		default:
+			quoted := make([]string, len(distinct))
+			for j, a := range distinct {
+				quoted[j] = strconv.Quote(a)
+			}
+			return nil, fmt.Errorf("catalog lists %s with conflicting architectures: %s",
+				c.name(), strings.Join(quoted, ", "))
+		}
+	}
 	return containers, nil
 }
 
 // sha256Hex matches a SHA-256 written as lowercase hex.
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// compareContainers orders containers by tool, then by version.
+// compareContainers orders containers by tool, then by version (tie-breaking
+// numerically equal versions such as "01" and "1" by raw text for determinism).
 func compareContainers(a, b container) int {
 	if n := strings.Compare(a.tool, b.tool); n != 0 {
 		return n
 	}
-	return compareVersions(a.version, b.version)
+	if n := compareVersions(a.version, b.version); n != 0 {
+		return n
+	}
+	return strings.Compare(a.version, b.version)
 }
 
 // compareVersions compares two versions, treating runs of digits as numbers so

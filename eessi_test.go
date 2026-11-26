@@ -194,6 +194,7 @@ func isolateTestEnv(t *testing.T, tmp string) {
 }
 
 func TestRefreshAndEESSICommands(t *testing.T) {
+	withHostArch(t, "x86_64")
 	tmp := t.TempDir()
 	isolateTestEnv(t, tmp)
 
@@ -740,6 +741,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 }
 
 func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
+	withHostArch(t, "x86_64")
 	tmp := t.TempDir()
 	isolateTestEnv(t, tmp)
 
@@ -1110,6 +1112,7 @@ func TestInvalidEESSIInOldCacheDoesNotBreakContainerCommands(t *testing.T) {
 }
 
 func TestRefreshRollbackOnRenameFailure(t *testing.T) {
+	withHostArch(t, "x86_64")
 	tmp := t.TempDir()
 	isolateTestEnv(t, tmp)
 
@@ -4037,4 +4040,283 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			t.Fatalf("concurrent Windows mixed-case writeCatalogList failed: %v", err)
 		}
 	}
+}
+
+func TestEESSIFindFiltersByHostArch(t *testing.T) {
+	tmp := t.TempDir()
+	isolateTestEnv(t, tmp)
+
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	eessiJSON := `{
+		"schemaVersion": 1,
+		"backend": "eessi",
+		"explicitSelectionRequired": true,
+		"cvmfsRepo": "software.eessi.io",
+		"stacks": ["2025.06"],
+		"tools": {
+			"armonly": {
+				"package": "ArmOnly",
+				"apps": {
+					"ArmOnly 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "ArmOnly/1.0",
+						"software_version": "1.0",
+						"arch": ["aarch64"]
+					}
+				}
+			},
+			"armblank": {
+				"package": "ArmBlank",
+				"apps": {
+					"ArmBlank 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "ArmBlank/1.0",
+						"software_version": "1.0",
+						"arch": ["aarch64", ""]
+					}
+				}
+			},
+			"malformed": {
+				"package": "Malformed",
+				"apps": {
+					"Malformed 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "Malformed/1.0",
+						"software_version": "1.0",
+						"arch": ["linux/", "noarch/"]
+					}
+				}
+			},
+			"x86only": {
+				"package": "X86Only",
+				"apps": {
+					"X86Only 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "X86Only/1.0",
+						"software_version": "1.0",
+						"arch": ["x86_64"]
+					}
+				}
+			},
+			"both": {
+				"package": "Both",
+				"apps": {
+					"Both 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "Both/1.0",
+						"software_version": "1.0",
+						"arch": ["aarch64", "x86_64"]
+					}
+				}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(srcDir, "eessi.json"), []byte(eessiJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catFile := filepath.Join(srcDir, "cat.json")
+	if err := os.WriteFile(catFile, []byte(`{"schemaVersion": 1, "eessiCatalogUrl": "eessi.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"catalog", "add", "test", catFile}, &stdout, &stderr); code != 0 {
+		t.Fatalf("catalog add failed: %s", stderr.String())
+	}
+	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("refresh failed: %s", stderr.String())
+	}
+
+	t.Run("x86_64 hides aarch64-only unless --all", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi find failed (%d): %s", code, stderr.String())
+		}
+		got := stdout.String()
+		if strings.Contains(got, "armonly/1.0") || strings.Contains(got, "armblank/1.0") || strings.Contains(got, "malformed/1.0") || !strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
+			t.Errorf("unexpected eessi find output on x86_64:\n%s", got)
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find", "--all"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi find --all failed (%d): %s", code, stderr.String())
+		}
+		gotAll := stdout.String()
+		if !strings.Contains(gotAll, "armonly/1.0") || !strings.Contains(gotAll, "armblank/1.0") || !strings.Contains(gotAll, "malformed/1.0") || !strings.Contains(gotAll, "x86only/1.0") || !strings.Contains(gotAll, "both/1.0") {
+			t.Errorf("unexpected eessi find --all output:\n%s", gotAll)
+		}
+	})
+
+	t.Run("aarch64 hides x86_64-only", func(t *testing.T) {
+		withHostArch(t, "aarch64")
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi find failed (%d): %s", code, stderr.String())
+		}
+		got := stdout.String()
+		if !strings.Contains(got, "armonly/1.0") || !strings.Contains(got, "armblank/1.0") || strings.Contains(got, "malformed/1.0") || strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
+			t.Errorf("unexpected eessi find output on aarch64:\n%s", got)
+		}
+	})
+
+	t.Run("incompatible earlier EESSI catalog does not shadow compatible later catalog", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		subTmp := t.TempDir()
+		isolateTestEnv(t, subTmp)
+		subSrc := filepath.Join(subTmp, "src")
+		if err := os.MkdirAll(subSrc, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		armCat := `{
+			"schemaVersion": 1,
+			"backend": "eessi",
+			"explicitSelectionRequired": true,
+			"cvmfsRepo": "software.eessi.io",
+			"stacks": ["2025.06"],
+			"tools": {
+				"shared": {
+					"package": "Shared",
+					"apps": {
+						"Foreign UI": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Shared/1.0",
+							"software_version": "1.0",
+							"arch": ["aarch64"],
+							"exec": ["shared-bin"]
+						}
+					}
+				},
+				"viewer": {
+					"package": "Viewer",
+					"apps": {
+						"Viewer": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Viewer/1.0",
+							"software_version": "1.0",
+							"arch": ["aarch64"],
+							"exec": ["viewer"]
+						},
+						"viewer": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Viewer/1.0",
+							"software_version": "1.0",
+							"arch": ["x86_64"],
+							"exec": ["viewer"]
+						}
+					}
+				}
+			}
+		}`
+		x86Cat := `{
+			"schemaVersion": 1,
+			"backend": "eessi",
+			"explicitSelectionRequired": true,
+			"cvmfsRepo": "software.eessi.io",
+			"stacks": ["2025.06"],
+			"tools": {
+				"shared": {
+					"package": "Shared",
+					"apps": {
+						"Native UI": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Shared/1.0",
+							"software_version": "1.0",
+							"arch": ["x86_64"],
+							"exec": ["shared-bin"]
+						}
+					}
+				},
+				"viewer": {
+					"package": "Viewer",
+					"apps": {
+						"viewer": {
+							"backend": "eessi",
+							"stack": "2025.06",
+							"module": "Viewer/1.0",
+							"software_version": "1.0",
+							"arch": ["x86_64"],
+							"exec": ["viewer"]
+						}
+					}
+				}
+			}
+		}`
+		if err := os.WriteFile(filepath.Join(subSrc, "arm.json"), []byte(armCat), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(subSrc, "x86.json"), []byte(x86Cat), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cat1 := filepath.Join(subSrc, "cat1.json")
+		cat2 := filepath.Join(subSrc, "cat2.json")
+		if err := os.WriteFile(cat1, []byte(`{"schemaVersion": 1, "eessiCatalogUrl": "arm.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cat2, []byte(`{"schemaVersion": 1, "eessiCatalogUrl": "x86.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// catalog add prepends, so add second (x86) first, then first (arm).
+		if code := run([]string{"catalog", "add", "second", cat2}, &stdout, &stderr); code != 0 {
+			t.Fatalf("add second failed: %s", stderr.String())
+		}
+		if code := run([]string{"catalog", "add", "first", cat1}, &stdout, &stderr); code != 0 {
+			t.Fatalf("add first failed: %s", stderr.String())
+		}
+		if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("refresh failed: %s", stderr.String())
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find", "shared"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi find shared failed: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "\tsecond\t") || strings.Contains(stdout.String(), "(shadowed)") {
+			t.Errorf("eessi find shared should list unshadowed second:\n%s", stdout.String())
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "info", "shared"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi info shared failed: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Catalog:     second") || !strings.Contains(stdout.String(), "Arch:        x86_64") {
+			t.Errorf("eessi info shared should resolve compatible second:\n%s", stdout.String())
+		}
+
+		// Explicit --launcher still reaches a shadowed foreign-arch launcher label.
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "info", "--launcher", "Foreign UI", "shared"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi info --launcher 'Foreign UI' shared failed: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Catalog:     first") || !strings.Contains(stdout.String(), "Arch:        aarch64") {
+			t.Errorf("eessi info --launcher 'Foreign UI' should resolve first:\n%s", stdout.String())
+		}
+
+		// Exact-case --launcher Viewer beats case-insensitive native "viewer".
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "info", "--launcher", "Viewer", "viewer"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi info --launcher Viewer viewer failed: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Arch:        aarch64") {
+			t.Errorf("eessi info --launcher Viewer should resolve exact label Viewer:\n%s", stdout.String())
+		}
+	})
 }

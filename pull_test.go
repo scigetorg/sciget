@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -413,4 +415,81 @@ func TestPullAll(t *testing.T) {
 	if most != 2 {
 		t.Errorf("at most %d downloads ran at once, want 2", most)
 	}
+}
+
+func TestPullCancelledAroundPublish(t *testing.T) {
+	body := []byte("valid-image-body")
+	sum := sha256.Sum256(body)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(body)
+		}
+	}))
+	defer srv.Close()
+
+	setup := func(t *testing.T) (config, container, string) {
+		t.Helper()
+		c, _, store := localCatalog(t)
+		c.mirrors = []string{srv.URL + "/{file}"}
+		c.published = download{size: int64(len(body)), sha256: hex.EncodeToString(sum[:])}
+		c.ambiguousStore = true
+		if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
+			"cache_dir":      filepath.Join(filepath.Dir(store), "cache"),
+			"container_dir":  store,
+			"apptainer_path": "true",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := readConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		layout, _, _ := cfg.get("container_layout")
+		rel, _ := layoutPath(layout, c)
+		return cfg, c, filepath.Join(store, rel)
+	}
+
+	t.Run("cancelled after validation and before rename does not publish", func(t *testing.T) {
+		cfg, c, dest := setup(t)
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+
+		prev := beforePullPublish
+		beforePullPublish = func() { cancel(errors.New("interrupt signal received")) }
+		t.Cleanup(func() { beforePullPublish = prev })
+
+		_, downloaded, err := pullContainer(ctx, cfg, c, nil, nil)
+		if err == nil || downloaded {
+			t.Fatalf("pullContainer = downloaded %v, err %v; want cancellation error", downloaded, err)
+		}
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Errorf("cancelled pull must not publish %s", dest)
+		}
+		if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(dest), "*.incomplete")); len(matches) != 0 {
+			t.Errorf("cancelled pull left temporary files: %v", matches)
+		}
+	})
+
+	t.Run("cancelled after rename succeeds still reports success", func(t *testing.T) {
+		cfg, c, dest := setup(t)
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+
+		prev := renamePullFile
+		renamePullFile = func(oldpath, newpath string) error {
+			err := os.Rename(oldpath, newpath)
+			cancel(errors.New("interrupt signal received"))
+			return err
+		}
+		t.Cleanup(func() { renamePullFile = prev })
+
+		loc, downloaded, err := pullContainer(ctx, cfg, c, nil, nil)
+		if err != nil || !downloaded || loc.path != dest {
+			t.Fatalf("pullContainer = loc %+v, downloaded %v, err %v; want committed success", loc, downloaded, err)
+		}
+		if _, err := os.Stat(dest); err != nil {
+			t.Errorf("expected published image at %s: %v", dest, err)
+		}
+	})
 }

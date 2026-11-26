@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -97,7 +102,7 @@ func locate(cfg config, c container) (location, error) {
 	if err != nil {
 		return location{}, err
 	}
-	path, err := findContainer(dir, layout, c)
+	path, err := findStoreContainer(dir, layout, c)
 	if err != nil {
 		return location{}, err
 	}
@@ -105,7 +110,7 @@ func locate(cfg config, c container) (location, error) {
 		return location{path: path}, nil
 	}
 	if share.Dir != "" {
-		path, err := otherBuild(share.Dir, shareLayout, c)
+		path, err := otherBuildIn(share.Dir, shareLayout, c, false)
 		if err != nil {
 			return location{}, err
 		}
@@ -113,7 +118,7 @@ func locate(cfg config, c container) (location, error) {
 			return location{path: path, share: share.Name, older: true}, nil
 		}
 	}
-	path, err = otherBuild(dir, layout, c)
+	path, err = otherBuildIn(dir, layout, c, true)
 	if err != nil {
 		return location{}, err
 	}
@@ -123,10 +128,137 @@ func locate(cfg config, c container) (location, error) {
 	return location{}, notOnMachineError{name: c.name()}
 }
 
+// findStoreContainer returns c's path in container_dir if a matching image
+// is present, rejecting files whose SIF header indicates another architecture
+// and (for ambiguous store paths shared across architectures) verifying
+// published size and SHA-256.
+func findStoreContainer(dir, layout string, c container) (string, error) {
+	path, err := findContainer(dir, layout, c)
+	if err != nil || path == "" {
+		return path, err
+	}
+	ok, err := matchesLocalStore(path, c, c.ambiguousStore, c.ambiguousStore)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", nil
+	}
+	return path, nil
+}
+
+// expectedStoreArch returns the CPU architecture expected for a local SIF
+// image backing c. Containers with unspecified or "any" architecture expect
+// the host's own architecture.
+func expectedStoreArch(c container) string {
+	switch arch := c.effectiveArch(); arch {
+	case "", "any":
+		return hostArch()
+	default:
+		return arch
+	}
+}
+
+// matchesLocalStore checks whether a file or sandbox in container_dir matches c:
+// it always checks a SIF header's architecture (64-byte read), checks published
+// size and SHA-256 when checkPublished is true, and requires positive
+// verification (a matching published SHA-256 or a matching SIF architecture
+// header) when requireVerified is true so unverifiable sandbox directories and
+// unverified files cannot leak across incompatible architectures.
+func matchesLocalStore(path string, c container, checkPublished, requireVerified bool) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, fmt.Errorf("locating %s: %w", c.name(), err)
+	}
+	wantArch := expectedStoreArch(c)
+	if !info.Mode().IsRegular() {
+		return !requireVerified, nil
+	}
+	if checkPublished && c.published.size > 0 && info.Size() != c.published.size {
+		return false, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("locating %s: %w", c.name(), err)
+	}
+	defer f.Close()
+	hasSHA := checkPublished && c.published.sha256 != ""
+	if wantArch != "" {
+		var hdr [64]byte
+		gotArch := ""
+		if n, _ := io.ReadFull(f, hdr[:]); n >= 47 {
+			gotArch = sifArch(hdr[:n])
+		}
+		if gotArch != "" && gotArch != wantArch {
+			return false, nil
+		}
+		if requireVerified && !hasSHA && gotArch != wantArch {
+			return false, nil
+		}
+		if hasSHA {
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return false, fmt.Errorf("locating %s: %w", c.name(), err)
+			}
+		}
+	}
+	if hasSHA {
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return false, fmt.Errorf("locating %s: %w", c.name(), err)
+		}
+		if hex.EncodeToString(h.Sum(nil)) != c.published.sha256 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// sifArch extracts the normalized CPU architecture from a Singularity Image
+// Format (SIF) header, or "" if hdr is not a SIF header with a known arch.
+func sifArch(hdr []byte) string {
+	if len(hdr) < 47 || !bytes.Equal(hdr[32:42], []byte("SIF_MAGIC\x00")) {
+		return ""
+	}
+	switch string(hdr[45:47]) {
+	case "01":
+		return "386"
+	case "02":
+		return "x86_64"
+	case "03":
+		return "arm"
+	case "04":
+		return "aarch64"
+	case "05":
+		return "ppc64"
+	case "06":
+		return "ppc64le"
+	case "07":
+		return "mips"
+	case "08":
+		return "mipsle"
+	case "09":
+		return "mips64"
+	case "10":
+		return "mips64le"
+	case "11":
+		return "s390x"
+	case "12":
+		return "riscv64"
+	case "13":
+		return "loong64"
+	default:
+		return ""
+	}
+}
+
 // otherBuild returns the path of the newest build of c's tool and version in
-// dir other than c's own, or "" if there is none. A build date is eight
-// digits.
+// dir other than c's own, or "" if there is none. Candidates whose SIF header
+// indicates a mismatched architecture are skipped. A build date is eight digits.
 func otherBuild(dir, layout string, c container) (string, error) {
+	return otherBuildIn(dir, layout, c, true)
+}
+
+func otherBuildIn(dir, layout string, c container, isStore bool) (string, error) {
 	if _, err := layoutPath(layout, c); err != nil {
 		return "", err
 	}
@@ -145,6 +277,9 @@ func otherBuild(dir, layout string, c container) (string, error) {
 		for i := 0; i+8 <= len(match); i++ {
 			other := c
 			other.buildDate = match[i : i+8]
+			if other.buildDate == c.buildDate {
+				continue
+			}
 			relative, err := layoutPath(layout, other)
 			if err != nil || filepath.Join(dir, relative) != match || other.buildDate <= bestDate {
 				continue
@@ -152,6 +287,16 @@ func otherBuild(dir, layout string, c container) (string, error) {
 			path, err := findContainer(dir, layout, other)
 			if err != nil {
 				return "", err
+			}
+			if path != "" {
+				requireVerified := isStore && slices.Contains(c.foreignDates, other.buildDate)
+				ok, err := matchesLocalStore(path, other, false, requireVerified)
+				if err != nil {
+					return "", err
+				}
+				if !ok {
+					path = ""
+				}
 			}
 			if path != "" {
 				best, bestDate = path, other.buildDate

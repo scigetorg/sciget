@@ -421,3 +421,62 @@ func TestModuleText(t *testing.T) {
 		})
 	}
 }
+
+func TestTUIFiltersByHostArch(t *testing.T) {
+	mixed := []container{
+		{tool: "aidamri", version: "3.0.0", buildDate: "20261014", categories: []string{"diffusion"}},
+		{tool: "aidamri_arm64", version: "3.0.0", buildDate: "20261014", categories: []string{"diffusion", "arm-only"}},
+		{tool: "amico", version: "2.1.0", buildDate: "20250628", categories: []string{"diffusion"}},
+		{tool: "amico", version: "2.1.0_arm64", buildDate: "20260512", arch: "aarch64", categories: []string{"diffusion"}},
+		{tool: "eharmonize", version: "1.0.0", buildDate: "20260101", categories: []string{"harmonization"}},
+		{tool: "fsl", version: "6.0.7", buildDate: "20260101", arch: "x86_64", categories: []string{"registration"}},
+	}
+
+	t.Run("x86_64 excludes arm64 tools, versions, and category counts", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		m := newModel(tuiSettings{cacheDir: t.TempDir()}, mixed, nil, tuiState{})
+		if m.loadErr != nil {
+			t.Fatalf("unexpected loadErr: %v", m.loadErr)
+		}
+		wantApps := []string{"aidamri", "amico", "eharmonize", "fsl"}
+		if !slices.Equal(m.apps, wantApps) {
+			t.Errorf("apps = %q, want %q", m.apps, wantApps)
+		}
+		if len(m.byTool["amico"]) != 1 || m.byTool["amico"][0].version != "2.1.0" {
+			t.Errorf("amico versions = %+v, want only 2.1.0", m.byTool["amico"])
+		}
+		if slices.Contains(m.categories, "arm-only") {
+			t.Errorf("arm-only category should be excluded: %q", m.categories)
+		}
+		if m.counts["diffusion"] != 2 || m.counts[""] != 4 {
+			t.Errorf("counts = %v, want diffusion=2 and all=4", m.counts)
+		}
+	})
+
+	t.Run("x86_64 with only arm64 containers shows empty state", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		onlyArm := []container{
+			{tool: "aidamri_arm64", version: "3.0.0", buildDate: "20261014"},
+			{tool: "amico", version: "2.1.0_arm64", buildDate: "20260512", arch: "aarch64"},
+		}
+		m := newModel(tuiSettings{cacheDir: t.TempDir()}, onlyArm, nil, tuiState{})
+		if !errors.Is(m.loadErr, errNoContainers) {
+			t.Errorf("loadErr = %v, want %v", m.loadErr, errNoContainers)
+		}
+	})
+
+	t.Run("aarch64 shows arm64 and excludes explicit x86_64", func(t *testing.T) {
+		withHostArch(t, "aarch64")
+		m := newModel(tuiSettings{cacheDir: t.TempDir()}, mixed, nil, tuiState{})
+		if m.loadErr != nil {
+			t.Fatalf("unexpected loadErr: %v", m.loadErr)
+		}
+		wantApps := []string{"aidamri", "aidamri_arm64", "amico", "eharmonize"}
+		if !slices.Equal(m.apps, wantApps) {
+			t.Errorf("apps = %q, want %q", m.apps, wantApps)
+		}
+		if len(m.byTool["amico"]) != 2 {
+			t.Errorf("amico versions = %+v, want 2", m.byTool["amico"])
+		}
+	})
+}
