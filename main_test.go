@@ -1294,14 +1294,17 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "aarch64", "sha256": %q}}},
 		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "aarch64"}}},
 		"omitted": {"apps": {"omitted 1.0": {"version": "20260101", "architecture": "aarch64"}}},
-		"oldshare": {"apps": {"oldshare 1.0": {"version": "20250101", "architecture": "aarch64"}}}
+		"oldshare": {"apps": {"oldshare 1.0": {"version": "20250101", "architecture": "aarch64"}}},
+		"oldsandbox": {"apps": {"oldsandbox 1.0": {"version": "20250101", "architecture": "aarch64"}}}
 	}`, armHex)
 	secondApps := fmt.Sprintf(`{
 		"same": {"apps": {"same 1.0": {"version": "20260101", "architecture": "x86_64", "sha256": %q}}},
 		"sifonly": {"apps": {"sifonly 1.0": {"version": "20260101", "architecture": "x86_64"}}},
 		"omitted": {"apps": {"omitted 1.0": {"version": "20260101"}}},
 		"oldshare": {"apps": {"oldshare 1.0": {"version": "20260202", "architecture": "x86_64"}}},
-		"oldlocal": {"apps": {"oldlocal 1.0": {"version": "20260202", "architecture": "x86_64"}}}
+		"oldlocal": {"apps": {"oldlocal 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"oldsandbox": {"apps": {"oldsandbox 1.0": {"version": "20260202", "architecture": "x86_64"}}},
+		"loong": {"apps": {"loong 1.0": {"version": "20260101"}}}
 	}`, x86Hex)
 
 	base := t.TempDir()
@@ -1369,6 +1372,25 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 		}
 	}
 
+	// Create an older local sandbox directory on a date listed only by the ARM64 catalog.
+	sandboxPath := filepath.Join(storeDir, "oldsandbox_1.0_20250101", "oldsandbox_1.0_20250101.simg")
+	if err := os.MkdirAll(sandboxPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a LoongArch (code "13") SIF fixture for loong/1.0 (omitted architecture).
+	loongSIF := make([]byte, 64)
+	copy(loongSIF[32:], "SIF_MAGIC\x00")
+	copy(loongSIF[42:], "01\x00")
+	copy(loongSIF[45:], "13") // loong64
+	loongPath := filepath.Join(storeDir, "loong_1.0_20260101", "loong_1.0_20260101.simg")
+	if err := os.MkdirAll(filepath.Dir(loongPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(loongPath, loongSIF, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Put a valid older x86_64 image on second's share on 20250101 (same date first lists ARM64).
 	oldSharePath := filepath.Join(shareDir, "oldshare_1.0_20250101", "oldshare_1.0_20250101.simg")
 	if err := os.MkdirAll(filepath.Dir(oldSharePath), 0o755); err != nil {
@@ -1408,7 +1430,7 @@ func TestAmbiguousLocalStoreGuard(t *testing.T) {
 
 	// SIF header arch mismatch rejects foreign cached images both with explicit and omitted architecture,
 	// and rejects older local ARM64 SIFs on unlisted dates.
-	for _, name := range []string{"sifonly/1.0", "omitted/1.0", "oldlocal/1.0"} {
+	for _, name := range []string{"sifonly/1.0", "omitted/1.0", "oldlocal/1.0", "oldsandbox/1.0", "loong/1.0"} {
 		out.Reset()
 		errBuf.Reset()
 		if code := run([]string{"info", name}, &out, &errBuf); code != 0 {

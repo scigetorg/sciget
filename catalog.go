@@ -31,23 +31,24 @@ var (
 // back several catalog entries (a command-line entry and its graphical
 // ones).
 type container struct {
-	tool           string // "fsl"
-	version        string // "6.0.3", the software's own version
-	image          string // "fsl_6.0.3"
-	buildDate      string // "20200905"
-	arch           string // normalized CPU architecture (e.g. "x86_64", "aarch64"), or "" if unspecified
-	licences       []string
-	dois           []string
-	apptainerArgs  []string // added to every run; all entries agree
-	categories     []string
-	graphical      bool     // some entry has a graphical command
-	hidden         bool     // every entry is hidden
-	catalog        string   // the name of the catalog it comes from
-	mirrors        []string // the catalog's download URLs, with {file}
-	shadowed       bool     // an earlier catalog in use has the same name
-	ambiguousStore bool     // another catalog lists an incompatible entry with the same name and build date
-	entries        []entry  // visible entries with a command, in key order
-	published      download // the image's size and SHA-256, if the catalog gives them
+	tool             string // "fsl"
+	version          string // "6.0.3", the software's own version
+	image            string // "fsl_6.0.3"
+	buildDate        string // "20200905"
+	arch             string // normalized CPU architecture (e.g. "x86_64", "aarch64"), or "" if unspecified
+	licences         []string
+	dois             []string
+	apptainerArgs    []string // added to every run; all entries agree
+	categories       []string
+	graphical        bool     // some entry has a graphical command
+	hidden           bool     // every entry is hidden
+	catalog          string   // the name of the catalog it comes from
+	mirrors          []string // the catalog's download URLs, with {file}
+	shadowed         bool     // an earlier catalog in use has the same name
+	ambiguousStore   bool     // another catalog lists an incompatible entry with the same name and build date
+	foreignOnlyDates []string // build dates listed only by incompatible catalogs for this name
+	entries          []entry  // visible entries with a command, in key order
+	published        download // the image's size and SHA-256, if the catalog gives them
 }
 
 // entry is a visible catalog entry that runs a command in its container,
@@ -88,8 +89,10 @@ func normalizeArch(s string) string {
 	hasSlash := strings.Contains(a, "/")
 	if hasSlash {
 		parts := strings.Split(a, "/")
-		if slices.Contains(parts, "") {
-			return raw
+		for _, p := range parts {
+			if p == "" || strings.TrimSpace(p) != p {
+				return raw
+			}
 		}
 		switch parts[0] {
 		case "linux", "darwin", "windows", "freebsd", "openbsd", "netbsd":
@@ -204,6 +207,16 @@ func readContainers() ([]container, error) {
 			all = append(all, c)
 		}
 	}
+	foreignOnlyByName := map[string][]string{}
+	for key := range incompatSameDate {
+		if !compatSameDate[key] {
+			foreignOnlyByName[key[0]] = append(foreignOnlyByName[key[0]], key[1])
+		}
+	}
+	for name, dates := range foreignOnlyByName {
+		slices.Sort(dates)
+		foreignOnlyByName[name] = dates
+	}
 	seenCompatible := map[string]bool{}
 	seenIncompatible := map[string]bool{}
 	for i := range all {
@@ -212,6 +225,9 @@ func readContainers() ([]container, error) {
 			all[i].shadowed = seenCompatible[name]
 			seenCompatible[name] = true
 			all[i].ambiguousStore = incompatSameDate[[2]string{name, all[i].buildDate}]
+			if dates := foreignOnlyByName[name]; len(dates) > 0 {
+				all[i].foreignOnlyDates = dates
+			}
 		} else {
 			all[i].ambiguousStore = compatSameDate[[2]string{name, all[i].buildDate}]
 			if hasCompatible[name] {

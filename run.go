@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -109,7 +110,7 @@ func locate(cfg config, c container) (location, error) {
 		return location{path: path}, nil
 	}
 	if share.Dir != "" {
-		path, err := otherBuild(share.Dir, shareLayout, c)
+		path, err := otherBuildIn(share.Dir, shareLayout, c, false)
 		if err != nil {
 			return location{}, err
 		}
@@ -117,7 +118,7 @@ func locate(cfg config, c container) (location, error) {
 			return location{path: path, share: share.Name, older: true}, nil
 		}
 	}
-	path, err = otherBuild(dir, layout, c)
+	path, err = otherBuildIn(dir, layout, c, true)
 	if err != nil {
 		return location{}, err
 	}
@@ -136,7 +137,7 @@ func findStoreContainer(dir, layout string, c container) (string, error) {
 	if err != nil || path == "" {
 		return path, err
 	}
-	ok, err := matchesLocalStore(path, c, c.ambiguousStore)
+	ok, err := matchesLocalStore(path, c, c.ambiguousStore, false)
 	if err != nil {
 		return "", err
 	}
@@ -159,16 +160,20 @@ func expectedStoreArch(c container) string {
 	}
 }
 
-// matchesLocalStore checks whether a file in container_dir matches c:
-// it always checks a SIF header's architecture (64-byte read) and, when
-// checkPublished is true, also checks published size and SHA-256.
-func matchesLocalStore(path string, c container, checkPublished bool) (bool, error) {
+// matchesLocalStore checks whether a file or sandbox in container_dir matches c:
+// it always checks a SIF header's architecture (64-byte read), checks published
+// size and SHA-256 when checkPublished is true, and requires positive SIF
+// architecture verification when requireVerifiedArch is true (used for older
+// local store candidates whose build date is listed only by a foreign-arch
+// catalog, so unverifiable sandbox directories cannot leak across architectures).
+func matchesLocalStore(path string, c container, checkPublished, requireVerifiedArch bool) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, fmt.Errorf("locating %s: %w", c.name(), err)
 	}
+	wantArch := expectedStoreArch(c)
 	if !info.Mode().IsRegular() {
-		return true, nil
+		return !(requireVerifiedArch && wantArch != ""), nil
 	}
 	if checkPublished && c.published.size > 0 && info.Size() != c.published.size {
 		return false, nil
@@ -178,12 +183,17 @@ func matchesLocalStore(path string, c container, checkPublished bool) (bool, err
 		return false, fmt.Errorf("locating %s: %w", c.name(), err)
 	}
 	defer f.Close()
-	if wantArch := expectedStoreArch(c); wantArch != "" {
+	if wantArch != "" {
 		var hdr [64]byte
+		gotArch := ""
 		if n, _ := io.ReadFull(f, hdr[:]); n >= 47 {
-			if gotArch := sifArch(hdr[:n]); gotArch != "" && gotArch != wantArch {
-				return false, nil
-			}
+			gotArch = sifArch(hdr[:n])
+		}
+		if gotArch != "" && gotArch != wantArch {
+			return false, nil
+		}
+		if requireVerifiedArch && gotArch != wantArch {
+			return false, nil
 		}
 		if checkPublished && c.published.sha256 != "" {
 			if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -234,6 +244,8 @@ func sifArch(hdr []byte) string {
 		return "s390x"
 	case "12":
 		return "riscv64"
+	case "13":
+		return "loong64"
 	default:
 		return ""
 	}
@@ -243,6 +255,10 @@ func sifArch(hdr []byte) string {
 // dir other than c's own, or "" if there is none. Candidates whose SIF header
 // indicates a mismatched architecture are skipped. A build date is eight digits.
 func otherBuild(dir, layout string, c container) (string, error) {
+	return otherBuildIn(dir, layout, c, true)
+}
+
+func otherBuildIn(dir, layout string, c container, isStore bool) (string, error) {
 	if _, err := layoutPath(layout, c); err != nil {
 		return "", err
 	}
@@ -273,7 +289,8 @@ func otherBuild(dir, layout string, c container) (string, error) {
 				return "", err
 			}
 			if path != "" {
-				ok, err := matchesLocalStore(path, other, false)
+				requireVerified := isStore && slices.Contains(c.foreignOnlyDates, other.buildDate)
+				ok, err := matchesLocalStore(path, other, false, requireVerified)
 				if err != nil {
 					return "", err
 				}
