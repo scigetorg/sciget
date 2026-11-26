@@ -93,7 +93,11 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 		if err == nil {
 			err = checkImage(ctx, apptainerPath, global, tmp)
 			if err == nil {
-				ok, verifyErr := matchesLocalStore(tmp, c, c.ambiguousStore, c.ambiguousStore)
+				// downloadFile already verified published size and SHA-256;
+				// check only the 64-byte SIF header here (requiring positive
+				// arch verification on ambiguous paths without a checksum).
+				requireArch := c.ambiguousStore && c.published.sha256 == ""
+				ok, verifyErr := matchesLocalStore(tmp, c, false, requireArch)
 				if verifyErr != nil {
 					err = verifyErr
 				} else if !ok {
@@ -102,6 +106,9 @@ func pullContainer(ctx context.Context, cfg config, c container, progress func(h
 			}
 			if err == nil {
 				err = os.Chmod(tmp, 0o644)
+			}
+			if err == nil {
+				err = context.Cause(ctx)
 			}
 			if err == nil {
 				err = os.Rename(tmp, dest)
