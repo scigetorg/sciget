@@ -353,6 +353,22 @@ type eessiBuild struct {
 
 func (b eessiBuild) name() string { return b.id + "/" + b.version }
 
+// compatibleWithHost reports whether b supports this machine's CPU
+// architecture. Builds that do not declare any architectures match every host.
+func (b eessiBuild) compatibleWithHost() bool {
+	if len(b.arch) == 0 {
+		return true
+	}
+	host := hostArch()
+	for _, a := range b.arch {
+		norm := normalizeArch(a)
+		if norm == "" || norm == "any" || norm == host {
+			return true
+		}
+	}
+	return false
+}
+
 func (b eessiBuild) moduleRoot() string {
 	if root := os.Getenv("EESSI_MODULE_ROOT"); root != "" {
 		return root
@@ -746,7 +762,7 @@ func newEESSIFindCommand() *cobra.Command {
 			}
 			var matches []eessiBuild
 			for _, b := range builds {
-				if b.hidden && !all {
+				if (b.hidden || !b.compatibleWithHost()) && !all {
 					continue
 				}
 				if gpuOnly && !b.gpu {
@@ -765,7 +781,7 @@ func newEESSIFindCommand() *cobra.Command {
 			return writeEESSIBuilds(out, matches, isTerminal(out))
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "include hidden EESSI entries")
+	cmd.Flags().BoolVar(&all, "all", false, "include hidden and other-architecture EESSI entries")
 	cmd.Flags().BoolVar(&gpuOnly, "gpu", false, "show only GPU-enabled EESSI builds")
 	return cmd
 }

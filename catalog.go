@@ -35,6 +35,7 @@ type container struct {
 	version       string // "6.0.3", the software's own version
 	image         string // "fsl_6.0.3"
 	buildDate     string // "20200905"
+	arch          string // normalized CPU architecture (e.g. "x86_64", "aarch64"), or "" if unspecified
 	licences      []string
 	dois          []string
 	apptainerArgs []string // added to every run; all entries agree
@@ -63,6 +64,74 @@ func (c container) name() string { return c.tool + "/" + c.version }
 // "fsl_6.0.3_20200905".
 func (c container) fileName() string { return c.image + "_" + c.buildDate }
 
+// hostArch returns the normalized CPU architecture of this machine.
+// Tests replace it to exercise filtering across architectures.
+var hostArch = func() string { return normalizeArch(runtime.GOARCH) }
+
+var (
+	arm64Token = regexp.MustCompile(`(?i)(?:^|[._-])(arm64|aarch64)(?:$|[._-])`)
+	x86Token   = regexp.MustCompile(`(?i)(?:^|[._-])(x86[_-]64|amd64)(?:$|[._-])`)
+)
+
+// normalizeArch maps common CPU architecture names to canonical Linux names
+// ("x86_64", "aarch64", etc.) so catalog entries and runtime.GOARCH match.
+// Architecture-independent values ("all", "any", "noarch") normalize to "any".
+func normalizeArch(s string) string {
+	switch a := strings.ToLower(strings.TrimSpace(s)); a {
+	case "":
+		return ""
+	case "all", "any", "noarch":
+		return "any"
+	case "amd64", "x86_64", "x86-64", "x64":
+		return "x86_64"
+	case "arm64", "aarch64":
+		return "aarch64"
+	default:
+		return a
+	}
+}
+
+// inferArch extracts a normalized architecture from a tool or version name
+// when it carries a delimited architecture token (such as "fsl_arm64" or
+// "2.1.0_arm64"). Ambiguous or untagged names return "".
+func inferArch(tool, version string) string {
+	hasArm := arm64Token.MatchString(tool) || arm64Token.MatchString(version)
+	hasX86 := x86Token.MatchString(tool) || x86Token.MatchString(version)
+	switch {
+	case hasArm && !hasX86:
+		return "aarch64"
+	case hasX86 && !hasArm:
+		return "x86_64"
+	default:
+		return ""
+	}
+}
+
+// containerArch returns a container's normalized architecture, preferring an
+// explicit catalog field and falling back to tool/version naming conventions.
+func containerArch(declared, tool, version string) string {
+	if strings.TrimSpace(declared) != "" {
+		return normalizeArch(declared)
+	}
+	return inferArch(tool, version)
+}
+
+// effectiveArch returns c's normalized architecture, inferring it from tool
+// or version if c.arch was not set explicitly.
+func (c container) effectiveArch() string {
+	if c.arch != "" {
+		return normalizeArch(c.arch)
+	}
+	return inferArch(c.tool, c.version)
+}
+
+// compatibleWithHost reports whether c can run on this machine's CPU
+// architecture. Containers without a known architecture match every host.
+func (c container) compatibleWithHost() bool {
+	arch := c.effectiveArch()
+	return arch == "" || arch == "any" || arch == hostArch()
+}
+
 // catalogTool is one tool in apps.json, holding its entries by key.
 type catalogTool struct {
 	Categories []string              `json:"categories"`
@@ -73,6 +142,7 @@ type catalogTool struct {
 // container's build date, not the software version.
 type catalogApp struct {
 	ApptainerArgs []string `json:"apptainer_args"`
+	Architecture  string   `json:"architecture"`
 	Licences      []string `json:"license"`
 	DOI           string   `json:"doi"`
 	BuildDate     string   `json:"version"`
@@ -2285,7 +2355,7 @@ func parseCatalog(data []byte) ([]container, error) {
 		for key, app := range t.Apps {
 			// Every string kept is checked here, once, so no output path
 			// can print a terminal escape from a catalog.
-			texts := slices.Concat([]string{tool, key, app.Image, app.BuildDate, app.DOI, app.Exec},
+			texts := slices.Concat([]string{tool, key, app.Image, app.BuildDate, app.Architecture, app.DOI, app.Exec},
 				t.Categories, app.Licences, app.ApptainerArgs)
 			if slices.ContainsFunc(texts, func(s string) bool { return printable(s) != s }) {
 				return nil, fmt.Errorf("catalog entry %q of %q has a control character", key, tool)
@@ -2337,12 +2407,25 @@ func parseCatalog(data []byte) ([]container, error) {
 				}
 			}
 
+			arch := containerArch(app.Architecture, tool, toolVersion)
 			c := byName[tool+"/"+toolVersion]
 			if c == nil {
 				c = &container{tool: tool, version: toolVersion, image: image,
-					buildDate: app.BuildDate, categories: t.Categories, hidden: true,
+					buildDate: app.BuildDate, arch: arch, categories: t.Categories, hidden: true,
 					apptainerArgs: app.ApptainerArgs, published: published}
 				byName[c.name()] = c
+			}
+			if arch != "" {
+				if c.arch == "" {
+					c.arch = arch
+				} else if arch != c.arch {
+					a, b := c.arch, arch
+					if a > b {
+						a, b = b, a
+					}
+					return nil, fmt.Errorf("catalog lists %s with architectures %q and %q",
+						c.name(), a, b)
+				}
 			}
 			if app.BuildDate != c.buildDate {
 				return nil, fmt.Errorf("catalog lists %s with build dates %s and %s",

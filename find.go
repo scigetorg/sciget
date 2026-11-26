@@ -34,16 +34,17 @@ func newFindCommand() *cobra.Command {
 			return completeNames(containers, toComplete, all)
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "include hidden containers")
+	cmd.Flags().BoolVar(&all, "all", false, "include hidden and other-architecture containers")
 	return cmd
 }
 
 // matchContainers returns the containers matching every word (see
-// matches). Hidden containers are left out unless all is set.
+// matches). Hidden containers and containers for other architectures are
+// left out unless all is set.
 func matchContainers(containers []container, words []string, all bool) []container {
 	var found []container
 	for _, c := range containers {
-		if (!c.hidden || all) && matches(c, words) {
+		if (all || !c.hidden && c.compatibleWithHost()) && matches(c, words) {
 			found = append(found, c)
 		}
 	}
@@ -84,13 +85,13 @@ func writeContainers(w io.Writer, containers []container, terminal bool) error {
 
 // completeNames suggests container names in two stages: without a "/", tool
 // names ending in "/"; with one, that tool's names, each described by its
-// build date. Shadowed containers are never suggested, and hidden ones only
-// if all is set.
+// build date. Shadowed containers are never suggested, and hidden or
+// other-architecture ones only if all is set.
 func completeNames(containers []container, toComplete string, all bool) ([]string, cobra.ShellCompDirective) {
 	tool, _, hasSlash := strings.Cut(toComplete, "/")
 	var suggestions []string
 	for _, c := range containers {
-		if c.shadowed || c.hidden && !all {
+		if c.shadowed || (!all && (c.hidden || !c.compatibleWithHost())) {
 			continue
 		}
 		switch {

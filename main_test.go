@@ -1071,3 +1071,94 @@ func TestExitCode(t *testing.T) {
 		})
 	}
 }
+
+func TestFindArchFiltering(t *testing.T) {
+	const mixedCatalog = `{
+		"amico": {"categories": ["diffusion imaging"], "apps": {
+			"amico 2.1.0": {"version": "20250628", "image": "amico_2.1.0"},
+			"amico 2.1.0 arm64": {"version": "20260512", "image": "amico_2.1.0_arm64", "architecture": "aarch64"}
+		}},
+		"fsl": {"categories": ["image registration"], "apps": {
+			"fsl 6.0.7": {"version": "20260101", "architecture": "x86_64"}
+		}},
+		"fsl_arm64": {"categories": ["image registration"], "apps": {
+			"fsl_arm64 6.0.7.23": {"version": "20261013", "image": "fsl_arm64_6.0.7.23"}
+		}}
+	}`
+
+	base := t.TempDir()
+	setConfigHome(t, filepath.Join(base, "config"))
+	setCacheHome(t, filepath.Join(base, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("SCIGET_CONFIG", "")
+	t.Setenv("SCIGET_SYSTEM_DIR", filepath.Join(base, "system"))
+
+	cat := catalog{Name: "neuroimaging", URL: exampleURL("neuroimaging"), Use: true}
+	listPath, err := catalogListPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCatalogList(listPath, []catalog{cat}, false); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir, err := defaultValue("cache_dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := cat.dir(cacheDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "apps.json"), []byte(mixedCatalog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("x86_64 hides visible arm64 tools and versions", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		var out, errBuf bytes.Buffer
+		if code := run([]string{"find"}, &out, &errBuf); code != 0 {
+			t.Fatalf("find failed (%d): %s", code, errBuf.String())
+		}
+		want := "amico/2.1.0\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"fsl/6.0.7\tneuroimaging\timage registration\t\t\n"
+		if out.String() != want {
+			t.Errorf("find stdout =\n%s\nwant\n%s", out.String(), want)
+		}
+
+		out.Reset()
+		errBuf.Reset()
+		if code := run([]string{"find", "--all"}, &out, &errBuf); code != 0 {
+			t.Fatalf("find --all failed (%d): %s", code, errBuf.String())
+		}
+		wantAll := "amico/2.1.0\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"amico/2.1.0_arm64\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"fsl/6.0.7\tneuroimaging\timage registration\t\t\n" +
+			"fsl_arm64/6.0.7.23\tneuroimaging\timage registration\t\t\n"
+		if out.String() != wantAll {
+			t.Errorf("find --all stdout =\n%s\nwant\n%s", out.String(), wantAll)
+		}
+
+		out.Reset()
+		errBuf.Reset()
+		if code := run([]string{"__complete", "info", "fsl"}, &out, &errBuf); code != 0 {
+			t.Fatalf("__complete failed (%d): %s", code, errBuf.String())
+		}
+		if out.String() != "fsl/\n:6\n" {
+			t.Errorf("__complete info fsl =\n%s\nwant fsl/ only", out.String())
+		}
+	})
+
+	t.Run("aarch64 hides explicit x86_64 and shows arm64", func(t *testing.T) {
+		withHostArch(t, "aarch64")
+		var out, errBuf bytes.Buffer
+		if code := run([]string{"find"}, &out, &errBuf); code != 0 {
+			t.Fatalf("find failed (%d): %s", code, errBuf.String())
+		}
+		want := "amico/2.1.0\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"amico/2.1.0_arm64\tneuroimaging\tdiffusion imaging\t\t\n" +
+			"fsl_arm64/6.0.7.23\tneuroimaging\timage registration\t\t\n"
+		if out.String() != want {
+			t.Errorf("find stdout =\n%s\nwant\n%s", out.String(), want)
+		}
+	})
+}

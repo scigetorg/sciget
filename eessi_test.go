@@ -194,6 +194,7 @@ func isolateTestEnv(t *testing.T, tmp string) {
 }
 
 func TestRefreshAndEESSICommands(t *testing.T) {
+	withHostArch(t, "x86_64")
 	tmp := t.TempDir()
 	isolateTestEnv(t, tmp)
 
@@ -740,6 +741,7 @@ func TestRefreshAndEESSICommands(t *testing.T) {
 }
 
 func TestEESSICatalogPrecedenceAndMultiLauncher(t *testing.T) {
+	withHostArch(t, "x86_64")
 	tmp := t.TempDir()
 	isolateTestEnv(t, tmp)
 
@@ -4037,4 +4039,109 @@ func TestRefreshRollbackOnRenameFailure(t *testing.T) {
 			t.Fatalf("concurrent Windows mixed-case writeCatalogList failed: %v", err)
 		}
 	}
+}
+
+func TestEESSIFindFiltersByHostArch(t *testing.T) {
+	tmp := t.TempDir()
+	isolateTestEnv(t, tmp)
+
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	eessiJSON := `{
+		"schemaVersion": 1,
+		"backend": "eessi",
+		"explicitSelectionRequired": true,
+		"cvmfsRepo": "software.eessi.io",
+		"stacks": ["2025.06"],
+		"tools": {
+			"armonly": {
+				"package": "ArmOnly",
+				"apps": {
+					"ArmOnly 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "ArmOnly/1.0",
+						"software_version": "1.0",
+						"arch": ["aarch64"]
+					}
+				}
+			},
+			"x86only": {
+				"package": "X86Only",
+				"apps": {
+					"X86Only 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "X86Only/1.0",
+						"software_version": "1.0",
+						"arch": ["x86_64"]
+					}
+				}
+			},
+			"both": {
+				"package": "Both",
+				"apps": {
+					"Both 1.0": {
+						"backend": "eessi",
+						"stack": "2025.06",
+						"module": "Both/1.0",
+						"software_version": "1.0",
+						"arch": ["aarch64", "x86_64"]
+					}
+				}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(srcDir, "eessi.json"), []byte(eessiJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catFile := filepath.Join(srcDir, "cat.json")
+	if err := os.WriteFile(catFile, []byte(`{"schemaVersion": 1, "eessiCatalogUrl": "eessi.json", "eessi_stacks": ["2025.06"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"catalog", "add", "test", catFile}, &stdout, &stderr); code != 0 {
+		t.Fatalf("catalog add failed: %s", stderr.String())
+	}
+	if code := run([]string{"refresh"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("refresh failed: %s", stderr.String())
+	}
+
+	t.Run("x86_64 hides aarch64-only unless --all", func(t *testing.T) {
+		withHostArch(t, "x86_64")
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi find failed (%d): %s", code, stderr.String())
+		}
+		got := stdout.String()
+		if strings.Contains(got, "armonly/1.0") || !strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
+			t.Errorf("unexpected eessi find output on x86_64:\n%s", got)
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find", "--all"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi find --all failed (%d): %s", code, stderr.String())
+		}
+		gotAll := stdout.String()
+		if !strings.Contains(gotAll, "armonly/1.0") || !strings.Contains(gotAll, "x86only/1.0") || !strings.Contains(gotAll, "both/1.0") {
+			t.Errorf("unexpected eessi find --all output:\n%s", gotAll)
+		}
+	})
+
+	t.Run("aarch64 hides x86_64-only", func(t *testing.T) {
+		withHostArch(t, "aarch64")
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"eessi", "find"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("eessi find failed (%d): %s", code, stderr.String())
+		}
+		got := stdout.String()
+		if !strings.Contains(got, "armonly/1.0") || strings.Contains(got, "x86only/1.0") || !strings.Contains(got, "both/1.0") {
+			t.Errorf("unexpected eessi find output on aarch64:\n%s", got)
+		}
+	})
 }

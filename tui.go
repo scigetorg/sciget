@@ -206,7 +206,7 @@ func newModel(s tuiSettings, containers []container, loadErr error, st tuiState)
 // selection where its container still exists.
 func (m *model) setContainers(containers []container, err error) {
 	m.loadErr = err
-	if err == nil && !slices.ContainsFunc(containers, func(c container) bool { return !c.hidden && !c.shadowed }) {
+	if err == nil && !slices.ContainsFunc(containers, func(c container) bool { return !c.hidden && !c.shadowed && c.compatibleWithHost() }) {
 		m.loadErr = errNoContainers
 	}
 	tool, version := m.selectedNames()
@@ -218,7 +218,7 @@ func (m *model) setContainers(containers []container, err error) {
 	clear(m.counts)
 	counted := map[[2]string]bool{} // category and tool
 	for _, c := range containers {
-		if c.hidden || c.shadowed {
+		if c.hidden || c.shadowed || !c.compatibleWithHost() {
 			continue
 		}
 		m.visible = append(m.visible, c)
