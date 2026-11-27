@@ -524,3 +524,55 @@ func TestNotOnMachineError(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerShellPrompt(t *testing.T) {
+	if got := containerShellPrompt(container{tool: "fsl", version: "6.0.7.8"}); got != "[fsl/6.0.7.8] Apptainer> " {
+		t.Errorf("containerShellPrompt = %q", got)
+	}
+	hostile := containerShellPrompt(container{tool: "fsl$(id)", version: "1'$(touch x)'\\w"})
+	if err := checkEnvValue("PS1", hostile); err != nil {
+		t.Errorf("hostile prompt %q failed checkEnvValue: %v", hostile, err)
+	}
+	if strings.ContainsAny(hostile, "$`\\\"'") {
+		t.Errorf("hostile prompt %q contains unsafe chars", hostile)
+	}
+
+	t.Setenv("SCIGET_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	cfg, err := readConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := container{tool: "fsl", version: "6.0.3"}
+
+	t.Run("default prompt set for shell, omitted for exec", func(t *testing.T) {
+		t.Setenv("APPTAINERENV_PS1", "")
+		t.Setenv("SINGULARITYENV_PS1", "")
+		sShell, err := readLaunchSettings(cfg, "shell", c)
+		if err != nil || sShell.prompt != "[fsl/6.0.3] Apptainer> " {
+			t.Errorf("shell prompt = %q, err = %v", sShell.prompt, err)
+		}
+		sExec, err := readLaunchSettings(cfg, "exec", c)
+		if err != nil || sExec.prompt != "" {
+			t.Errorf("exec prompt = %q, err = %v", sExec.prompt, err)
+		}
+	})
+
+	t.Run("APPTAINERENV_PS1 suppresses default prompt", func(t *testing.T) {
+		t.Setenv("APPTAINERENV_PS1", "custom> ")
+		s, err := readLaunchSettings(cfg, "shell", c)
+		if err != nil || s.prompt != "" {
+			t.Errorf("prompt = %q, want empty when APPTAINERENV_PS1 is set", s.prompt)
+		}
+	})
+
+	t.Run("configured --env PS1 suppresses default prompt", func(t *testing.T) {
+		t.Setenv("APPTAINERENV_PS1", "")
+		t.Setenv("SINGULARITYENV_PS1", "")
+		cCustom := c
+		cCustom.apptainerArgs = []string{"--env", "PS1=mine> "}
+		s, err := readLaunchSettings(cfg, "shell", cCustom)
+		if err != nil || s.prompt != "" {
+			t.Errorf("prompt = %q, want empty when catalog sets PS1", s.prompt)
+		}
+	})
+}

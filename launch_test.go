@@ -189,4 +189,50 @@ func TestShellRun(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("readyDir suppresses quickFailure after interactive startup", func(t *testing.T) {
+		readyDir, err := os.MkdirTemp("", "sciget-test-ready-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stderr strings.Builder
+		r := &shellRun{
+			cmd:      exec.Command("/bin/sh", "-c", `: > "$SCIGET_SHELL_READY"; exit 3`),
+			name:     "fsl/6.0.3",
+			check:    time.Minute,
+			readyDir: readyDir,
+		}
+		r.SetStdin(strings.NewReader(""))
+		r.SetStdout(io.Discard)
+		r.SetStderr(&stderr)
+		err = r.Run()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 3 || stderr.Len() != 0 {
+			t.Errorf("Run() = %#v, stderr = %q, want normal ExitError(3) without pause", err, stderr.String())
+		}
+		if _, statErr := os.Stat(readyDir); !os.IsNotExist(statErr) {
+			t.Errorf("readyDir %s was not cleaned up", readyDir)
+		}
+	})
+
+	t.Run("readyDir catches failure before startup completes even after check duration", func(t *testing.T) {
+		readyDir, err := os.MkdirTemp("", "sciget-test-ready-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stderr strings.Builder
+		r := &shellRun{
+			cmd:      exec.Command("/bin/sh", "-c", "exit 3"),
+			name:     "fsl/6.0.3",
+			check:    0, // already elapsed: readyDir must still catch missing readiness
+			readyDir: readyDir,
+		}
+		r.SetStdin(strings.NewReader("\n"))
+		r.SetStdout(io.Discard)
+		r.SetStderr(&stderr)
+		err = r.Run()
+		if err != (quickFailure{code: 3}) {
+			t.Errorf("Run() = %#v, want quickFailure{3}", err)
+		}
+	})
 }

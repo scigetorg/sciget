@@ -25,18 +25,21 @@ func pullModel(t *testing.T) model {
 
 func TestTUIPull(t *testing.T) {
 	t.Run("Install button", func(t *testing.T) {
-		for _, tt := range []struct{ location, module, want string }{
-			{location: notHere, want: "install"},
-			{location: onHere + " (downloaded)", module: "none · Install makes one", want: "install"},
-			{location: onHere + " (an older build)", module: "module load itksnap/4.4.0", want: "install"},
-			{location: onHere + " (downloaded)", module: "module load itksnap/4.4.0 (from an older build · Install updates it)", want: "install"},
-			{location: onHere + " (downloaded)", module: "module load itksnap/4.4.0", want: "gui"},
-			{location: onHere + " (neuro share)", module: "the neuro share's own modules", want: "gui"},
+		for _, tt := range []struct {
+			location, module string
+			wantInstall      bool
+		}{
+			{location: notHere, wantInstall: true},
+			{location: onHere + " (downloaded)", module: "none · Install makes one", wantInstall: true},
+			{location: onHere + " (an older build)", module: "module load itksnap/4.4.0", wantInstall: true},
+			{location: onHere + " (downloaded)", module: "module load itksnap/4.4.0 (from an older build · Install updates it)", wantInstall: true},
+			{location: onHere + " (downloaded)", module: "module load itksnap/4.4.0", wantInstall: false},
+			{location: onHere + " (neuro share)", module: "the neuro share's own modules", wantInstall: false},
 		} {
 			m := pullModel(t)
 			m.location, m.module = tt.location, tt.module
-			if kinds := buttonKinds(m); kinds[len(kinds)-1] != tt.want {
-				t.Errorf("%s, %s: buttons %v, want %s last", tt.location, tt.module, kinds, tt.want)
+			if got := slices.Contains(buttonKinds(m), "install"); got != tt.wantInstall {
+				t.Errorf("%s, %s: buttons %v, want install=%v", tt.location, tt.module, buttonKinds(m), tt.wantInstall)
 			}
 		}
 	})
@@ -51,19 +54,23 @@ func TestTUIPull(t *testing.T) {
 			m.locFor, m.location, m.module = "itksnap/4.4.0", location, module
 			return m
 		}
-		for _, tt := range []struct{ location, module, want string }{
-			{location: notHere, want: "gui"},
-			{location: onHere + " (an older build)", module: "module load itksnap/4.4.0", want: "gui"},
-			{location: onHere + " (downloaded)", module: "none · Install makes one", want: "install"},
-			{location: "couldn't check: permission denied", module: "none · Install makes one", want: "gui"},
+		for _, tt := range []struct {
+			location, module string
+			wantInstall      bool
+		}{
+			{location: notHere, wantInstall: false},
+			{location: onHere + " (an older build)", module: "module load itksnap/4.4.0", wantInstall: false},
+			{location: onHere + " (downloaded)", module: "none · Install makes one", wantInstall: true},
+			{location: "couldn't check: permission denied", module: "none · Install makes one", wantInstall: false},
 		} {
-			if kinds := buttonKinds(withoutMirrors(tt.location, tt.module)); kinds[len(kinds)-1] != tt.want {
-				t.Errorf("%s, %s: buttons %v, want %s last", tt.location, tt.module, kinds, tt.want)
+			kinds := buttonKinds(withoutMirrors(tt.location, tt.module))
+			if got := slices.Contains(kinds, "install"); got != tt.wantInstall {
+				t.Errorf("%s, %s: buttons %v, want install=%v", tt.location, tt.module, kinds, tt.wantInstall)
 			}
 		}
 		m := withoutMirrors(notHere, "")
 		m.s.cfg = config{path: path, overrides: map[string]string{"auto_pull": "true"}}
-		if cmd := m.launch(1); cmd != nil || m.asking != "" || len(m.pulls) != 0 ||
+		if cmd := m.launch("gui", 0); cmd != nil || m.asking != "" || len(m.pulls) != 0 ||
 			!strings.Contains(m.statusFor().detail, "nothing to run") {
 			t.Errorf("command %v, asking %q, pulls %d, status %+v", cmd != nil, m.asking, len(m.pulls), m.statusFor())
 		}
@@ -71,20 +78,21 @@ func TestTUIPull(t *testing.T) {
 	t.Run("Install of an older build asks first", func(t *testing.T) {
 		m := pullModel(t)
 		m.location, m.module = onHere+" (an older build)", "module load itksnap/4.4.0"
-		if m.press(len(m.buttons()) - 1); m.asking != "itksnap/4.4.0" || len(m.pulls) != 0 {
+		idx := slices.Index(buttonKinds(m), "install")
+		if m.press(idx); m.asking != "itksnap/4.4.0" || len(m.pulls) != 0 {
 			t.Errorf("asking %q, pulls %d", m.asking, len(m.pulls))
 		}
 	})
 	t.Run("no", func(t *testing.T) {
 		m := pullModel(t)
-		m.launch(0)
+		m.launch("terminal", 0)
 		if cmd := m.press(2); cmd != nil || m.asking != "" || len(m.pulls) != 0 || buttonKinds(m)[0] != "terminal" {
 			t.Errorf("command %v, asking %q, pulls %d, buttons %v", cmd != nil, m.asking, len(m.pulls), buttonKinds(m))
 		}
 	})
 	t.Run("yes starts a download, and nothing launches after", func(t *testing.T) {
 		m := pullModel(t)
-		m.launch(1)
+		m.launch("gui", 0)
 		if cmd := m.press(1); cmd == nil || len(m.pulls) != 1 || m.launches[0].action != "Install" ||
 			!slices.Equal(buttonKinds(m), []string{"cancel"}) {
 			t.Fatalf("command %v, pulls %d, launches %v, buttons %v", cmd != nil, len(m.pulls), m.launches, buttonKinds(m))
@@ -99,7 +107,7 @@ func TestTUIPull(t *testing.T) {
 	})
 	t.Run("always saves auto_pull", func(t *testing.T) {
 		m := pullModel(t)
-		m.launch(0)
+		m.launch("terminal", 0)
 		m.press(0)
 		if auto, _ := m.s.cfg.getBool("auto_pull"); !auto || len(m.pulls) != 1 {
 			t.Errorf("auto_pull %v, pulls %d", auto, len(m.pulls))
@@ -111,7 +119,7 @@ func TestTUIPull(t *testing.T) {
 	t.Run("a click half done when the download ends is forgotten", func(t *testing.T) {
 		m := pullModel(t)
 		m.s.cfg.overrides["auto_pull"] = "true"
-		m.launch(0)
+		m.launch("terminal", 0)
 		m.pressed = target{ctl: buttonsControl, index: 0} // pressed on Cancel
 		m.handle(pullDoneMsg{id: m.pulls[0].id, loc: location{path: "/x"}})
 		if m.pressed != (target{}) {
@@ -124,12 +132,12 @@ func TestTUIPull(t *testing.T) {
 		if err := os.WriteFile(m.s.cfg.path, []byte("{}"), 0o400); err != nil {
 			t.Fatal(err)
 		}
-		m.launch(0)
+		m.launch("terminal", 0)
 		m.press(0)
 		if auto, _ := m.s.cfg.getBool("auto_pull"); auto || len(m.pulls) != 0 || !strings.HasPrefix(m.statusFor().detail, "Couldn't save auto_pull") {
 			t.Errorf("auto_pull %v, pulls %d, status %+v", auto, len(m.pulls), m.statusFor())
 		}
-		m.launch(0)
+		m.launch("terminal", 0)
 		if m.asking == "" {
 			t.Error("the next launch did not ask")
 		}
@@ -139,14 +147,14 @@ func TestTUIPull(t *testing.T) {
 		m.s.cfg.overrides["parallel_pulls"] = "1"
 		m.pulls = []*pullRun{{name: "other/1", cancel: func() {}}}
 		m.s.cfg.overrides["auto_pull"] = "true"
-		if cmd := m.launch(0); cmd != nil || len(m.pulls) != 1 || !strings.Contains(m.statusFor().detail, "wait for one to finish") {
+		if cmd := m.launch("terminal", 0); cmd != nil || len(m.pulls) != 1 || !strings.Contains(m.statusFor().detail, "wait for one to finish") {
 			t.Errorf("command %v, pulls %d, status %+v", cmd != nil, len(m.pulls), m.statusFor())
 		}
 	})
 	t.Run("quit asks, then stops the pulls and quits", func(t *testing.T) {
 		m := pullModel(t)
 		m.s.cfg.overrides["auto_pull"] = "true"
-		m.launch(0)
+		m.launch("terminal", 0)
 		cancelled := false
 		m.pulls[0].cancel = func() { cancelled = true }
 		if cmd := m.quitOrWarn(); cmd != nil || m.statusFor().state != "quit" || m.quitting {

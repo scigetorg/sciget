@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -86,6 +87,7 @@ type control int
 // Controls, in focus-ring order; crumbControl takes clicks only.
 const (
 	noControl control = iota
+	helpControl
 	updateControl
 	quitControl
 	searchControl
@@ -94,6 +96,7 @@ const (
 	refreshControl
 	appsControl
 	versionsControl
+	sessionClearControl
 	buttonsControl
 	activityControl
 	crumbControl
@@ -176,6 +179,16 @@ type model struct {
 	asking   string     // the container whose pull question the buttons show
 	pulls    []*pullRun // running, oldest first
 	quitting bool       // Quit was confirmed; quit once the pulls have stopped
+
+	staged        []string // container names staged for the next session shell
+	overlay       overlayKind
+	overlayScroll int
+	aboutID       int
+	aboutFor      string
+	aboutLoading  bool
+	aboutCancel   context.CancelFunc
+	aboutList     *commandList
+	aboutErr      string
 }
 
 func newModel(s tuiSettings, containers []container, loadErr error, st tuiState) model {
@@ -311,7 +324,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.asking = "" // so did the question
 	}
 	cmds := []tea.Cmd{cmd, m.lookUpLocation()}
-	if busy := m.refreshing || m.checking || m.desktopBusy || m.waiting != nil || len(m.pulls) > 0 ||
+	if busy := m.refreshing || m.checking || m.desktopBusy || m.waiting != nil || len(m.pulls) > 0 || m.aboutLoading ||
 		slices.ContainsFunc(m.launches, func(l launch) bool { return l.state == "starting" }); busy && !m.spinning {
 		m.spinning = true
 		cmds = append(cmds, m.spin.Tick)
@@ -334,9 +347,13 @@ func (m *model) keepButton() {
 }
 
 func (m *model) handle(msg tea.Msg) tea.Cmd {
+	if handled, cmd := m.handleOverlay(msg); handled {
+		return cmd
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.pressed = target{}
 	case tea.BackgroundColorMsg:
 		m.dark = msg.IsDark()
 		m.th = newTheme(m.dark)
@@ -364,7 +381,7 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 		m.pressed = target{}
 		if msg.Button == tea.MouseLeft && t == pressed && t.ctl != noControl {
 			switch t.ctl {
-			case updateControl, quitControl, clearControl, refreshControl, buttonsControl:
+			case helpControl, updateControl, quitControl, clearControl, refreshControl, sessionClearControl, buttonsControl:
 				return m.activate(t.ctl, t.index)
 			}
 		}
@@ -390,12 +407,35 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 		if msg.id != m.locID {
 			return nil
 		}
+		if m.location != msg.text || m.module != msg.module {
+			// A location or module change can insert/remove buttons (Add to
+			// session, Install), so forget any in-flight button press.
+			if m.pressed.ctl == buttonsControl {
+				m.pressed = target{}
+			}
+		}
 		m.location, m.module = msg.text, msg.module
 		if w := m.waiting; w != nil && w.name == m.locFor {
 			m.waiting = nil
 			if c, _ := m.selected(); c.name() == w.name {
-				return m.launch(w.btn)
+				return m.launch(w.kind, w.entry)
 			}
+		}
+		if m.overlay == overlayAbout && m.aboutList == nil && !m.aboutLoading &&
+			strings.HasPrefix(m.location, onHere) {
+			return m.openAbout()
+		}
+	case aboutMsg:
+		if msg.id != m.aboutID || !m.aboutLoading {
+			return nil
+		}
+		m.aboutLoading = false
+		m.aboutCancel = nil
+		if msg.err != nil {
+			m.aboutErr = msg.err.Error()
+		} else {
+			list := msg.list
+			m.aboutList = &list
 		}
 	case updateMsg:
 		m.checking, m.updateText = false, msg.text
@@ -408,11 +448,30 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		m.setContainers(msg.containers, msg.readErr)
+		if dropped := m.revalidateStaged(); len(dropped) > 0 {
+			note := "removed from session: " + strings.Join(dropped, ", ")
+			if m.notice == nil {
+				m.notice = &callout{detail: note}
+			} else if m.notice.detail == "" {
+				m.notice.detail = note
+			} else {
+				m.notice.detail += " · " + note
+			}
+		}
 		m.locFor = "" // looked up again, from the new catalogs
 		m.locID++
+		m.cancelAbout()
+		m.aboutFor = ""
+		m.aboutList = nil
+		m.aboutErr = ""
 		m.waiting = nil // its button may now be another entry
 		if m.loadErr != nil {
 			m.focus = m.emptyControl()
+			if m.overlay == overlayAbout {
+				m.closeOverlay()
+			}
+		} else if m.overlay == overlayAbout {
+			return m.openAbout()
 		}
 	default:
 		// The search's own messages, such as a clipboard read.
@@ -423,6 +482,28 @@ func (m *model) handle(msg tea.Msg) tea.Cmd {
 		return tea.Batch(cmd, m.handleLaunch(msg), m.handlePull(msg))
 	}
 	return nil
+}
+
+// revalidateStaged drops staged container names that no longer exist in
+// m.visible after a catalog refresh and returns any dropped names.
+func (m *model) revalidateStaged() []string {
+	if len(m.staged) == 0 {
+		return nil
+	}
+	present := make(map[string]bool, len(m.visible))
+	for _, c := range m.visible {
+		present[c.name()] = true
+	}
+	var kept, dropped []string
+	for _, name := range m.staged {
+		if present[name] {
+			kept = append(kept, name)
+		} else {
+			dropped = append(dropped, name)
+		}
+	}
+	m.staged = kept
+	return dropped
 }
 
 // updateSearch passes msg to the search box and refilters if its text
@@ -445,6 +526,16 @@ func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 	switch key := msg.String(); key {
 	case "esc", "ctrl+c":
 		return m.quitOrWarn()
+	case "f1":
+		if !m.layout().tooSmall {
+			m.openHelp()
+		}
+		return nil
+	case "?":
+		if !m.layout().tooSmall && (m.focus != searchControl || m.search.Value() == "") {
+			m.openHelp()
+			return nil
+		}
 	case "tab", "shift+tab":
 		ring := m.ring()
 		i := slices.Index(ring, m.focus)
@@ -485,15 +576,18 @@ func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 func (m model) ring() []control {
 	if m.loadErr != nil {
 		if m.emptyControl() == refreshControl {
-			return []control{updateControl, quitControl, refreshControl}
+			return []control{helpControl, updateControl, quitControl, refreshControl}
 		}
-		return []control{updateControl, quitControl}
+		return []control{helpControl, updateControl, quitControl}
 	}
-	ring := []control{updateControl, quitControl, searchControl}
+	ring := []control{helpControl, updateControl, quitControl, searchControl}
 	if m.search.Value() != "" {
 		ring = append(ring, clearControl)
 	}
 	ring = append(ring, catsControl, refreshControl, appsControl, versionsControl)
+	if len(m.staged) > 0 {
+		ring = append(ring, sessionClearControl)
+	}
 	if m.buttonCount() > 0 {
 		ring = append(ring, buttonsControl)
 	}
@@ -512,7 +606,7 @@ func (m *model) setFocus(c control) {
 		m.active = ""
 	case catsControl, refreshControl, appsControl, versionsControl:
 		m.active = "software"
-	case buttonsControl:
+	case sessionClearControl, buttonsControl:
 		m.active = "details"
 	case activityControl:
 		m.active = "activity"
@@ -606,6 +700,8 @@ func (m *model) click(mouse tea.Mouse) tea.Cmd {
 // entry. Enter calls it for the focused control.
 func (m *model) activate(c control, index int) tea.Cmd {
 	switch c {
+	case helpControl:
+		m.openHelp()
 	case updateControl:
 		if !m.checking {
 			m.checking = true
@@ -617,6 +713,16 @@ func (m *model) activate(c control, index int) tea.Cmd {
 		m.search.SetValue("")
 		m.filter()
 		m.setFocus(searchControl)
+	case sessionClearControl:
+		m.staged = nil
+		m.notice = &callout{detail: "Cleared staged session tools"}
+		if m.focus == sessionClearControl {
+			if m.buttonCount() > 0 {
+				m.setFocus(buttonsControl)
+			} else {
+				m.setFocus(searchControl)
+			}
+		}
 	case refreshControl:
 		if !m.refreshing {
 			m.refreshing = true
@@ -656,6 +762,7 @@ func (m *model) jump(i int) {
 
 // quit saves the state and ends the program.
 func (m *model) quit() tea.Cmd {
+	m.cancelAbout()
 	m.save()
 	return tea.Quit
 }
@@ -757,27 +864,23 @@ func (m *model) lookUpLocation() tea.Cmd {
 // moduleText describes c's module: how to load it, or why it has none.
 func moduleText(cfg config, c container) string {
 	loc, locErr := locate(cfg, c)
-	// As install: a share that is also the caller's container_dir is theirs.
-	if locErr == nil && loc.share != "" {
-		if path, err := storePath(cfg, c); err != nil || path == "" {
-			return "the " + loc.share + " share's own modules"
-		}
+	st := inspectModule(cfg, c, loc, locErr)
+	if st.shareOnly {
+		return "the " + st.shareName + " share's own modules"
 	}
-	moduleDir, _, err := cfg.get("module_dir")
-	if err != nil || slices.ContainsFunc([]string{c.catalog, c.tool, c.version, c.buildDate}, unsafeLayoutValue) {
+	if st.unsafe {
 		return "none"
 	}
-	file, wrappers := modulePaths(moduleDir, c)
 	// As the Install button: it needs this build here, or mirrors to get it.
 	install := len(c.mirrors) > 0 || locErr == nil && !loc.older
-	if _, err := os.Stat(file); err != nil {
+	if !st.exists {
 		if !install {
 			return "none"
 		}
 		return "none · Install makes one"
 	}
 	text := shellJoin([]string{"module", "load", c.name()})
-	if _, err := os.Stat(wrappers); err != nil {
+	if !st.matchesCatalog {
 		hint := ""
 		if install {
 			hint = " · Install updates it"

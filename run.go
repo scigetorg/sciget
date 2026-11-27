@@ -22,12 +22,14 @@ import (
 var runApptainer = execApptainer
 
 // location is where a container was found: its path, the catalog whose
-// share holds it ("" when it is in the store), and whether it is another
-// build than the catalog's, usually an older one.
+// share holds it ("" when it is in the store), whether it is another
+// build than the catalog's (usually an older one), and the build date of
+// the image found on disk.
 type location struct {
-	path  string
-	share string
-	older bool
+	path      string
+	share     string
+	older     bool
+	buildDate string
 }
 
 // notOnMachineError identifies a known container missing from local storage.
@@ -89,7 +91,7 @@ func locate(cfg config, c container) (location, error) {
 			return location{}, err
 		}
 		if path != "" {
-			return location{path: path, share: share.Name}, nil
+			return location{path: path, share: share.Name, buildDate: c.buildDate}, nil
 		}
 	}
 	// The store is resolved only after the share misses, so a share hit
@@ -107,23 +109,23 @@ func locate(cfg config, c container) (location, error) {
 		return location{}, err
 	}
 	if path != "" {
-		return location{path: path}, nil
+		return location{path: path, buildDate: c.buildDate}, nil
 	}
 	if share.Dir != "" {
-		path, err := otherBuildIn(share.Dir, shareLayout, c, false)
+		path, date, err := otherBuildIn(share.Dir, shareLayout, c, false)
 		if err != nil {
 			return location{}, err
 		}
 		if path != "" {
-			return location{path: path, share: share.Name, older: true}, nil
+			return location{path: path, share: share.Name, older: true, buildDate: date}, nil
 		}
 	}
-	path, err = otherBuildIn(dir, layout, c, true)
+	path, date, err := otherBuildIn(dir, layout, c, true)
 	if err != nil {
 		return location{}, err
 	}
 	if path != "" {
-		return location{path: path, older: true}, nil
+		return location{path: path, older: true, buildDate: date}, nil
 	}
 	return location{}, notOnMachineError{name: c.name()}
 }
@@ -255,19 +257,20 @@ func sifArch(hdr []byte) string {
 // dir other than c's own, or "" if there is none. Candidates whose SIF header
 // indicates a mismatched architecture are skipped. A build date is eight digits.
 func otherBuild(dir, layout string, c container) (string, error) {
-	return otherBuildIn(dir, layout, c, true)
+	path, _, err := otherBuildIn(dir, layout, c, true)
+	return path, err
 }
 
-func otherBuildIn(dir, layout string, c container, isStore bool) (string, error) {
+func otherBuildIn(dir, layout string, c container, isStore bool) (string, string, error) {
 	if _, err := layoutPath(layout, c); err != nil {
-		return "", err
+		return "", "", err
 	}
 	// The layout is escaped first: its own characters are literal too.
 	pattern := strings.NewReplacer("{tool}", globEscape(c.tool), "{version}", globEscape(c.version),
 		"{date}", strings.Repeat("[0-9]", 8)).Replace(globEscape(layout))
 	matches, err := filepath.Glob(filepath.Join(globEscape(dir), filepath.FromSlash(pattern)))
 	if err != nil {
-		return "", fmt.Errorf("locating %s: %w", c.name(), err)
+		return "", "", fmt.Errorf("locating %s: %w", c.name(), err)
 	}
 	best, bestDate := "", ""
 	for _, match := range matches {
@@ -286,13 +289,13 @@ func otherBuildIn(dir, layout string, c container, isStore bool) (string, error)
 			}
 			path, err := findContainer(dir, layout, other)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 			if path != "" {
 				requireVerified := isStore && slices.Contains(c.foreignDates, other.buildDate)
 				ok, err := matchesLocalStore(path, other, false, requireVerified)
 				if err != nil {
-					return "", err
+					return "", "", err
 				}
 				if !ok {
 					path = ""
@@ -303,7 +306,7 @@ func otherBuildIn(dir, layout string, c container, isStore bool) (string, error)
 			}
 		}
 	}
-	return best, nil
+	return best, bestDate, nil
 }
 
 // globEscape escapes the characters filepath.Glob treats as special.
@@ -353,6 +356,51 @@ type launchSettings struct {
 	xauthorityVar string
 	tmpVars       []string
 	tmpTarget     string
+	prompt        string // PS1 for shell verb, unless overridden by user/config
+}
+
+// safePromptToken reduces s to safe ASCII characters [A-Za-z0-9._+-] (capped
+// at 32 bytes) so it can be embedded in PS1 without shell/prompt expansion.
+func safePromptToken(s string) string {
+	const maxLen = 32
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= maxLen {
+			break
+		}
+		if 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' ||
+			r == '.' || r == '_' || r == '+' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "container"
+	}
+	return b.String()
+}
+
+// containerShellPrompt returns a safe Apptainer shell prompt naming c.
+func containerShellPrompt(c container) string {
+	return fmt.Sprintf("[%s/%s] Apptainer> ", safePromptToken(c.tool), safePromptToken(c.version))
+}
+
+// hasPromptOverride reports whether the caller or configured Apptainer
+// arguments already specify a custom container prompt.
+func hasPromptOverride(s launchSettings) bool {
+	if os.Getenv("APPTAINERENV_PS1") != "" || os.Getenv("SINGULARITYENV_PS1") != "" {
+		return true
+	}
+	for _, list := range [][]string{s.global, s.verbArgs, s.extra, s.catalog} {
+		for _, arg := range list {
+			if strings.HasPrefix(arg, "PS1=") || strings.HasPrefix(arg, "--env=PS1=") ||
+				strings.Contains(arg, ",PS1=") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // readLaunchSettings reads the settings for running c with verb.
@@ -386,13 +434,16 @@ func readLaunchSettings(cfg config, verb string, c container) (launchSettings, e
 	if useCatalog {
 		s.catalog = c.apptainerArgs
 	}
+	if verb == "shell" && !hasPromptOverride(s) {
+		s.prompt = containerShellPrompt(c)
+	}
 	return s, nil
 }
 
 // apptainerArgs builds argv for running image with verb: the binary as
 // configured, global arguments, the verb, its arguments with placeholders
-// expanded, extra and catalog arguments, the image and, for exec, the
-// command.
+// expanded, the shell prompt (if any), extra and catalog arguments, the image
+// and, for exec, the command.
 func apptainerArgs(s launchSettings, verb, image string, command []string) ([]string, error) {
 	args := append([]string{s.apptainer}, s.global...)
 	args = append(args, verb)
@@ -406,6 +457,9 @@ func apptainerArgs(s launchSettings, verb, image string, command []string) ([]st
 			continue
 		}
 		args = append(args, arg)
+	}
+	if verb == "shell" && s.prompt != "" {
+		args = append(args, "--env", "PS1="+s.prompt)
 	}
 	args = append(args, s.extra...)
 	args = append(args, s.catalog...)
@@ -589,6 +643,17 @@ func newApptainerVerbCommand(verb string) *cobra.Command {
 				line := shellJoin(append([]string{path}, argv[1:]...))
 				_, err := fmt.Fprintln(cmd.OutOrStdout(), line)
 				return err
+			}
+			if verb == "shell" && isTerminal(cmd.ErrOrStderr()) {
+				where := c.fileName()
+				if loc.buildDate != "" && loc.buildDate != c.buildDate {
+					where = c.image + "_" + loc.buildDate
+				}
+				if loc.share != "" {
+					where += ", " + loc.share + " share"
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "sciget: container shell in %s (%s). Type exit to return.\n",
+					printable(c.name()), printable(where))
 			}
 			return runApptainer(path, argv, os.Environ())
 		},

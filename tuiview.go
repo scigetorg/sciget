@@ -15,6 +15,7 @@ import (
 const (
 	navRows       = 3
 	logoWidth     = 12
+	helpWidth     = 10 // ?  Help
 	pillWidth     = 12 // Quit and Clear
 	updateWidth   = 25
 	refreshWidth  = 26
@@ -46,12 +47,14 @@ type crumb struct {
 // click always lands on what is drawn.
 type layout struct {
 	tooSmall, stacked        bool
-	quit, update, version    rect
+	help, quit, update       rect
+	version                  rect
 	crumbs                   []crumb
 	search, clear            rect
 	software, details, activ rect // panel frames; activ.w is 0 when Activity is hidden
 	cats, apps, versions     rect // each list's rows, below its header
 	refresh, fields, buttons rect
+	sessionClear             rect // "× clear" on the Details divider row when tools are staged
 	callout, entries         rect
 }
 
@@ -67,7 +70,8 @@ func (m model) layout() layout {
 	}
 	l.quit = rect{w - 1 - pillWidth, 0, pillWidth, navRows}
 	l.update = rect{l.quit.x - 1 - updateWidth, 0, updateWidth, navRows}
-	l.version = rect{logoWidth + 2, 1, l.update.x - logoWidth - 5, 1}
+	l.help = rect{l.update.x - 1 - helpWidth, 0, helpWidth, navRows}
+	l.version = rect{logoWidth + 2, 1, max(0, l.help.x-logoWidth-5), 1}
 	top := navRows + 3
 	if m.loadErr != nil {
 		if m.emptyControl() == refreshControl {
@@ -114,6 +118,10 @@ func (m model) layout() layout {
 
 	cx, cw, bottom := l.details.x+3, l.details.w-6, h-1 // bottom: the frames' last row
 	l.fields = rect{cx, y + 1, cw, 7}
+	if len(m.staged) > 0 && cw >= 12 {
+		const clearW = 9
+		l.sessionClear = rect{cx + cw - clearW, l.fields.y + 7, clearW, 1}
+	}
 	l.buttons = rect{cx, y + 9, cw, bottom - y - 9} // after the fields, a blank row and the rule
 	if l.activ.w > 0 {
 		ax, aw := l.activ.x+3, l.activ.w-6
@@ -177,6 +185,8 @@ func (m model) hit(l layout, x, y int) target {
 		return target{ctl: quitControl}
 	case in(l.update):
 		return target{ctl: updateControl}
+	case in(l.help):
+		return target{ctl: helpControl}
 	case in(l.refresh):
 		return target{ctl: refreshControl, panel: "software"}
 	case m.loadErr != nil:
@@ -213,6 +223,8 @@ func (m model) hit(l layout, x, y int) target {
 		item(appsControl, l.apps, m.appTop, len(m.apps))
 	case in(l.versions):
 		item(versionsControl, l.versions, m.verTop, len(m.byTool[tool]))
+	case l.sessionClear.w > 0 && in(l.sessionClear):
+		t.ctl = sessionClearControl
 	case in(l.buttons) && x < l.buttons.x+buttonWidth:
 		first, n, above, _ := buttonView(m.btnTop, m.buttonCount(), l.buttons.h)
 		row := y - l.buttons.y
@@ -280,7 +292,7 @@ func (m *model) clampScroll() {
 	count := m.buttonCount()
 	m.btnTop = clamp(m.btnTop, 0, max(0, count-1))
 	for m.btnTop > 0 {
-		if _, _, _, below := buttonView(m.btnTop-1, count, l.buttons.h); below {
+		if first, n, _, _ := buttonView(m.btnTop-1, count, l.buttons.h); first+n < count {
 			break
 		}
 		m.btnTop--
@@ -380,6 +392,7 @@ func (m model) View() tea.View {
 		m.viewDetails(put, l)
 		m.viewActivity(put, l)
 	}
+	m.viewOverlay(put)
 	v.SetContent(lipgloss.NewCompositor(layers...).Render())
 	return v
 }
@@ -440,6 +453,8 @@ func (m model) viewNavbar(put draw, l layout) {
 	if m.checking {
 		label = m.spin.View() + " Checking…"
 	}
+	put(l.help.x, 0, m.th.pill("? Help", m.focusColour(helpControl, m.th.text.GetForeground()), helpWidth,
+		m.pressed.ctl == helpControl, m.th.band))
 	put(l.update.x, 0, m.th.pill(label, m.focusColour(updateControl, m.th.text.GetForeground()), updateWidth, false, m.th.band))
 	put(l.quit.x, 0, m.th.pill("×  Quit", m.focusColour(quitControl, m.th.err.GetForeground()), pillWidth,
 		m.pressed.ctl == quitControl, m.th.band))
@@ -571,7 +586,25 @@ func (m model) viewDetails(put draw, l layout) {
 		put(l.fields.x, l.fields.y+i, m.th.accent.Render("│ ")+m.th.label.Render(fmt.Sprintf("%-12s", f.label))+
 			f.style.Render(fit(printable(f.value), l.fields.w-14)))
 	}
-	put(l.fields.x, l.fields.y+7, m.th.rule.Render(strings.Repeat("─", l.fields.w)))
+	if len(m.staged) == 0 {
+		put(l.fields.x, l.fields.y+7, m.th.rule.Render(strings.Repeat("─", l.fields.w)))
+	} else {
+		leftW := l.fields.w
+		if l.sessionClear.w > 0 {
+			leftW = l.fields.w - l.sessionClear.w - 1
+		}
+		summary := fmt.Sprintf("Session (%d): %s", len(m.staged), strings.Join(m.staged, " · "))
+		put(l.fields.x, l.fields.y+7, m.th.accent.Bold(true).Render(fit(printable(summary), max(1, leftW))))
+		if l.sessionClear.w > 0 {
+			clearStyle := m.th.muted
+			if m.focus == sessionClearControl && m.touched {
+				clearStyle = m.th.accent.Bold(true)
+			} else if l.sessionClear.has(m.hoverX, m.hoverY) {
+				clearStyle = m.th.text.Underline(true)
+			}
+			put(l.sessionClear.x, l.sessionClear.y, clearStyle.Render("[× clear]"))
+		}
+	}
 
 	first, n, above, below := buttonView(m.btnTop, m.buttonCount(), l.buttons.h)
 	y := l.buttons.y

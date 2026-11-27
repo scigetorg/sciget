@@ -39,7 +39,7 @@ func isQuit(cmd tea.Cmd) bool {
 }
 
 func TestRing(t *testing.T) {
-	all := []control{updateControl, quitControl, searchControl, clearControl, catsControl, refreshControl,
+	all := []control{helpControl, updateControl, quitControl, searchControl, clearControl, catsControl, refreshControl,
 		appsControl, versionsControl, buttonsControl, activityControl}
 	for _, tt := range []struct {
 		name          string
@@ -51,10 +51,10 @@ func TestRing(t *testing.T) {
 		{name: "every control", width: 160, height: 45, search: "fsl", launched: true, want: all},
 		{name: "Clear hidden without text", width: 160, height: 45, launched: true,
 			want: slices.DeleteFunc(slices.Clone(all), func(c control) bool { return c == clearControl })},
-		{name: "Activity skipped when hidden", width: 80, height: 24, search: "fsl", launched: true, want: all[:9]},
-		{name: "Activity skipped when empty", width: 160, height: 45, search: "fsl", want: all[:9]},
+		{name: "Activity skipped when hidden", width: 80, height: 24, search: "fsl", launched: true, want: all[:10]},
+		{name: "Activity skipped when empty", width: 160, height: 45, search: "fsl", want: all[:10]},
 		{name: "buttons skipped with no match", width: 160, height: 45, search: "zzz",
-			want: []control{updateControl, quitControl, searchControl, clearControl, catsControl, refreshControl,
+			want: []control{helpControl, updateControl, quitControl, searchControl, clearControl, catsControl, refreshControl,
 				appsControl, versionsControl}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -89,7 +89,7 @@ func TestUpdate(t *testing.T) {
 			wantFocus: searchControl, wantSearch: "k", wantApps: []string{"itksnap"}, wantSel: "itksnap/4.4.0"},
 		{name: "Tab moves to the next control and its panel", msgs: []tea.Msg{tab},
 			wantFocus: catsControl, wantActive: "software", wantApps: []string{"fsl", "itksnap"}, wantSel: "fsl/6.0.7"},
-		{name: "Shift-Tab wraps backwards", msgs: []tea.Msg{shiftTab, shiftTab, shiftTab},
+		{name: "Shift-Tab wraps backwards", msgs: []tea.Msg{shiftTab, shiftTab, shiftTab, shiftTab},
 			wantFocus: buttonsControl, wantActive: "details", wantApps: []string{"fsl", "itksnap"}, wantSel: "fsl/6.0.7"},
 		{name: "Enter on search moves to Name", msgs: []tea.Msg{enter, down},
 			wantFocus: appsControl, wantActive: "software", wantApps: []string{"fsl", "itksnap"}, wantSel: "itksnap/4.4.0"},
@@ -247,7 +247,7 @@ func TestRefreshMsg(t *testing.T) {
 	t.Run("a held launch is cancelled", func(t *testing.T) {
 		m := launchModel(t)
 		m.location = checking
-		m.launch(1)
+		m.launch("gui", 0)
 		m.handle(refreshMsg{results: []refreshResult{{name: "neuro"}}, containers: tuiContainers})
 		if cmd := m.handle(locationMsg{id: m.locID, text: onHere + " (downloaded)"}); cmd != nil || len(m.launches) != 0 {
 			t.Errorf("command %v, launches %v, want nothing started", cmd != nil, m.launches)

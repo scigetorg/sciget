@@ -19,8 +19,9 @@ import (
 // pending is a launch clicked while its container's location was still
 // being checked.
 type pending struct {
-	name string
-	btn  int
+	name  string
+	kind  string
+	entry int
 }
 
 // Messages a launch produces, each carrying its launch id.
@@ -56,48 +57,76 @@ type (
 	}
 )
 
-// launch starts button i of the selected container: the terminal, or a
-// GUI entry once a display answers.
-func (m *model) launch(i int) tea.Cmd {
+// launch starts a terminal session, container shell, or GUI entry for the
+// selected container once it is verified on this machine.
+func (m *model) launch(kind string, entry int) tea.Cmd {
 	c, ok := m.selected()
-	if !ok || i >= m.buttonCount() {
+	if !ok {
+		return nil
+	}
+	if kind == "gui" && (entry < 0 || entry >= len(c.entries)) {
 		return nil
 	}
 	switch loc := m.location; {
 	case strings.HasPrefix(loc, notHere):
 		return m.requestPull(c)
 	case loc == checking || loc == "":
-		m.waiting = &pending{c.name(), i}
+		m.waiting = &pending{name: c.name(), kind: kind, entry: entry}
 		m.notice = &callout{state: "starting", detail: "Checking " + c.name() + " is on this machine…"}
 		return nil
 	case !strings.HasPrefix(loc, onHere):
 		m.notice = &callout{state: "failed", detail: "Couldn't check " + c.name() + " is on this machine: " + strings.TrimPrefix(loc, "couldn't check: ")}
 		return nil
 	}
+	m.closeOverlay()
 	m.nextID++
 	m.notice = nil
 	l := launch{id: m.nextID, name: c.name(), state: "starting", at: time.Now()}
-	if i == 0 {
-		l.action, l.detail = "Terminal", "Starting a shell in "+c.name()+"…"
+	switch kind {
+	case "terminal":
+		tools := m.sessionToolsFor(c)
+		l.action = "Terminal"
+		if len(tools) > 1 {
+			l.detail = "Starting session (" + strings.Join(tools, ", ") + ")…"
+		} else {
+			l.detail = "Starting a shell with " + c.name() + "…"
+		}
+		m.launches = append([]launch{l}, m.launches...)
+		argv := append([]string{"shell", "--"}, tools...)
+		readyDir := ""
+		if dir, err := os.MkdirTemp("", "sciget-ready-*"); err == nil {
+			if os.Chmod(dir, 0o700) == nil {
+				readyDir = dir
+			} else {
+				os.RemoveAll(dir)
+			}
+		}
+		run := &shellRun{cmd: exec.Command(m.s.self, argv...), name: c.name(), check: m.s.launchCheck, readyDir: readyDir}
+		return tea.Exec(run, func(err error) tea.Msg { return shellMsg{l.id, err} })
+	case "container":
+		l.action, l.detail = "Container shell", "Starting a container shell in "+c.name()+"…"
 		m.launches = append([]launch{l}, m.launches...)
 		run := &shellRun{cmd: exec.Command(m.s.self, "apptainer", "shell", "--", c.name()), name: c.name(), check: m.s.launchCheck}
 		return tea.Exec(run, func(err error) tea.Msg { return shellMsg{l.id, err} })
-	}
-	e := c.entries[i-1]
-	l.action = "Open " + strings.TrimSuffix(e.label, "GUI")
-	l.argv = append([]string{m.s.self, "apptainer", "exec", "--", c.name()}, strings.Fields(e.exec)...)
-	l.detail = "Starting " + l.action[len("Open "):] + "…"
-	m.launches = append([]launch{l}, m.launches...)
-	display := os.Getenv("DISPLAY")
-	switch {
-	case display == "":
-		m.finish(l.id, "failed", "No display is set")
-	case m.desktopBusy:
-		m.queue = append(m.queue, l.id)
+	case "gui":
+		e := c.entries[entry]
+		l.action = "Open " + strings.TrimSuffix(e.label, "GUI")
+		l.argv = append([]string{m.s.self, "apptainer", "exec", "--", c.name()}, strings.Fields(e.exec)...)
+		l.detail = "Starting " + l.action[len("Open "):] + "…"
+		m.launches = append([]launch{l}, m.launches...)
+		display := os.Getenv("DISPLAY")
+		switch {
+		case display == "":
+			m.finish(l.id, "failed", "No display is set")
+		case m.desktopBusy:
+			m.queue = append(m.queue, l.id)
+		default:
+			return func() tea.Msg { return displayMsg{l.id, displayLive(display)} }
+		}
+		return nil
 	default:
-		return func() tea.Msg { return displayMsg{l.id, displayLive(display)} }
+		return nil
 	}
-	return nil
 }
 
 // handleLaunch moves launches on as their messages arrive. The exit is
