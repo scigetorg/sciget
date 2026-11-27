@@ -17,13 +17,64 @@ import (
 // quitting only once they have stopped. Installs run in the TUI's own
 // process, so quitting stops them.
 
-// button is one of the details panel's buttons. Normally they launch the
-// selected container; while a question is asked, or the container is
-// downloading, they answer it or cancel.
+// button is one of the details panel's buttons. Normally they launch or
+// inspect the selected container; while a question is asked, or the container
+// is downloading, they answer it or cancel.
 type button struct {
-	kind           string // "terminal", "gui", "install", "always", "yes", "no" or "cancel"
+	kind           string // "terminal", "gui", "stage", "container", "install", "about", "always", "yes", "no" or "cancel"
+	entry          int    // index into c.entries when kind == "gui"
 	label, caption string
 	col            color.Color
+}
+
+func (m model) isStaged(name string) bool {
+	for _, s := range m.staged {
+		if s == name {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionToolsFor returns the ordered list of tools to load when opening a
+// host terminal from c: c first, followed by any other staged tools (skipping
+// any other version of c.tool so c takes precedence).
+func (m model) sessionToolsFor(c container) []string {
+	tools := []string{c.name()}
+	for _, s := range m.staged {
+		if s == c.name() {
+			continue
+		}
+		tool, _, _ := strings.Cut(s, "/")
+		if tool == c.tool {
+			continue
+		}
+		tools = append(tools, s)
+	}
+	return tools
+}
+
+// toggleStage adds or removes c from the TUI's staged session list. Staging a
+// different version of an already-staged tool replaces the older version.
+func (m *model) toggleStage(c container) {
+	name := c.name()
+	for i, s := range m.staged {
+		if s == name {
+			m.staged = append(m.staged[:i], m.staged[i+1:]...)
+			m.notice = &callout{detail: "Removed " + name + " from session"}
+			return
+		}
+	}
+	for i, s := range m.staged {
+		tool, _, _ := strings.Cut(s, "/")
+		if tool == c.tool {
+			m.staged[i] = name
+			m.notice = &callout{detail: "Session switched " + s + " to " + name}
+			return
+		}
+	}
+	m.staged = append(m.staged, name)
+	m.notice = &callout{detail: fmt.Sprintf("Added %s to session (%d staged)", name, len(m.staged))}
 }
 
 // buttons returns the selected container's buttons.
@@ -45,20 +96,44 @@ func (m model) buttons() []button {
 	missing := strings.HasPrefix(m.location, notHere)
 	older := strings.Contains(m.location, "older build")
 	noModule := strings.HasPrefix(m.module, "none") || strings.Contains(m.module, "older build")
-	bs := []button{{kind: "terminal", label: "›_ Open a terminal", caption: "a shell here · type exit to return", col: m.th.term}}
-	for _, e := range c.entries {
-		bs = append(bs, button{kind: "gui", label: "►  Open " + strings.TrimSuffix(printable(e.label), "GUI"),
-			caption: "opens a window on the desktop", col: m.th.gui})
+
+	sessionTools := m.sessionToolsFor(c)
+	termLabel := "›_ Open a terminal"
+	termCaption := "host shell with " + c.tool + " · exit returns"
+	if extra := len(sessionTools) - 1; extra > 0 {
+		termLabel = fmt.Sprintf("›_ Open a terminal (+%d)", extra)
+		termCaption = "session: " + strings.Join(sessionTools, ", ")
 	}
+	termCol := m.th.term
 	if missing {
-		for i := range bs {
-			bs[i].col = m.th.muted.GetForeground()
+		termCol = m.th.muted.GetForeground()
+	}
+	bs := []button{{kind: "terminal", label: termLabel, caption: termCaption, col: termCol}}
+	for idx, e := range c.entries {
+		col := m.th.gui
+		if missing {
+			col = m.th.muted.GetForeground()
+		}
+		bs = append(bs, button{kind: "gui", entry: idx, label: "►  Open " + strings.TrimSuffix(printable(e.label), "GUI"),
+			caption: "opens a window on the desktop", col: col})
+	}
+	if strings.HasPrefix(m.location, onHere) || m.isStaged(c.name()) {
+		if m.isStaged(c.name()) {
+			bs = append(bs, button{kind: "stage", label: "−  Remove from session",
+				caption: "remove from staged session", col: m.th.muted.GetForeground()})
+		} else {
+			bs = append(bs, button{kind: "stage", label: "+  Add to session",
+				caption: "combine with other tools in one shell", col: m.th.term})
 		}
 	}
+	bs = append(bs, button{kind: "container", label: "▣  Open container shell",
+		caption: "inside container · exit returns", col: termCol})
 	// Without mirrors, Install can only make a module for what is here.
 	if len(c.mirrors) > 0 && (missing || older) || noModule && strings.HasPrefix(m.location, onHere) && !older {
 		bs = append(bs, button{kind: "install", label: "▼  Install", caption: "download if needed, and make its module", col: m.th.accent.GetForeground()})
 	}
+	bs = append(bs, button{kind: "about", label: "≡  About & commands",
+		caption: "README, commands, licence & DOI", col: m.th.text.GetForeground()})
 	return bs
 }
 
@@ -70,6 +145,11 @@ func (m *model) press(i int) tea.Cmd {
 		return nil
 	}
 	switch bs[i].kind {
+	case "stage":
+		m.toggleStage(c)
+		return nil
+	case "about":
+		return m.openAbout()
 	case "install":
 		// A download is asked about first, as when opening a container.
 		if strings.HasPrefix(m.location, notHere) || strings.Contains(m.location, "older build") {
@@ -85,7 +165,7 @@ func (m *model) press(i int) tea.Cmd {
 		}
 		return nil
 	}
-	return m.launch(i)
+	return m.launch(bs[i].kind, bs[i].entry)
 }
 
 // pullRun is a pull in progress.

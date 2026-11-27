@@ -43,40 +43,59 @@ const (
 
 // listCommands returns the command list of c, found at loc: from the cache,
 // else by running the finder in the container and caching what it prints.
+// The cache is keyed by the build date of the image actually found at loc so
+// scanning an older image never poisons the catalog's current build cache.
 func listCommands(ctx context.Context, cfg config, c container, loc location) (commandList, error) {
-	cachePath, err := commandCachePath(cfg, c)
-	if err != nil {
-		return commandList{}, err
+	buildDate := loc.buildDate
+	if buildDate == "" && !loc.older {
+		buildDate = c.buildDate
 	}
-	if data, err := os.ReadFile(cachePath); err == nil {
-		var list commandList
-		if json.Unmarshal(data, &list) == nil {
-			return list, nil
+	var cachePath string
+	if buildDate != "" {
+		var err error
+		cachePath, err = commandCachePath(cfg, c, buildDate)
+		if err != nil {
+			return commandList{}, err
+		}
+		if data, err := os.ReadFile(cachePath); err == nil {
+			var list commandList
+			if json.Unmarshal(data, &list) == nil {
+				return list, nil
+			}
 		}
 	}
 	list, err := runFinder(ctx, cfg, loc.path)
 	if err != nil {
 		return commandList{}, fmt.Errorf("listing the commands of %s: %w", c.name(), err)
 	}
-	if err := writeJSONFile(cachePath, list); err != nil {
-		return commandList{}, fmt.Errorf("caching the commands of %s: %w", c.name(), err)
+	if cachePath != "" {
+		data, err := json.MarshalIndent(list, "", "  ")
+		if err != nil {
+			return commandList{}, fmt.Errorf("caching the commands of %s: %w", c.name(), err)
+		}
+		if err := writeFileAtomic(cachePath, string(append(data, '\n'))); err != nil {
+			return commandList{}, fmt.Errorf("caching the commands of %s: %w", c.name(), err)
+		}
 	}
 	return list, nil
 }
 
-// commandCachePath returns where the finder's output for c is cached: one
-// file per catalog, tool, version and build.
-func commandCachePath(cfg config, c container) (string, error) {
+// commandCachePath returns where the finder's output for c at buildDate is
+// cached: one file per catalog, tool, version and build.
+func commandCachePath(cfg config, c container, buildDate string) (string, error) {
 	cacheDir, _, err := cfg.get("cache_dir")
 	if err != nil {
 		return "", err
 	}
-	for _, value := range []string{c.catalog, c.tool, c.version, c.buildDate} {
+	if buildDate == "" {
+		buildDate = c.buildDate
+	}
+	for _, value := range []string{c.catalog, c.tool, c.version, buildDate} {
 		if unsafeLayoutValue(value) {
 			return "", fmt.Errorf("catalog entry %q has an unsafe cache path value %q", c.name(), value)
 		}
 	}
-	return filepath.Join(cacheDir, "commands", c.catalog, c.tool, c.version, c.buildDate+".json"), nil
+	return filepath.Join(cacheDir, "commands-v2", c.catalog, c.tool, c.version, buildDate+".json"), nil
 }
 
 // runFinder runs finderScript in the image at image and parses what it

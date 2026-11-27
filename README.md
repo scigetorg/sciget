@@ -31,8 +31,10 @@ That link is a domains file, so it adds one catalog per domain:
 `neurodesk-neuroimaging` and `neurodesk-microscopy`.
 
 Run on a terminal with no command, sciget opens a full-screen interface:
-search, pick a container and open a shell in it or launch its applications.
-Mouse and keyboard both work.
+search, pick containers, stage tools into a session, open a host terminal
+with their tools loaded (or enter a container shell directly), launch GUI
+applications, and press `?` or `F1` for in-app help. Mouse and keyboard
+both work.
 
 Catalog URLs must use https. Plain http is allowed only to this machine,
 such as a port forwarded through an SSH tunnel
@@ -84,6 +86,9 @@ keys, `{"schemaVersion": 1, "domains": {"neuroimaging": {...}, ...}}`;
 | `sciget eessi [find\|info\|launch]` | Browse and launch curated EESSI CVMFS modules (explicit opt-in; no DOI). Put `launch` flags (`--stack`, `--gpu`, `--launcher`) before the tool name |
 | `sciget pull <tool/version>...` | Download containers into `container_dir`, `parallel_pulls` (3) at a time |
 | `sciget install <tool/version>...` | Download containers, then make a module for each, so `module load` works |
+| `sciget shell [tool/version...]` | Start a host shell session with one or more tools loaded (module or cached wrappers) |
+| `sciget add <tool/version>...` | Add tools live into the active `sciget shell` session |
+| `sciget session [list\|add\|remove]` | Inspect or modify tools in the active `sciget shell` session |
 | `sciget doctor` | Report problems, such as stopped downloads, and the commands that fix them |
 | `sciget config [get\|set\|unset\|list]` | Show and change settings |
 | `--system` (on `catalog add/remove/use/unuse` and `config set/unset`) | Change the system files in `/etc/sciget` for every user; needs root |
@@ -140,6 +145,30 @@ finds. Names in `finder_excludes`, such as `bash` and `sudo`, are never
 wrapped from a container's own folders. Wrappers call sciget by the name in
 `module_sciget` (default `sciget`, found on PATH). Run `sciget install`
 again to rebuild a module.
+
+## Sessions
+
+`sciget shell [tool/version...]` (and **Open a terminal** in the TUI) starts
+an interactive host subshell (`$SHELL`, falling back to `bash` or `sh`) with
+the selected tools ready to use:
+
+- When Lmod is available and `sciget install` has written a matching module for
+  a local container, the session loads it via `module load`.
+- Otherwise — including when Lmod is not installed or the container lives only
+  on a share such as CVMFS — sciget prepares cached wrapper scripts under
+  `cache_dir` and puts them on `PATH` without modifying `module_dir`.
+- Host tools (`git`, editors, Slurm) stay available and multiple containers can
+  be combined in one shell. Inside the session, run `sciget add <tool/version>`
+  to load another tool (or switch versions), `sciget session` to list loaded
+  tools, and `sciget session remove <tool>` to unload one. In the TUI, click
+  **+ Add to session** to stage several tools before opening the terminal.
+- The prompt shows the active session tools (set `SCIGET_DISABLE_PROMPT=1` to
+  opt out). Reserved host variables (such as `PATH`, `LD_*`, `PS1`, and
+  `APPTAINER*`) are never overwritten by container `DEPLOY_ENV_*` metadata.
+- When you need the container's own internal environment (for example its
+  Python or R installation), use **Open container shell** in the TUI or
+  `sciget apptainer shell <tool/version>`, which enters the container directly
+  with `[<tool>/<version>] Apptainer> ` in the prompt.
 
 ## System setup
 

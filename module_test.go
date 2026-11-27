@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,6 +68,26 @@ func TestWriteModule(t *testing.T) {
 			wantEnv: "setenv(\"FSLDIR\", \"/opt/fsl\")\nsetenv(\"MODE\", \"fast\")\n"},
 		{name: "bad name skipped", env: []string{"1X=a", "X-Y=b"},
 			wantSkipped: []string{`setting "1X": not a variable name`, `setting "X-Y": not a variable name`}},
+		{name: "reserved host env skipped", env: []string{
+			"LD_PRELOAD=/evil.so", "PATH=/evil", "path=/evil", "fpath=/evil", "__sciget_plan_rc=1",
+			"PS0=$(id)", "PS1=x", "RPS1=x", "FPATH=/evil", "GIT_SSH_COMMAND=evil", "APPTAINERENV_X=1",
+			"BIG_VAR=" + strings.Repeat("x", maxHostEnvValue+1), "FSLDIR=BASEPATH/opt/fsl",
+		},
+			wantEnv: "setenv(\"FSLDIR\", \"/opt/fsl\")\n",
+			wantSkipped: []string{
+				`setting "LD_PRELOAD": reserved environment variable`,
+				`setting "PATH": reserved environment variable`,
+				`setting "path": reserved environment variable`,
+				`setting "fpath": reserved environment variable`,
+				`setting "__sciget_plan_rc": reserved environment variable`,
+				`setting "PS0": reserved environment variable`,
+				`setting "PS1": reserved environment variable`,
+				`setting "RPS1": reserved environment variable`,
+				`setting "FPATH": reserved environment variable`,
+				`setting "GIT_SSH_COMMAND": reserved environment variable`,
+				`setting "APPTAINERENV_X": reserved environment variable`,
+				`setting "BIG_VAR": value too large for host environment`,
+			}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -191,5 +212,65 @@ func TestOutdatedModules(t *testing.T) {
 				t.Errorf("outdatedModules = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEnsureSessionWrappers(t *testing.T) {
+	c, _, store := localCatalog(t)
+	base := filepath.Dir(store)
+	fallbackSelf := filepath.Join(base, "fallback sciget")
+	overrideSelf := filepath.Join(base, "override sciget")
+	for _, p := range []string{fallbackSelf, overrideSelf} {
+		tag := filepath.Base(p)
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nprintf '%s:%s\\n' '"+tag+"' \"$*\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
+		"cache_dir": filepath.Join(base, "cache"), "container_dir": store,
+		"module_dir": filepath.Join(base, "modules"), "module_sciget": fallbackSelf, "finder_excludes": `["bash"]`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := readConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := commandList{Found: []string{"bet", "bash"}, Env: []string{"FSLDIR=BASEPATH/opt/fsl", "LD_PRELOAD=/bad"}}
+	dir, info, settings, err := ensureSessionWrappers(cfg, c, c.buildDate, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(info.commands, []string{"bet"}) || len(settings) != 1 || settings[0].name != "FSLDIR" {
+		t.Fatalf("commands=%v settings=%+v", info.commands, settings)
+	}
+	// Re-calling returns the same immutable directory.
+	dir2, _, _, err := ensureSessionWrappers(cfg, c, c.buildDate, list)
+	if err != nil || dir2 != dir {
+		t.Fatalf("second call dir=%q want %q, err=%v", dir2, dir, err)
+	}
+	// With SCIGET_SELF set, the wrapper invokes SCIGET_SELF.
+	cmd := exec.Command(filepath.Join(dir, "bet"), "arg1")
+	cmd.Env = append(os.Environ(), "SCIGET_SELF="+overrideSelf)
+	out, err := cmd.Output()
+	if err != nil || string(out) != "override sciget:apptainer exec -- fsl/6.0.3 bet arg1\n" {
+		t.Errorf("with SCIGET_SELF: out=%q err=%v", out, err)
+	}
+	// Without SCIGET_SELF, it falls back to module_sciget.
+	cmd2 := exec.Command(filepath.Join(dir, "bet"), "arg1")
+	cmd2.Env = mergeEnviron(os.Environ(), []string{"SCIGET_SELF="})
+	out2, err := cmd2.Output()
+	if err != nil || string(out2) != "fallback sciget:apptainer exec -- fsl/6.0.3 bet arg1\n" {
+		t.Errorf("without SCIGET_SELF: out=%q err=%v", out2, err)
+	}
+	// Catalog value containing ':' still produces a separator-free wrapper dir.
+	colonC := c
+	colonC.version = "6.0:evil"
+	colonDir, _, _, err := ensureSessionWrappers(cfg, colonC, colonC.buildDate, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsRune(colonDir, os.PathListSeparator) {
+		t.Errorf("wrapper dir %q contains PATH separator", colonDir)
 	}
 }

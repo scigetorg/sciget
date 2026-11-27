@@ -127,14 +127,18 @@ type quickFailure struct{ code int }
 
 func (q quickFailure) Error() string { return fmt.Sprintf("exit code %d", q.code) }
 
-// shellRun runs a container's shell in the terminal while Bubble Tea has
-// released it (a tea.ExecCommand). If the shell fails within check, its
-// error stays on screen until Enter, since the TUI's redraw would
-// otherwise wipe it at once.
+// shellRun runs a container's or host session's shell in the terminal while
+// Bubble Tea has released it (a tea.ExecCommand). When readyDir is set, the
+// session startup script creates <readyDir>/ready once interactive startup
+// succeeds, so any non-zero exit before readiness pauses until Enter
+// regardless of elapsed time (and any exit after readiness is treated as a
+// normal session). Without readyDir (container shells), failures within check
+// pause until Enter.
 type shellRun struct {
-	cmd   *exec.Cmd
-	name  string
-	check time.Duration
+	cmd      *exec.Cmd
+	name     string
+	check    time.Duration
+	readyDir string
 }
 
 func (r *shellRun) SetStdin(in io.Reader)   { r.cmd.Stdin = in }
@@ -142,10 +146,29 @@ func (r *shellRun) SetStdout(out io.Writer) { r.cmd.Stdout = out }
 func (r *shellRun) SetStderr(out io.Writer) { r.cmd.Stderr = out }
 
 func (r *shellRun) Run() error {
+	var readyFile string
+	if r.readyDir != "" {
+		defer os.RemoveAll(r.readyDir)
+		readyFile = filepath.Join(r.readyDir, "ready")
+		base := r.cmd.Env
+		if len(base) == 0 {
+			base = os.Environ()
+		}
+		r.cmd.Env = mergeEnviron(base, []string{"SCIGET_SHELL_READY=" + readyFile})
+	}
 	started := time.Now()
 	err := r.cmd.Run()
 	var exit *exec.ExitError
-	if !errors.As(err, &exit) || time.Since(started) >= r.check {
+	if !errors.As(err, &exit) {
+		return err
+	}
+	if readyFile != "" {
+		if _, statErr := os.Stat(readyFile); statErr == nil {
+			// The session shell started cleanly; a non-zero exit status is
+			// just the last command the user ran before exiting.
+			return err
+		}
+	} else if time.Since(started) >= r.check {
 		return err
 	}
 	fmt.Fprintf(r.cmd.Stderr, "\nsciget: the terminal in %s stopped (exit code %d). Press Enter to return.",

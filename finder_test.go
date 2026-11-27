@@ -89,6 +89,57 @@ func TestListCommands(t *testing.T) {
 	}
 }
 
+func TestListCommandsOlderBuildCache(t *testing.T) {
+	c, _, store := localCatalog(t)
+	base := filepath.Dir(store)
+	apptainer, runs := fakeFinderApptainer(t, false)
+	cacheDir := filepath.Join(base, "cache")
+	if err := writeConfig(os.Getenv("SCIGET_CONFIG"), map[string]string{
+		"cache_dir": cacheDir, "container_dir": store, "apptainer_path": apptainer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := readConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pre-populate a legacy v1 cache file under commands/ and verify v2 ignores it.
+	legacyPath := filepath.Join(cacheDir, "commands", "neuro", "fsl", "6.0.3", c.buildDate+".json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(`{"found":["stale-legacy"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An older build with known buildDate caches under its own date in commands-v2, never c.buildDate.
+	olderLoc := location{path: filepath.Join(store, "old.simg"), older: true, buildDate: "20190101"}
+	gotOlder, err := listCommands(context.Background(), cfg, c, olderLoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotOlder, finderWant) {
+		t.Errorf("gotOlder = %+v, want %+v", gotOlder, finderWant)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "commands-v2", "neuro", "fsl", "6.0.3", "20190101.json")); err != nil {
+		t.Errorf("older build cache missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "commands-v2", "neuro", "fsl", "6.0.3", c.buildDate+".json")); !os.IsNotExist(err) {
+		t.Error("older build poisoned catalog's current buildDate cache")
+	}
+
+	// An older build with unknown buildDate skips caching entirely.
+	unknownOlder := location{path: filepath.Join(store, "unknown.simg"), older: true}
+	if _, err := listCommands(context.Background(), cfg, c, unknownOlder); err != nil {
+		t.Fatal(err)
+	}
+	if runs() != 2 {
+		t.Errorf("runs = %d, want 2", runs())
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "commands-v2", "neuro", "fsl", "6.0.3", c.buildDate+".json")); !os.IsNotExist(err) {
+		t.Error("unknown older build wrote into catalog's current buildDate cache")
+	}
+}
+
 // finderWant is what the fake Apptainer's container offers.
 var finderWant = commandList{Found: []string{"bet"}, Kept: []string{"conda"}, Env: []string{"FSLDIR=BASEPATH/opt/fsl"}}
 

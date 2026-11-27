@@ -26,7 +26,7 @@ func TestLaunch(t *testing.T) {
 		t.Setenv("SCIGET_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 		m := launchModel(t)
 		m.location = notHere
-		if cmd := m.launch(1); cmd != nil || len(m.launches) != 0 || m.asking != "itksnap/4.4.0" ||
+		if cmd := m.launch("gui", 0); cmd != nil || len(m.launches) != 0 || m.asking != "itksnap/4.4.0" ||
 			m.statusFor().state != "asking" || !slices.Equal(buttonKinds(m), []string{"always", "yes", "no"}) {
 			t.Errorf("command %v, launches %v, asking %q, status %+v, buttons %v", cmd != nil, m.launches, m.asking, m.statusFor(), buttonKinds(m))
 		}
@@ -34,7 +34,7 @@ func TestLaunch(t *testing.T) {
 	t.Run("a failed check starts nothing", func(t *testing.T) {
 		m := launchModel(t)
 		m.location = "couldn't check: permission denied"
-		if cmd := m.launch(0); cmd != nil || len(m.launches) != 0 ||
+		if cmd := m.launch("terminal", 0); cmd != nil || len(m.launches) != 0 ||
 			m.statusFor().detail != "Couldn't check itksnap/4.4.0 is on this machine: permission denied" {
 			t.Errorf("command %v, launches %v, status %+v", cmd != nil, m.launches, m.statusFor())
 		}
@@ -42,7 +42,7 @@ func TestLaunch(t *testing.T) {
 	t.Run("held while checking, then started", func(t *testing.T) {
 		m := launchModel(t)
 		m.location = checking
-		if cmd := m.launch(0); cmd != nil || len(m.launches) != 0 || m.waiting == nil {
+		if cmd := m.launch("terminal", 0); cmd != nil || len(m.launches) != 0 || m.waiting == nil {
 			t.Fatalf("while checking: command %v, launches %v, waiting %v", cmd != nil, m.launches, m.waiting)
 		}
 		if cmd := m.handle(locationMsg{id: m.locID, text: onHere + " (downloaded)"}); cmd == nil ||
@@ -54,7 +54,7 @@ func TestLaunch(t *testing.T) {
 		m := launchModel(t)
 		m.location = checking
 		t.Setenv("SCIGET_CONFIG", filepath.Join(t.TempDir(), "config.json"))
-		m.launch(0)
+		m.launch("terminal", 0)
 		if cmd := m.handle(locationMsg{id: m.locID, text: notHere}); cmd != nil || len(m.launches) != 0 || m.asking != "itksnap/4.4.0" {
 			t.Errorf("command %v, launches %v, asking %q", cmd != nil, m.launches, m.asking)
 		}
@@ -63,13 +63,19 @@ func TestLaunch(t *testing.T) {
 		t.Setenv("DISPLAY", "")
 		m := launchModel(t)
 		m.s.displayStart = []string{"start-desktop"}
-		if cmd := m.launch(1); cmd != nil || m.launches[0].state != "failed" || m.launches[0].detail != "No display is set" {
+		if cmd := m.launch("gui", 0); cmd != nil || m.launches[0].state != "failed" || m.launches[0].detail != "No display is set" {
 			t.Errorf("command %v, launch %+v", cmd != nil, m.launches[0])
 		}
 	})
-	t.Run("the terminal runs the shell", func(t *testing.T) {
+	t.Run("the terminal runs the session shell", func(t *testing.T) {
 		m := launchModel(t)
-		if cmd := m.launch(0); cmd == nil || m.launches[0].action != "Terminal" || m.launches[0].state != "starting" {
+		if cmd := m.launch("terminal", 0); cmd == nil || m.launches[0].action != "Terminal" || m.launches[0].state != "starting" {
+			t.Errorf("command %v, launch %+v", cmd != nil, m.launches[0])
+		}
+	})
+	t.Run("container shell runs apptainer shell", func(t *testing.T) {
+		m := launchModel(t)
+		if cmd := m.launch("container", 0); cmd == nil || m.launches[0].action != "Container shell" || m.launches[0].state != "starting" {
 			t.Errorf("command %v, launch %+v", cmd != nil, m.launches[0])
 		}
 	})
@@ -88,11 +94,11 @@ func TestSettleDesktop(t *testing.T) {
 
 		// The display does not answer: the first launch starts the desktop,
 		// the second queues behind it.
-		m.handle(m.launch(1)())
+		m.handle(m.launch("gui", 0)())
 		if !m.desktopBusy || m.launches[0].detail != "Starting the desktop…" {
 			t.Fatalf("desktop busy %v, launch %+v", m.desktopBusy, m.launches[0])
 		}
-		if cmd := m.launch(1); cmd != nil || !slices.Equal(m.queue, []int{1, 2}) {
+		if cmd := m.launch("gui", 0); cmd != nil || !slices.Equal(m.queue, []int{1, 2}) {
 			t.Fatalf("second launch: command %v, queue %v", cmd != nil, m.queue)
 		}
 
